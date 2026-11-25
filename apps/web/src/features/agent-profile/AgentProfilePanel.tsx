@@ -65,8 +65,21 @@ function sessionLifecycleState(session: AgentSessionItem): string {
   return session.state || session.status || 'active';
 }
 
+function sessionActivityScore(s: AgentSessionItem): number {
+  if (typeof s.lastActivityAt === 'number') return s.lastActivityAt;
+  if (typeof s.lastMessageAt === 'number') return s.lastMessageAt;
+  if (typeof s.spawnedAt === 'number') return s.spawnedAt;
+  if (typeof s.createdAt === 'number') return s.createdAt;
+  if (typeof s.createdAt === 'string') {
+    const parsed = Date.parse(s.createdAt);
+    if (Number.isFinite(parsed)) return parsed;
+  }
+  return 0;
+}
+
 export function AgentProfilePanel({
   agentId,
+  activeChannelId,
   currentUserId,
   serverHttp,
   allChannels,
@@ -77,13 +90,14 @@ export function AgentProfilePanel({
   onAgentUpdated,
 }: {
   agentId: string;
+  activeChannelId?: string;
   currentUserId: string;
   serverHttp: string;
   allChannels: readonly ChannelSummary[];
   onClose: () => void;
   onOpenDm: (agentId: string) => void;
   onOpenChannel: (channelId: string) => void;
-  onOpenTerminal: (sessionId: string) => void;
+  onOpenTerminal: (sessionId: string, context?: { agentId?: string; channelId?: string }) => void;
   onAgentUpdated?: () => void;
 }) {
   const [agent, setAgent] = useState<AgentDetail | null>(null);
@@ -154,15 +168,34 @@ export function AgentProfilePanel({
     };
   }, [agentId, loadAgent]);
 
-  const primarySession: AgentSessionItem | undefined = useMemo(() => {
-    if (!agent) return undefined;
-    return (
-      agent.sessions.find((s) => {
-        const st = sessionLifecycleState(s);
-        return st !== 'closed' && st !== 'offline';
-      }) || agent.sessions[0]
-    );
-  }, [agent]);
+  const sortedSessions: AgentSessionItem[] = useMemo(() => {
+    if (!agent) return [];
+    const activeChannelSessionId = activeChannelId
+      ? agent.channels.find((c) => c.channelId === activeChannelId)?.sessionId
+      : undefined;
+    const matchesActiveChannel = (s: AgentSessionItem) =>
+      Boolean(
+        activeChannelId &&
+          (s.channelId === activeChannelId ||
+            (activeChannelSessionId && s.sessionId === activeChannelSessionId)),
+      );
+
+    return [...agent.sessions].sort((a, b) => {
+      const aMatch = matchesActiveChannel(a) ? 1 : 0;
+      const bMatch = matchesActiveChannel(b) ? 1 : 0;
+      if (aMatch !== bMatch) return bMatch - aMatch;
+
+      const aState = sessionLifecycleState(a);
+      const bState = sessionLifecycleState(b);
+      const aLive = aState !== 'closed' && aState !== 'offline' ? 1 : 0;
+      const bLive = bState !== 'closed' && bState !== 'offline' ? 1 : 0;
+      if (aLive !== bLive) return bLive - aLive;
+
+      return sessionActivityScore(b) - sessionActivityScore(a);
+    });
+  }, [agent, activeChannelId]);
+
+  const primarySession: AgentSessionItem | undefined = sortedSessions[0];
 
   const unjoinedChannels = useMemo(() => {
     if (!agent) return [];
@@ -457,8 +490,22 @@ export function AgentProfilePanel({
                     type="button"
                     className={styles.actionTile}
                     disabled={!primarySession}
-                    title={primarySession ? `接管 ${primarySession.sessionId}` : '暂无活跃会话'}
-                    onClick={() => primarySession && onOpenTerminal(primarySession.sessionId)}
+                    title={
+                      primarySession
+                        ? `接管 ${
+                            primarySession.channelName
+                              ? `#${primarySession.channelName}`
+                              : primarySession.title || primarySession.sessionId
+                          } (${primarySession.sessionId.slice(0, 8)})`
+                        : '暂无活跃会话'
+                    }
+                    onClick={() =>
+                      primarySession &&
+                      onOpenTerminal(primarySession.sessionId, {
+                        agentId: agent.id,
+                        channelId: primarySession.channelId,
+                      })
+                    }
                   >
                     <TerminalWindowIcon size={17} />
                     <span>Terminal</span>
@@ -899,14 +946,17 @@ export function AgentProfilePanel({
                       Botmux Sessions ({agent.sessions.length})
                     </div>
                     <div className={styles.sectionCard}>
-                      {agent.sessions.length === 0 ? (
+                      {sortedSessions.length === 0 ? (
                         <div className={styles.emptyBlock}>
                           <TerminalWindowIcon size={18} />
                           <span>暂无关联的 Botmux Session</span>
                         </div>
                       ) : (
-                        agent.sessions.map((s) => {
+                        sortedSessions.map((s) => {
                           const st = sessionLifecycleState(s);
+                          const isCurrentChannel = Boolean(
+                            activeChannelId && s.channelId === activeChannelId,
+                          );
                           return (
                           <div key={s.sessionId} className={styles.sessionItem}>
                             <div className={styles.sessionHeader}>
@@ -915,6 +965,7 @@ export function AgentProfilePanel({
                                   {s.channelName
                                     ? `#${s.channelName}`
                                     : s.title || s.sessionId}
+                                  {isCurrentChannel ? ' · 当前频道' : ''}
                                 </div>
                                 <div className={styles.rowValueMono}>{s.sessionId}</div>
                               </div>
@@ -932,7 +983,12 @@ export function AgentProfilePanel({
                               <Button
                                 variant="outline"
                                 size="xs"
-                                onClick={() => onOpenTerminal(s.sessionId)}
+                                onClick={() =>
+                                  onOpenTerminal(s.sessionId, {
+                                    agentId: agent.id,
+                                    channelId: s.channelId,
+                                  })
+                                }
                               >
                                 <TerminalWindowIcon size={12} />
                                 <span>Terminal</span>

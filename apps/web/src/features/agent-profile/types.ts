@@ -17,6 +17,9 @@ export interface AgentSessionItem {
   title?: string;
   workingDir?: string;
   createdAt?: string | number;
+  spawnedAt?: number;
+  lastMessageAt?: number;
+  lastActivityAt?: number;
   channelId?: string;
   channelName?: string;
   channelKind?: string;

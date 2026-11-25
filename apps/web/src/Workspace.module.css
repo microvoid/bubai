@@ -70,8 +70,14 @@
 }
 
 .details[data-pane="terminal"] {
-  --details-width: 540px;
+  --details-width: 560px;
   --details-share: 55%;
+  transition: flex-basis 180ms ease;
+}
+
+.details[data-pane="terminal"][data-expanded="true"] {
+  --details-width: 820px;
+  --details-share: 72%;
 }
 
 .terminal {

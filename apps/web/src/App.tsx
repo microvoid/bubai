@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { AgentProfilePanel } from './features/agent-profile/AgentProfilePanel';
+import { TerminalPane } from './features/terminal/TerminalPane';
 import { AppearanceControls } from './features/appearance/AppearanceControls';
 import { ResizableSidebar } from './features/channel-navigation/ResizableSidebar';
 import { SidebarFrame } from './features/channel-navigation/SidebarFrame';
@@ -66,7 +67,9 @@ interface BotmuxSession {
   botName?: string;
   cliId?: string;
   state?: string;
+  status?: string;
   title?: string;
+  workingDir?: string;
 }
 
 interface BotmuxPendingAsk {
@@ -362,6 +365,8 @@ export default function App() {
   // Agent Profile Panel
   const [selectedAgentProfileId, setSelectedAgentProfileId] = useState<string | null>(null);
   const [showArchivedAgents, setShowArchivedAgents] = useState(false);
+  const [terminalReturnAgentId, setTerminalReturnAgentId] = useState<string | null>(null);
+  const [terminalExpanded, setTerminalExpanded] = useState(false);
 
   const [creatingChannel, setCreatingChannel] = useState(false);
   const [newChannelName, setNewChannelName] = useState('');
@@ -370,10 +375,11 @@ export default function App() {
 
   // Botmux Web Terminal & History
   const [terminalSessionId, setTerminalSessionId] = useState<string | null>(null);
-  const [terminalUrl, setTerminalUrl] = useState<string | null>(null);
-  const [showSessionHistory, setShowSessionHistory] = useState(false);
-  const [sessionHistoryData, setSessionHistoryData] = useState<string | null>(null);
+  const [terminalLink, setTerminalLink] = useState<{ sessionId: string; url: string | null } | null>(null);
+  const [sessionHistory, setSessionHistory] = useState<{ sessionId: string; content: string | null } | null>(null);
   const [sessionActionBusy, setSessionActionBusy] = useState<string | null>(null);
+  const activeTerminalLink = terminalLink?.sessionId === terminalSessionId ? terminalLink : null;
+  const activeSessionHistory = sessionHistory?.sessionId === terminalSessionId ? sessionHistory : null;
 
   const wsRef = useRef<WebSocket | null>(null);
 
@@ -756,15 +762,26 @@ export default function App() {
 
   useEffect(() => {
     if (!terminalSessionId) {
-      setTerminalUrl(null);
-      setShowSessionHistory(false);
-      setSessionHistoryData(null);
+      setTerminalLink(null);
+      setSessionHistory(null);
       return;
     }
-    fetch(`${SERVER_HTTP}/api/sessions/${encodeURIComponent(terminalSessionId)}/write-link`)
+    const controller = new AbortController();
+    fetch(`${SERVER_HTTP}/api/sessions/${encodeURIComponent(terminalSessionId)}/write-link`, {
+      signal: controller.signal,
+    })
       .then((r) => r.json())
-      .then((d: { url?: string | null }) => setTerminalUrl(d.url || null))
-      .catch(() => setTerminalUrl(null));
+      .then((d: { url?: string | null }) => {
+        if (!controller.signal.aborted) {
+          setTerminalLink({ sessionId: terminalSessionId, url: d.url || null });
+        }
+      })
+      .catch(() => {
+        if (!controller.signal.aborted) {
+          setTerminalLink({ sessionId: terminalSessionId, url: null });
+        }
+      });
+    return () => controller.abort();
   }, [terminalSessionId]);
 
   const humans = participants.filter((p) => p.role === 'human');
@@ -797,13 +814,19 @@ export default function App() {
 
   const openAgentProfile = (agentId: string) => {
     setTerminalSessionId(null);
+    setTerminalReturnAgentId(null);
     setShowPinsPanel(false);
     setSelectedAgentProfileId(agentId);
   };
 
-  const openTerminalSession = (sessionId: string) => {
+  const openTerminalSession = (
+    sessionId: string,
+    context?: { agentId?: string; channelId?: string },
+  ) => {
     setSelectedAgentProfileId(null);
     setShowPinsPanel(false);
+    setSessionHistory(null);
+    setTerminalReturnAgentId(context?.agentId ?? null);
     setTerminalSessionId(sessionId);
   };
 
@@ -970,7 +993,7 @@ export default function App() {
         { method: 'POST' },
       );
       if (op === 'close') {
-        setTerminalSessionId(null);
+        setTerminalSessionId((current) => current === terminalSessionId ? null : current);
       }
     } finally {
       setSessionActionBusy(null);
@@ -979,15 +1002,23 @@ export default function App() {
 
   const handleLoadSessionHistory = async () => {
     if (!terminalSessionId) return;
-    const next = !showSessionHistory;
-    setShowSessionHistory(next);
-    if (next) {
+    if (activeSessionHistory) {
+      setSessionHistory(null);
+      return;
+    }
+
+    const request = { sessionId: terminalSessionId, content: null };
+    setSessionHistory(request);
+    let content: string;
+    try {
       const res = await fetch(
         `${SERVER_HTTP}/api/sessions/${encodeURIComponent(terminalSessionId)}/history`,
       );
-      const data = await res.json();
-      setSessionHistoryData(JSON.stringify(data, null, 2));
+      content = JSON.stringify(await res.json(), null, 2);
+    } catch {
+      content = '无法加载 Botmux 会话历史。';
     }
+    setSessionHistory((current) => current === request ? { ...request, content } : current);
   };
 
   const handleAnswerAsk = async (ask: BotmuxPendingAsk, optionKey: string) => {
@@ -1422,7 +1453,11 @@ export default function App() {
               </main>
 
               {detailPane && (
-                <div className={workspaceStyles.details} data-pane={detailPane}>
+                <div
+                  className={workspaceStyles.details}
+                  data-pane={detailPane}
+                  data-expanded={detailPane === 'terminal' && terminalExpanded ? 'true' : undefined}
+                >
                   {showPinsPanel && activeChannel && (
                     <ChannelPinsPanel
                       key={activeChannelId}
@@ -1443,6 +1478,7 @@ export default function App() {
                     <AgentProfilePanel
                       key={selectedAgentProfileId}
                       agentId={selectedAgentProfileId}
+                      activeChannelId={activeChannelId}
                       currentUserId={currentUserId}
                       serverHttp={SERVER_HTTP}
                       allChannels={channels}
@@ -1456,87 +1492,67 @@ export default function App() {
                     />
                   )}
 
-                  {/* Botmux Web Terminal & Session Controls */}
-                  {terminalSessionId && (
-                    <aside className={workspaceStyles.terminal} aria-label="Terminal">
-                      <PanelHeader
-                        icon={<TerminalWindowIcon size={16} />}
-                        title={terminalSessionId}
-                        actions={
-                          <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
-                            <Button
-                              variant="outline"
-                              size="xs"
-                              loading={sessionActionBusy === 'resume'}
-                              onClick={() => void handleSessionAction('resume')}
-                            >
-                              Resume
-                            </Button>
-                            <Button
-                              variant="outline"
-                              size="xs"
-                              loading={sessionActionBusy === 'restart'}
-                              onClick={() => void handleSessionAction('restart')}
-                            >
-                              Restart
-                            </Button>
-                            <Button
-                              variant="destructive"
-                              size="xs"
-                              loading={sessionActionBusy === 'close'}
-                              onClick={() => void handleSessionAction('close')}
-                            >
-                              Close
-                            </Button>
-                            <IconButton
-                              hint="familiar"
-                              size="xs"
-                              aria-label="Session history"
-                              title="查看 Botmux 会话历史"
-                              icon={<ClockIcon size={14} />}
-                              onClick={() => void handleLoadSessionHistory()}
-                            />
-                            <IconButton
-                              hint="familiar"
-                              size="sm"
-                              aria-label="Close terminal"
-                              icon={<XIcon size={16} />}
-                              onClick={() => setTerminalSessionId(null)}
-                            />
-                          </div>
+                  {/* Buzz-style Framed Botmux Terminal Pane */}
+                  {terminalSessionId && (() => {
+                    const activeTermSession = sessions.find(
+                      (s) => s.sessionId === terminalSessionId,
+                    );
+                    const termAgentId =
+                      activeTermSession?.larkAppId || terminalReturnAgentId || undefined;
+                    const termAgent = termAgentId
+                      ? agents.find((a) => a.id === termAgentId)
+                      : undefined;
+                    const siblingSessions = (
+                      termAgentId
+                        ? sessions.filter((s) => s.larkAppId === termAgentId)
+                        : activeTermSession
+                          ? [activeTermSession]
+                          : []
+                    ).map((s) => ({
+                      sessionId: s.sessionId,
+                      label: s.title || s.sessionId.slice(0, 8),
+                      state: s.state || s.status || 'active',
+                      workingDir: s.workingDir,
+                    }));
+
+                    return (
+                      <TerminalPane
+                        sessionId={terminalSessionId}
+                        agent={termAgent}
+                        sessionLabel={activeTermSession?.title}
+                        sessionState={
+                          activeTermSession?.state || activeTermSession?.status || 'active'
                         }
+                        workingDir={activeTermSession?.workingDir}
+                        siblingSessions={siblingSessions}
+                        terminalUrl={activeTerminalLink?.url ?? null}
+                        terminalLinkLoaded={Boolean(activeTerminalLink)}
+                        historyContent={activeSessionHistory?.content ?? null}
+                        showingHistory={Boolean(activeSessionHistory)}
+                        actionBusy={sessionActionBusy}
+                        expanded={terminalExpanded}
+                        canReturnToProfile={Boolean(terminalReturnAgentId)}
+                        onReturnToProfile={
+                          terminalReturnAgentId
+                            ? () => openAgentProfile(terminalReturnAgentId)
+                            : undefined
+                        }
+                        onOpenAgentProfile={openAgentProfile}
+                        onSelectSession={(nextSid) =>
+                          openTerminalSession(nextSid, {
+                            agentId: terminalReturnAgentId || termAgentId,
+                          })
+                        }
+                        onSessionAction={(op) => void handleSessionAction(op)}
+                        onToggleHistory={() => void handleLoadSessionHistory()}
+                        onToggleExpand={() => setTerminalExpanded((v) => !v)}
+                        onClose={() => {
+                          setTerminalSessionId(null);
+                          setTerminalReturnAgentId(null);
+                        }}
                       />
-                      {showSessionHistory ? (
-                        <pre
-                          style={{
-                            flex: 1,
-                            margin: 0,
-                            padding: 16,
-                            overflow: 'auto',
-                            fontSize: 12,
-                            fontFamily: 'var(--buzz-mono-family)',
-                            background: 'var(--bg-subtle, #0b0d12)',
-                          }}
-                        >
-                          {sessionHistoryData || 'Loading session history...'}
-                        </pre>
-                      ) : (
-                        <div style={{ flex: 1, background: '#000' }}>
-                          {terminalUrl ? (
-                            <iframe
-                              src={terminalUrl}
-                              title={terminalSessionId}
-                              style={{ width: '100%', height: '100%', border: 0 }}
-                            />
-                          ) : (
-                            <div style={{ padding: 16 }} className="text-caption text-secondary">
-                              正在加载 Botmux Web Terminal...
-                            </div>
-                          )}
-                        </div>
-                      )}
-                    </aside>
-                  )}
+                    );
+                  })()}
                 </div>
               )}
             </div>

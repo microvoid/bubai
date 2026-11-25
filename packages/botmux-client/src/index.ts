@@ -38,6 +38,9 @@ export interface BotmuxSession {
   cliId?: string;
   state?: string;
   status?: string;
+  backendType?: string;
+  queued?: boolean;
+  tuiPromptActive?: boolean;
   title?: string;
   workingDir?: string;
   createdAt?: string | number;

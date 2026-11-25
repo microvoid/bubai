@@ -19,6 +19,7 @@ import {
   messagePins,
   botmuxBindings,
   agentProfiles,
+  sidebarGroups,
   eq,
   asc,
   desc,
@@ -35,9 +36,12 @@ import {
 import {
   BotmuxClient,
   type BotmuxBot,
+  type BotmuxSession,
   type BuzzTurnContext,
   type DashboardAskAnswerRequest,
+  type TriggerResponse,
 } from '@buzz-botmux/botmux-client';
+import { readAntigravityResult } from './antigravity-result';
 
 const PORT = Number(process.env.PORT || 4000);
 const BOTMUX_ENDPOINT = process.env.BOTMUX_ENDPOINT || 'http://127.0.0.1:7891';
@@ -49,6 +53,14 @@ const CONTEXT_HISTORY_LIMIT = Math.min(
   50
 );
 const THREAD_REPLY_PREVIEW_LIMIT = 5;
+const BOTMUX_RESULT_POLL_MS = 2000;
+const BOTMUX_RESULT_GRACE_MS = 10_000;
+const BOTMUX_RESULT_TIMEOUT_MS = 30 * 60_000;
+const BOTMUX_TRIGGER_SUMMARY_PREFIX = 'triggerId: ';
+const LOCAL_BOTMUX_HOSTS = new Set(['localhost', '127.0.0.1', '[::1]']);
+const LOCAL_BOTMUX_BACKENDS = new Set(['pty', 'tmux', 'herdr', 'zellij', 'zmx']);
+const isLocalBotmux = URL.canParse(BOTMUX_ENDPOINT) &&
+  LOCAL_BOTMUX_HOSTS.has(new URL(BOTMUX_ENDPOINT).hostname);
 
 const REPLY_MODES = [
   'follow_source',
@@ -327,13 +339,19 @@ async function listChannelsWithUnread(userId: string) {
     db.select().from(channels).orderBy(asc(channels.createdAt)),
     db.select().from(channelReads).where(eq(channelReads.userId, userId)),
   ]);
-  const readMap = new Map(readRows.map((r) => [r.channelId, r.lastReadAt]));
+  const readMap = new Map(readRows.map((r) => [r.channelId, r]));
 
-  const visibleChannels = channelRows.filter((ch) => channelVisibleTo(ch, userId));
+  const visibleChannels = channelRows.filter((ch) => {
+    if (!channelVisibleTo(ch, userId)) return false;
+    const readRow = readMap.get(ch.id);
+    if (ch.kind === 'dm' && readRow?.hidden) return false;
+    return true;
+  });
 
   return Promise.all(
     visibleChannels.map(async (ch) => {
-      const lastRead = readMap.get(ch.id);
+      const readRow = readMap.get(ch.id);
+      const lastRead = readRow?.lastReadAt;
       const countWhere = lastRead
         ? and(
             eq(messages.channelId, ch.id),
@@ -350,14 +368,22 @@ async function listChannelsWithUnread(userId: string) {
         .select({ count: sql<number>`count(*)::int` })
         .from(messages)
         .where(countWhere);
+      const rawUnread = Number(row?.count ?? 0);
+      const markedUnread = Boolean(readRow?.markedUnread);
       return {
         id: ch.id,
         name: ch.name,
         topic: ch.topic,
         kind: ch.kind as 'channel' | 'dm',
         replyMode: parseReplyMode(ch.replyMode, DEFAULT_REPLY_MODE),
+        archived: Boolean(ch.archived),
+        createdByUserId: ch.createdByUserId || undefined,
         dmKey: ch.dmKey || undefined,
-        unreadCount: Number(row?.count ?? 0),
+        unreadCount: markedUnread ? Math.max(1, rawUnread) : rawUnread,
+        muted: Boolean(readRow?.muted),
+        markedUnread,
+        starred: Boolean(readRow?.starred),
+        groupId: readRow?.groupId || undefined,
         createdAt: ch.createdAt.getTime(),
       };
     })
@@ -541,55 +567,102 @@ function findMentionedBots(
   });
 }
 
-async function pollBotmuxTurn(params: {
-  messageId: string;
-  bot: BotmuxBot;
-  sessionId: string;
-  triggerId?: string;
-}) {
-  const { messageId, bot, sessionId, triggerId } = params;
-  for (let i = 0; i < 90; i += 1) {
-    await Bun.sleep(2000);
-    const res = await botmux.pollTriggerResult(sessionId, triggerId);
-    if (res.state === 'completed') {
-      const output = res.output?.content?.trim() || '（任务已完成，无文本输出）';
-      const card: MessageCardData = {
-        title: `${bot.botName} · ${sessionId}`,
-        status: 'completed',
-        summary: `Botmux turn completed (${triggerId || 'n/a'})`,
-      };
-      const [updated] = await db
-        .update(messages)
-        .set({ content: output, card })
-        .where(eq(messages.id, messageId))
-        .returning();
-      if (updated) {
-        const rx = (await getReactionsForMessages([updated.id])).get(updated.id) || [];
-        broadcast({ type: 'message.updated', payload: formatMessageRow(updated, 0, rx) });
-      }
-      const sessions = await botmux.getSessions();
-      broadcast({ type: 'sessions.updated', payload: { sessions } });
-      return;
-    }
-    if (res.state === 'failed' || res.state === 'not_found') {
-      const errText = res.error || `Botmux state: ${res.state}`;
-      const card: MessageCardData = {
-        title: `${bot.botName} · ${sessionId}`,
-        status: 'failed',
-        summary: errText,
-      };
-      const [updated] = await db
-        .update(messages)
-        .set({ content: errText, card })
-        .where(eq(messages.id, messageId))
-        .returning();
-      if (updated) {
-        const rx = (await getReactionsForMessages([updated.id])).get(updated.id) || [];
-        broadcast({ type: 'message.updated', payload: formatMessageRow(updated, 0, rx) });
-      }
-      return;
+async function reconcileBotmuxTurn(
+  row: typeof messages.$inferSelect,
+  getSessions: () => Promise<BotmuxSession[]>
+) {
+  const { botmuxSessionId: sessionId, senderAgentId: botId, channelId, card } = row;
+  const triggerId = card?.summary?.slice(BOTMUX_TRIGGER_SUMMARY_PREFIX.length);
+  if (!sessionId || !botId || !card || !triggerId) return;
+
+  const age = Date.now() - (row.updatedAt ?? row.createdAt).getTime();
+  // A transient lookup error must leave the row eligible for the next poll.
+  const result = await botmux.pollTriggerResult(sessionId, triggerId).catch(() => undefined);
+  const bot = cachedBots.find((item) => item.larkAppId === botId);
+  let content: string | undefined;
+  let status: MessageCardData['status'] = 'failed';
+
+  if (result?.state === 'completed') {
+    content = result.output?.content?.trim() || '（任务已完成，无文本输出）';
+    status = 'completed';
+  } else if (result?.state === 'interrupted') {
+    content = 'Botmux 执行已中断。';
+  } else if (
+    result?.state === 'failed' ||
+    (result?.state === 'not_found' && age >= BOTMUX_RESULT_GRACE_MS)
+  ) {
+    content = result.error || 'Botmux 未能返回本轮回复。';
+  } else if (
+    result?.state === 'running' && age >= BOTMUX_RESULT_GRACE_MS && isLocalBotmux &&
+    (!bot || bot.cliId === 'antigravity')
+  ) {
+    // In Botmux's default reply mode, Antigravity can go idle without reporting a final.
+    const session = (await getSessions()).find((item) => item.sessionId === sessionId);
+    if (
+      session?.larkAppId === botId && session.cliId === 'antigravity' &&
+      session.state === 'idle' && !session.queued && !session.tuiPromptActive &&
+      LOCAL_BOTMUX_BACKENDS.has(session.backendType ?? '')
+    ) {
+      content = await readAntigravityResult({ triggerId, botId, channelId, createdAt: row.createdAt });
+      if (content) status = 'completed';
     }
   }
+
+  if (!content && age >= BOTMUX_RESULT_TIMEOUT_MS) {
+    content = '等待 Botmux 回复超时。可打开终端查看执行情况。';
+  }
+  if (!content) return;
+
+  const [updated] = await db
+    .update(messages)
+    .set({
+      content,
+      card: {
+        title: card.title,
+        status,
+        summary: status === 'completed' ? `Botmux turn completed (${triggerId})` : content,
+      },
+    })
+    .where(and(
+      eq(messages.id, row.id),
+      eq(messages.botmuxSessionId, sessionId),
+      isNull(messages.deletedAt),
+      sql`${messages.card}->>'status' = 'running'`,
+      sql`${messages.card}->>'summary' = ${card.summary}`
+    ))
+    .returning();
+  if (updated) {
+    const reactions = (await getReactionsForMessages([updated.id])).get(updated.id) || [];
+    broadcast({ type: 'message.updated', payload: formatMessageRow(updated, 0, reactions) });
+    return true;
+  }
+}
+
+async function pollBotmuxTurns() {
+  // The placeholder carries the accepted trigger so polling can resume on restart.
+  const pending = await db.select().from(messages).where(and(
+    isNull(messages.deletedAt),
+    sql`${messages.card}->>'status' = 'running'`,
+    sql`${messages.card}->>'summary' LIKE ${`${BOTMUX_TRIGGER_SUMMARY_PREFIX}%`}`
+  ));
+  let sessions: Promise<BotmuxSession[]> | undefined;
+  const results = await Promise.allSettled(pending.map((row) =>
+    reconcileBotmuxTurn(row, () => (sessions ??= botmux.getSessions()))
+  ));
+  for (const result of results) {
+    if (result.status === 'rejected') console.error('[Server] Botmux reply writeback failed:', result.reason);
+  }
+  if (results.some((result) => result.status === 'fulfilled' && result.value)) {
+    broadcast({ type: 'sessions.updated', payload: { sessions: await (sessions ?? botmux.getSessions()) } });
+  }
+}
+
+function scheduleBotmuxResultPoll() {
+  setTimeout(() => {
+    void pollBotmuxTurns()
+      .catch((err) => console.error('[Server] Botmux reply poll failed:', err))
+      .finally(scheduleBotmuxResultPoll);
+  }, BOTMUX_RESULT_POLL_MS);
 }
 
 const app = new Hono();
@@ -603,12 +676,17 @@ app.get('/health', async (c) => {
 app.get('/api/bootstrap', async (c) => {
   const userId = c.req.query('userId') || 'u-owner';
   await syncBotmuxAndSeedDefaults();
-  const [channelList, participants, sessions, asks, botmuxStatus] = await Promise.all([
+  const [channelList, participants, sessions, asks, botmuxStatus, groupRows] = await Promise.all([
     listChannelsWithUnread(userId),
     listParticipants(),
     botmux.getSessions(),
     botmux.getPendingAsks(),
     botmux.checkHealth(),
+    db
+      .select()
+      .from(sidebarGroups)
+      .where(eq(sidebarGroups.userId, userId))
+      .orderBy(asc(sidebarGroups.createdAt)),
   ]);
   return c.json({
     channels: channelList,
@@ -616,6 +694,7 @@ app.get('/api/bootstrap', async (c) => {
     sessions,
     asks,
     botmuxStatus,
+    sidebarGroups: groupRows.map((g) => ({ id: g.id, name: g.name })),
   });
 });
 
@@ -1611,11 +1690,14 @@ Bun.serve<WsClientData>({
               senderName: senderUser?.name || senderId,
               systemPrompt: botSystemPrompt || undefined,
               context: turnContext,
-            });
+            }).catch((err: unknown): TriggerResponse => ({
+              ok: false,
+              error: err instanceof Error ? err.message : String(err),
+            }));
 
             const sessionId = triggered.target?.sessionId || existingSessionId;
-            if (!triggered.ok || !sessionId) {
-              const errMsg = triggered.error || 'Botmux trigger failed';
+            if (!triggered.ok || !sessionId || !triggered.triggerId) {
+              const errMsg = triggered.error || 'Botmux 未返回本轮派发信息。';
               const [failed] = await db
                 .update(messages)
                 .set({
@@ -1645,10 +1727,11 @@ Bun.serve<WsClientData>({
               .set({
                 botmuxSessionId: sessionId,
                 content: `已在本地 Botmux 启动会话 \`${sessionId}\`，执行中...`,
+                updatedAt: new Date(),
                 card: {
                   title: `${bot.botName} · ${sessionId}`,
                   status: 'running',
-                  summary: `triggerId: ${triggered.triggerId || 'n/a'}`,
+                  summary: `${BOTMUX_TRIGGER_SUMMARY_PREFIX}${triggered.triggerId}`,
                 },
               })
               .where(eq(messages.id, placeholder.id))
@@ -1657,13 +1740,6 @@ Bun.serve<WsClientData>({
 
             void botmux.getSessions().then((sessions) => {
               broadcast({ type: 'sessions.updated', payload: { sessions } });
-            });
-
-            void pollBotmuxTurn({
-              messageId: placeholder.id,
-              bot,
-              sessionId,
-              triggerId: triggered.triggerId,
             });
           }
         }
@@ -1680,6 +1756,8 @@ Bun.serve<WsClientData>({
     },
   },
 });
+
+scheduleBotmuxResultPoll();
 
 console.log(`[Server] Bun + Hono + PGlite server listening on http://localhost:${PORT}`);
 console.log(`[Server] Connected to Botmux at ${BOTMUX_ENDPOINT} (${cachedBots.length} real bots)`);

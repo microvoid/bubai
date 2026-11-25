@@ -1,0 +1,31 @@
+kind: E2EFixtures
+id: OrderCheckoutFixtures
+
+actors:
+  buyer:
+    auth: fixtureSession
+    accountRef: buyerUser
+  anonymous:
+    auth: none
+
+records:
+  buyerUser:
+    model: User
+    values:
+      id: user-buyer-001
+      name: 林岚
+      email: buyer@example.test
+  inStockProduct:
+    model: Product
+    values:
+      sku: SKU-BOOK-01
+      title: 分布式系统设计
+      priceCents: 9900
+      stock: 5
+  outOfStockProduct:
+    model: Product
+    values:
+      sku: SKU-LTD-99
+      title: 限量版徽章
+      priceCents: 19900
+      stock: 0

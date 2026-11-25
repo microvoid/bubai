@@ -1,0 +1,49 @@
+{
+  "schemaVersion": 1,
+  "suiteId": "OrderCheckoutE2E",
+  "runId": "sample-run",
+  "status": "passed",
+  "startedAt": "2026-11-25T16:20:00.000Z",
+  "finishedAt": "2026-11-25T16:20:03.420Z",
+  "scenarios": [
+    {
+      "id": "checkout-happy-path-ui",
+      "status": "passed",
+      "durationMs": 2610,
+      "screenshots": [
+        {
+          "stepId": "open-checkout",
+          "file": "screenshots/01-open-checkout.png",
+          "capturedAt": "2026-11-25T16:20:00.520Z"
+        },
+        {
+          "stepId": "fill-shipping",
+          "file": "screenshots/02-fill-shipping.png",
+          "capturedAt": "2026-11-25T16:20:01.080Z"
+        },
+        {
+          "stepId": "submit-order",
+          "file": "screenshots/03-submit-order.png",
+          "capturedAt": "2026-11-25T16:20:01.950Z"
+        },
+        {
+          "stepId": "verify-confirmation-ui",
+          "file": "screenshots/04-order-confirmed.png",
+          "capturedAt": "2026-11-25T16:20:02.490Z"
+        }
+      ]
+    },
+    {
+      "id": "checkout-out-of-stock-api",
+      "status": "passed",
+      "durationMs": 420,
+      "screenshots": []
+    },
+    {
+      "id": "checkout-anonymous-rejected-api",
+      "status": "passed",
+      "durationMs": 190,
+      "screenshots": []
+    }
+  ]
+}

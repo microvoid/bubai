@@ -1,0 +1,53 @@
+flowchart TD
+    classDef success fill:#e8f5e9,stroke:#2e7d32,color:#1b5e20;
+    classDef rejected fill:#ffebee,stroke:#c62828,color:#b71c1c;
+    classDef decision fill:#fff8e1,stroke:#f57f17,color:#e65100;
+
+    subgraph sg_checkout_happy_path_ui["browser: 买家在浏览器完成结算下单、支付并收到实时确认 (checkout-happy-path-ui)"]
+        start_checkout_happy_path_ui(["Actor: buyer"])
+        st_checkout_happy_path_ui_open_checkout["打开结算页并加载购物车 [navigate] (shot:01-open-checkout.png, 2 exchanges)"]
+        start_checkout_happy_path_ui --> st_checkout_happy_path_ui_open_checkout
+        st_checkout_happy_path_ui_fill_shipping["填写收货地址 [fill] (shot:02-fill-shipping.png)"]
+        st_checkout_happy_path_ui_open_checkout --> st_checkout_happy_path_ui_fill_shipping
+        st_checkout_happy_path_ui_submit_order["点击提交订单并触发支付与落库 [click] (shot:03-submit-order.png, 5 exchanges)"]
+        st_checkout_happy_path_ui_fill_shipping --> st_checkout_happy_path_ui_submit_order
+        st_checkout_happy_path_ui_receive_paid_event["前端收到订单支付成功推送 [expectEvent] (1 exchange)"]
+        st_checkout_happy_path_ui_submit_order --> st_checkout_happy_path_ui_receive_paid_event
+        st_checkout_happy_path_ui_verify_confirmation_ui["页面展示支付成功状态 [expectVisible] (shot:04-order-confirmed.png)"]
+        st_checkout_happy_path_ui_receive_paid_event --> st_checkout_happy_path_ui_verify_confirmation_ui
+        st_checkout_happy_path_ui_verify_order_persisted["核对数据库订单状态为 PAID [expectRow]"]
+        st_checkout_happy_path_ui_verify_confirmation_ui --> st_checkout_happy_path_ui_verify_order_persisted
+        end_checkout_happy_path_ui(["Passed / State Verified"])
+        class end_checkout_happy_path_ui success
+        st_checkout_happy_path_ui_verify_order_persisted --> end_checkout_happy_path_ui
+    end
+
+    subgraph sg_checkout_out_of_stock_api["api: 库存不足时拒绝下单且不写入订单或发起支付 (checkout-out-of-stock-api)"]
+        start_checkout_out_of_stock_api(["Actor: buyer"])
+        dec_checkout_out_of_stock_api_create_order_oos{"商品库存是否充足？"}
+        class dec_checkout_out_of_stock_api_create_order_oos decision
+        start_checkout_out_of_stock_api --> dec_checkout_out_of_stock_api_create_order_oos
+        st_checkout_out_of_stock_api_create_order_oos["提交缺货商品下单请求 [request] (2 exchanges)"]
+        dec_checkout_out_of_stock_api_create_order_oos -->|"库存不足"| st_checkout_out_of_stock_api_create_order_oos
+        st_checkout_out_of_stock_api_expect_oos_conflict["返回 409 OUT_OF_STOCK [expectResponse]"]
+        st_checkout_out_of_stock_api_create_order_oos --> st_checkout_out_of_stock_api_expect_oos_conflict
+        st_checkout_out_of_stock_api_verify_no_order_written["确认未落库任何订单记录 [expectRow]"]
+        st_checkout_out_of_stock_api_expect_oos_conflict --> st_checkout_out_of_stock_api_verify_no_order_written
+        end_checkout_out_of_stock_api(["Rejected / Safe Rollback"])
+        class end_checkout_out_of_stock_api rejected
+        st_checkout_out_of_stock_api_verify_no_order_written --> end_checkout_out_of_stock_api
+    end
+
+    subgraph sg_checkout_anonymous_rejected_api["api: 未登录用户下单返回 401 (checkout-anonymous-rejected-api)"]
+        start_checkout_anonymous_rejected_api(["Actor: anonymous"])
+        dec_checkout_anonymous_rejected_api_request_without_auth{"会话是否已认证？"}
+        class dec_checkout_anonymous_rejected_api_request_without_auth decision
+        start_checkout_anonymous_rejected_api --> dec_checkout_anonymous_rejected_api_request_without_auth
+        st_checkout_anonymous_rejected_api_request_without_auth["匿名调用下单接口 [request] (1 exchange)"]
+        dec_checkout_anonymous_rejected_api_request_without_auth -->|"未认证"| st_checkout_anonymous_rejected_api_request_without_auth
+        st_checkout_anonymous_rejected_api_expect_unauthenticated["返回 401 UNAUTHENTICATED [expectResponse]"]
+        st_checkout_anonymous_rejected_api_request_without_auth --> st_checkout_anonymous_rejected_api_expect_unauthenticated
+        end_checkout_anonymous_rejected_api(["Rejected / Safe Rollback"])
+        class end_checkout_anonymous_rejected_api rejected
+        st_checkout_anonymous_rejected_api_expect_unauthenticated --> end_checkout_anonymous_rejected_api
+    end

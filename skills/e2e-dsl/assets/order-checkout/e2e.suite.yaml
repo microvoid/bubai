@@ -1,0 +1,67 @@
+kind: E2ESuite
+dslVersion: 1
+id: OrderCheckoutE2E
+title: 订单结算全链路 E2E
+
+runner:
+  browser: playwright
+  api: playwright.request
+  database: sqlite
+
+environment:
+  launchMode: perScenario
+  appUrlEnv: E2E_APP_URL
+  locale: zh-CN
+  timezone: Asia/Shanghai
+  database:
+    engine: sqlite
+    urlEnv: DATABASE_URL
+    isolation: perScenario
+    fixtures: ./fixtures/base.yaml
+
+participants:
+  - id: user
+    label: 买家 (Browser)
+    type: actor
+  - id: web
+    label: Web 前端
+    type: frontend
+  - id: gateway
+    label: API 网关
+    type: service
+  - id: orderService
+    label: 订单服务
+    type: service
+  - id: paymentApi
+    label: 第三方支付
+    type: external
+  - id: db
+    label: 业务数据库
+    type: database
+
+recording:
+  outputDir: ./runs
+  screenshots:
+    enabled: true
+    mode: onStep
+    format: png
+    fullPage: false
+  trace:
+    enabled: true
+    protocols: [http, ws, rpc, event, db]
+    captureBodies: true
+    redactHeaders: [authorization, cookie, x-api-key]
+  mock:
+    enabled: true
+    format: e2e-cassette-v1
+    matchBy: [protocol, method, path, query, bodySubset]
+
+diagrams:
+  sequence: ./diagrams/sequence.mmd
+  flow: ./diagrams/flow.mmd
+
+suites:
+  browser:
+    $include: ./scenarios/checkout-ui.yaml
+  api:
+    $include: ./scenarios/checkout-api.yaml

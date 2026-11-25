@@ -1,0 +1,99 @@
+- id: checkout-happy-path-ui
+  title: 买家在浏览器完成结算下单、支付并收到实时确认
+  actorRef: buyer
+  outcome: success
+  tags: [smoke, checkout, browser]
+  entryParticipant: web
+  steps:
+    - id: open-checkout
+      title: 打开结算页并加载购物车
+      navigate:
+        route: /checkout
+      screenshot: 01-open-checkout.png
+      exchanges:
+        - from: web
+          to: gateway
+          protocol: http
+          operation: GET /api/cart
+          status: 200
+        - from: gateway
+          to: orderService
+          protocol: rpc
+          operation: CartService.GetCart
+          status: ok
+
+    - id: fill-shipping
+      title: 填写收货地址
+      fill:
+        target:
+          role: textbox
+          name: 收货地址
+        value: 上海市浦东新区张江高科技园区 88 号
+      screenshot: 02-fill-shipping.png
+
+    - id: submit-order
+      title: 点击提交订单并触发支付与落库
+      click:
+        role: button
+        name: 提交订单
+      screenshot: 03-submit-order.png
+      exchanges:
+        - from: web
+          to: gateway
+          protocol: http
+          operation: POST /api/orders
+          status: 201
+        - from: gateway
+          to: orderService
+          protocol: rpc
+          operation: OrderService.CreateOrder
+          status: ok
+        - from: orderService
+          to: db
+          protocol: db
+          operation: INSERT orders
+          status: ok
+        - from: orderService
+          to: paymentApi
+          protocol: http
+          operation: POST /v1/charges
+          status: 200
+        - from: orderService
+          to: db
+          protocol: db
+          operation: UPDATE orders
+          status: ok
+
+    - id: receive-paid-event
+      title: 前端收到订单支付成功推送
+      expectEvent:
+        channel: orders
+        event: order.paid
+        matching:
+          sku: $fixtures.inStockProduct.sku
+          status: PAID
+      exchanges:
+        - from: orderService
+          to: web
+          protocol: ws
+          operation: WS order.paid
+          status: ok
+
+    - id: verify-confirmation-ui
+      title: 页面展示支付成功状态
+      expectVisible:
+        role: heading
+        name: 支付成功
+      screenshot: 04-order-confirmed.png
+
+    - id: verify-order-persisted
+      title: 核对数据库订单状态为 PAID
+      expectRow:
+        model: Order
+        where:
+          userId: $fixtures.buyerUser.id
+          sku: $fixtures.inStockProduct.sku
+        count: 1
+        matches:
+          status: PAID
+          amountCents: 9900

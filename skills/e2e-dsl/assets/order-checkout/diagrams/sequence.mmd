@@ -1,0 +1,42 @@
+sequenceDiagram
+    autonumber
+    actor user as 买家 (Browser)
+    participant web as Web 前端
+    participant gateway as API 网关
+    participant orderService as 订单服务
+    participant paymentApi as 第三方支付
+    participant db as 业务数据库
+
+    Note over user,db: [browser] checkout-happy-path-ui — 买家在浏览器完成结算下单、支付并收到实时确认 (SUCCESS)
+    user->>web: 打开结算页并加载购物车 [shot: 01-open-checkout.png]
+    web->>gateway: [HTTP] GET /api/cart
+    gateway-->>web: 200
+    gateway->>orderService: [RPC] CartService.GetCart
+    orderService-->>gateway: ok
+    user->>web: 填写收货地址 [shot: 02-fill-shipping.png]
+    user->>web: 点击提交订单并触发支付与落库 [shot: 03-submit-order.png]
+    web->>gateway: [HTTP] POST /api/orders
+    gateway-->>web: 201
+    gateway->>orderService: [RPC] OrderService.CreateOrder
+    orderService-->>gateway: ok
+    orderService->>db: [DB] INSERT orders
+    db-->>orderService: ok
+    orderService->>paymentApi: [HTTP] POST /v1/charges
+    paymentApi-->>orderService: 200
+    orderService->>db: [DB] UPDATE orders
+    db-->>orderService: ok
+    orderService->>web: [WS] WS order.paid
+    web-->>orderService: ok
+    user->>web: 页面展示支付成功状态 [shot: 04-order-confirmed.png]
+
+    Note over user,db: [api] checkout-out-of-stock-api — 库存不足时拒绝下单且不写入订单或发起支付 (REJECTED)
+    user->>gateway: [HTTP] POST /api/orders
+    gateway->>orderService: [RPC] OrderService.CreateOrder
+    orderService-->>gateway: OUT_OF_STOCK
+    orderService->>db: [DB] SELECT products
+    db-->>orderService: ok
+    gateway-->>user: 409
+
+    Note over user,db: [api] checkout-anonymous-rejected-api — 未登录用户下单返回 401 (REJECTED)
+    user->>gateway: [HTTP] POST /api/orders
+    gateway-->>user: 401

@@ -1,0 +1,365 @@
+{
+  "schemaVersion": 1,
+  "suiteId": "OrderCheckoutE2E",
+  "runId": "sample-run",
+  "entries": [
+    {
+      "seq": 1,
+      "scenarioId": "checkout-happy-path-ui",
+      "stepId": "open-checkout",
+      "from": "web",
+      "to": "gateway",
+      "protocol": "http",
+      "operation": "GET /api/cart",
+      "timestamp": "2026-11-25T16:20:00.120Z",
+      "durationMs": 22,
+      "request": {
+        "method": "GET",
+        "url": "/api/cart",
+        "headers": {
+          "accept": "application/json",
+          "authorization": "<REDACTED>"
+        },
+        "query": {},
+        "body": null
+      },
+      "response": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json"
+        },
+        "body": {
+          "items": [
+            {
+              "sku": "SKU-BOOK-01",
+              "title": "分布式系统设计",
+              "qty": 1,
+              "priceCents": 9900
+            }
+          ],
+          "totalCents": 9900
+        }
+      },
+      "stateDiff": null
+    },
+    {
+      "seq": 2,
+      "scenarioId": "checkout-happy-path-ui",
+      "stepId": "open-checkout",
+      "from": "gateway",
+      "to": "orderService",
+      "protocol": "rpc",
+      "operation": "CartService.GetCart",
+      "timestamp": "2026-11-25T16:20:00.125Z",
+      "durationMs": 11,
+      "request": {
+        "service": "CartService",
+        "method": "GetCart",
+        "params": {
+          "userId": "user-buyer-001"
+        }
+      },
+      "response": {
+        "status": "ok",
+        "result": {
+          "items": [
+            {
+              "sku": "SKU-BOOK-01",
+              "qty": 1,
+              "priceCents": 9900
+            }
+          ],
+          "totalCents": 9900
+        }
+      },
+      "stateDiff": null
+    },
+    {
+      "seq": 3,
+      "scenarioId": "checkout-happy-path-ui",
+      "stepId": "submit-order",
+      "from": "web",
+      "to": "gateway",
+      "protocol": "http",
+      "operation": "POST /api/orders",
+      "timestamp": "2026-11-25T16:20:01.300Z",
+      "durationMs": 145,
+      "request": {
+        "method": "POST",
+        "url": "/api/orders",
+        "headers": {
+          "content-type": "application/json",
+          "authorization": "<REDACTED>"
+        },
+        "query": {},
+        "body": {
+          "sku": "SKU-BOOK-01",
+          "qty": 1,
+          "shippingAddress": "上海市浦东新区张江高科技园区 88 号"
+        }
+      },
+      "response": {
+        "status": 201,
+        "headers": {
+          "content-type": "application/json"
+        },
+        "body": {
+          "orderId": "ord-20261125-001",
+          "sku": "SKU-BOOK-01",
+          "status": "PAID",
+          "amountCents": 9900
+        }
+      },
+      "stateDiff": null
+    },
+    {
+      "seq": 4,
+      "scenarioId": "checkout-happy-path-ui",
+      "stepId": "submit-order",
+      "from": "gateway",
+      "to": "orderService",
+      "protocol": "rpc",
+      "operation": "OrderService.CreateOrder",
+      "timestamp": "2026-11-25T16:20:01.310Z",
+      "durationMs": 128,
+      "request": {
+        "service": "OrderService",
+        "method": "CreateOrder",
+        "params": {
+          "userId": "user-buyer-001",
+          "sku": "SKU-BOOK-01",
+          "qty": 1,
+          "shippingAddress": "上海市浦东新区张江高科技园区 88 号"
+        }
+      },
+      "response": {
+        "status": "ok",
+        "result": {
+          "orderId": "ord-20261125-001",
+          "status": "PAID",
+          "amountCents": 9900
+        }
+      },
+      "stateDiff": null
+    },
+    {
+      "seq": 5,
+      "scenarioId": "checkout-happy-path-ui",
+      "stepId": "submit-order",
+      "from": "orderService",
+      "to": "db",
+      "protocol": "db",
+      "operation": "INSERT orders",
+      "timestamp": "2026-11-25T16:20:01.325Z",
+      "durationMs": 6,
+      "request": {
+        "model": "Order",
+        "action": "INSERT",
+        "data": {
+          "id": "ord-20261125-001",
+          "userId": "user-buyer-001",
+          "sku": "SKU-BOOK-01",
+          "amountCents": 9900,
+          "status": "PENDING"
+        }
+      },
+      "response": {
+        "status": "ok",
+        "affected": 1
+      },
+      "stateDiff": {
+        "before": null,
+        "after": {
+          "id": "ord-20261125-001",
+          "status": "PENDING"
+        }
+      }
+    },
+    {
+      "seq": 6,
+      "scenarioId": "checkout-happy-path-ui",
+      "stepId": "submit-order",
+      "from": "orderService",
+      "to": "paymentApi",
+      "protocol": "http",
+      "operation": "POST /v1/charges",
+      "timestamp": "2026-11-25T16:20:01.340Z",
+      "durationMs": 82,
+      "request": {
+        "method": "POST",
+        "url": "/v1/charges",
+        "headers": {
+          "content-type": "application/json",
+          "x-api-key": "<REDACTED>"
+        },
+        "query": {},
+        "body": {
+          "orderId": "ord-20261125-001",
+          "amountCents": 9900,
+          "currency": "CNY"
+        }
+      },
+      "response": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json"
+        },
+        "body": {
+          "chargeId": "ch-9001",
+          "paid": true
+        }
+      },
+      "stateDiff": null
+    },
+    {
+      "seq": 7,
+      "scenarioId": "checkout-happy-path-ui",
+      "stepId": "submit-order",
+      "from": "orderService",
+      "to": "db",
+      "protocol": "db",
+      "operation": "UPDATE orders",
+      "timestamp": "2026-11-25T16:20:01.425Z",
+      "durationMs": 5,
+      "request": {
+        "model": "Order",
+        "action": "UPDATE",
+        "where": {
+          "id": "ord-20261125-001"
+        },
+        "data": {
+          "status": "PAID",
+          "chargeId": "ch-9001"
+        }
+      },
+      "response": {
+        "status": "ok",
+        "affected": 1
+      },
+      "stateDiff": {
+        "before": {
+          "status": "PENDING"
+        },
+        "after": {
+          "status": "PAID",
+          "chargeId": "ch-9001"
+        }
+      }
+    },
+    {
+      "seq": 8,
+      "scenarioId": "checkout-happy-path-ui",
+      "stepId": "receive-paid-event",
+      "from": "orderService",
+      "to": "web",
+      "protocol": "ws",
+      "operation": "WS order.paid",
+      "timestamp": "2026-11-25T16:20:01.450Z",
+      "durationMs": 3,
+      "request": {
+        "channel": "orders",
+        "event": "order.paid",
+        "payload": {
+          "orderId": "ord-20261125-001",
+          "sku": "SKU-BOOK-01",
+          "status": "PAID"
+        }
+      },
+      "response": {
+        "status": "ok",
+        "ack": true
+      },
+      "stateDiff": null
+    },
+    {
+      "seq": 9,
+      "scenarioId": "checkout-out-of-stock-api",
+      "stepId": "create-order-oos",
+      "from": "gateway",
+      "to": "orderService",
+      "protocol": "rpc",
+      "operation": "OrderService.CreateOrder",
+      "timestamp": "2026-11-25T16:20:02.900Z",
+      "durationMs": 14,
+      "request": {
+        "service": "OrderService",
+        "method": "CreateOrder",
+        "params": {
+          "userId": "user-buyer-001",
+          "sku": "SKU-LTD-99",
+          "qty": 1,
+          "shippingAddress": "上海市浦东新区张江高科技园区 88 号"
+        }
+      },
+      "response": {
+        "status": "OUT_OF_STOCK",
+        "error": {
+          "code": "OUT_OF_STOCK",
+          "message": "insufficient stock for SKU-LTD-99"
+        }
+      },
+      "stateDiff": null
+    },
+    {
+      "seq": 10,
+      "scenarioId": "checkout-out-of-stock-api",
+      "stepId": "create-order-oos",
+      "from": "orderService",
+      "to": "db",
+      "protocol": "db",
+      "operation": "SELECT products",
+      "timestamp": "2026-11-25T16:20:02.905Z",
+      "durationMs": 3,
+      "request": {
+        "model": "Product",
+        "action": "SELECT",
+        "where": {
+          "sku": "SKU-LTD-99"
+        }
+      },
+      "response": {
+        "status": "ok",
+        "rows": [
+          {
+            "sku": "SKU-LTD-99",
+            "stock": 0
+          }
+        ]
+      },
+      "stateDiff": null
+    },
+    {
+      "seq": 11,
+      "scenarioId": "checkout-anonymous-rejected-api",
+      "stepId": "request-without-auth",
+      "from": "user",
+      "to": "gateway",
+      "protocol": "http",
+      "operation": "POST /api/orders",
+      "timestamp": "2026-11-25T16:20:03.210Z",
+      "durationMs": 4,
+      "request": {
+        "method": "POST",
+        "url": "/api/orders",
+        "headers": {
+          "content-type": "application/json"
+        },
+        "query": {},
+        "body": {
+          "sku": "SKU-BOOK-01",
+          "qty": 1
+        }
+      },
+      "response": {
+        "status": 401,
+        "headers": {
+          "content-type": "application/json"
+        },
+        "body": {
+          "code": "UNAUTHENTICATED"
+        }
+      },
+      "stateDiff": null
+    }
+  ]
+}

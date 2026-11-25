@@ -1,0 +1,4 @@
+interface:
+  display_name: "E2E DSL 与全链路录制"
+  short_description: "设计并校验 E2E DSL、自动生成时序图与流程图，并在每次 E2E 运行时落盘交互截图与可完整 Mock 回放的跨服务数据流转"
+  default_prompt: "用 $e2e-dsl 为当前需求落地 E2E DSL、时序图、流程图，并配置交互截图与可回放的跨服务数据流转录制。"

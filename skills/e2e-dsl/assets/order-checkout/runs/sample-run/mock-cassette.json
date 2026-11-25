@@ -1,0 +1,321 @@
+{
+  "schemaVersion": 1,
+  "format": "e2e-cassette-v1",
+  "suiteId": "OrderCheckoutE2E",
+  "sourceRunId": "sample-run",
+  "scenarios": {
+    "checkout-happy-path-ui": {
+      "interactions": [
+        {
+          "seq": 1,
+          "stepId": "open-checkout",
+          "from": "web",
+          "to": "gateway",
+          "protocol": "http",
+          "operation": "GET /api/cart",
+          "match": {
+            "method": "GET",
+            "url": "/api/cart",
+            "query": {},
+            "body": null
+          },
+          "reply": {
+            "status": 200,
+            "headers": {
+              "content-type": "application/json"
+            },
+            "body": {
+              "items": [
+                {
+                  "sku": "SKU-BOOK-01",
+                  "title": "分布式系统设计",
+                  "qty": 1,
+                  "priceCents": 9900
+                }
+              ],
+              "totalCents": 9900
+            }
+          }
+        },
+        {
+          "seq": 2,
+          "stepId": "open-checkout",
+          "from": "gateway",
+          "to": "orderService",
+          "protocol": "rpc",
+          "operation": "CartService.GetCart",
+          "match": {
+            "service": "CartService",
+            "method": "GetCart",
+            "params": {
+              "userId": "user-buyer-001"
+            }
+          },
+          "reply": {
+            "status": "ok",
+            "result": {
+              "items": [
+                {
+                  "sku": "SKU-BOOK-01",
+                  "qty": 1,
+                  "priceCents": 9900
+                }
+              ],
+              "totalCents": 9900
+            }
+          }
+        },
+        {
+          "seq": 3,
+          "stepId": "submit-order",
+          "from": "web",
+          "to": "gateway",
+          "protocol": "http",
+          "operation": "POST /api/orders",
+          "match": {
+            "method": "POST",
+            "url": "/api/orders",
+            "query": {},
+            "body": {
+              "sku": "SKU-BOOK-01",
+              "qty": 1,
+              "shippingAddress": "上海市浦东新区张江高科技园区 88 号"
+            }
+          },
+          "reply": {
+            "status": 201,
+            "headers": {
+              "content-type": "application/json"
+            },
+            "body": {
+              "orderId": "ord-20261125-001",
+              "sku": "SKU-BOOK-01",
+              "status": "PAID",
+              "amountCents": 9900
+            }
+          }
+        },
+        {
+          "seq": 4,
+          "stepId": "submit-order",
+          "from": "gateway",
+          "to": "orderService",
+          "protocol": "rpc",
+          "operation": "OrderService.CreateOrder",
+          "match": {
+            "service": "OrderService",
+            "method": "CreateOrder",
+            "params": {
+              "userId": "user-buyer-001",
+              "sku": "SKU-BOOK-01",
+              "qty": 1,
+              "shippingAddress": "上海市浦东新区张江高科技园区 88 号"
+            }
+          },
+          "reply": {
+            "status": "ok",
+            "result": {
+              "orderId": "ord-20261125-001",
+              "status": "PAID",
+              "amountCents": 9900
+            }
+          }
+        },
+        {
+          "seq": 5,
+          "stepId": "submit-order",
+          "from": "orderService",
+          "to": "db",
+          "protocol": "db",
+          "operation": "INSERT orders",
+          "match": {
+            "model": "Order",
+            "action": "INSERT",
+            "data": {
+              "id": "ord-20261125-001",
+              "userId": "user-buyer-001",
+              "sku": "SKU-BOOK-01",
+              "amountCents": 9900,
+              "status": "PENDING"
+            }
+          },
+          "reply": {
+            "status": "ok",
+            "affected": 1
+          },
+          "stateDiff": {
+            "before": null,
+            "after": {
+              "id": "ord-20261125-001",
+              "status": "PENDING"
+            }
+          }
+        },
+        {
+          "seq": 6,
+          "stepId": "submit-order",
+          "from": "orderService",
+          "to": "paymentApi",
+          "protocol": "http",
+          "operation": "POST /v1/charges",
+          "match": {
+            "method": "POST",
+            "url": "/v1/charges",
+            "query": {},
+            "body": {
+              "orderId": "ord-20261125-001",
+              "amountCents": 9900,
+              "currency": "CNY"
+            }
+          },
+          "reply": {
+            "status": 200,
+            "headers": {
+              "content-type": "application/json"
+            },
+            "body": {
+              "chargeId": "ch-9001",
+              "paid": true
+            }
+          }
+        },
+        {
+          "seq": 7,
+          "stepId": "submit-order",
+          "from": "orderService",
+          "to": "db",
+          "protocol": "db",
+          "operation": "UPDATE orders",
+          "match": {
+            "model": "Order",
+            "action": "UPDATE",
+            "where": {
+              "id": "ord-20261125-001"
+            },
+            "data": {
+              "status": "PAID",
+              "chargeId": "ch-9001"
+            }
+          },
+          "reply": {
+            "status": "ok",
+            "affected": 1
+          },
+          "stateDiff": {
+            "before": {
+              "status": "PENDING"
+            },
+            "after": {
+              "status": "PAID",
+              "chargeId": "ch-9001"
+            }
+          }
+        },
+        {
+          "seq": 8,
+          "stepId": "receive-paid-event",
+          "from": "orderService",
+          "to": "web",
+          "protocol": "ws",
+          "operation": "WS order.paid",
+          "match": {
+            "channel": "orders",
+            "event": "order.paid",
+            "payload": {
+              "orderId": "ord-20261125-001",
+              "sku": "SKU-BOOK-01",
+              "status": "PAID"
+            }
+          },
+          "reply": {
+            "status": "ok",
+            "ack": true
+          }
+        }
+      ]
+    },
+    "checkout-out-of-stock-api": {
+      "interactions": [
+        {
+          "seq": 9,
+          "stepId": "create-order-oos",
+          "from": "gateway",
+          "to": "orderService",
+          "protocol": "rpc",
+          "operation": "OrderService.CreateOrder",
+          "match": {
+            "service": "OrderService",
+            "method": "CreateOrder",
+            "params": {
+              "userId": "user-buyer-001",
+              "sku": "SKU-LTD-99",
+              "qty": 1,
+              "shippingAddress": "上海市浦东新区张江高科技园区 88 号"
+            }
+          },
+          "reply": {
+            "status": "OUT_OF_STOCK",
+            "error": {
+              "code": "OUT_OF_STOCK",
+              "message": "insufficient stock for SKU-LTD-99"
+            }
+          }
+        },
+        {
+          "seq": 10,
+          "stepId": "create-order-oos",
+          "from": "orderService",
+          "to": "db",
+          "protocol": "db",
+          "operation": "SELECT products",
+          "match": {
+            "model": "Product",
+            "action": "SELECT",
+            "where": {
+              "sku": "SKU-LTD-99"
+            }
+          },
+          "reply": {
+            "status": "ok",
+            "rows": [
+              {
+                "sku": "SKU-LTD-99",
+                "stock": 0
+              }
+            ]
+          }
+        }
+      ]
+    },
+    "checkout-anonymous-rejected-api": {
+      "interactions": [
+        {
+          "seq": 11,
+          "stepId": "request-without-auth",
+          "from": "user",
+          "to": "gateway",
+          "protocol": "http",
+          "operation": "POST /api/orders",
+          "match": {
+            "method": "POST",
+            "url": "/api/orders",
+            "query": {},
+            "body": {
+              "sku": "SKU-BOOK-01",
+              "qty": 1
+            }
+          },
+          "reply": {
+            "status": 401,
+            "headers": {
+              "content-type": "application/json"
+            },
+            "body": {
+              "code": "UNAUTHENTICATED"
+            }
+          }
+        }
+      ]
+    }
+  }
+}

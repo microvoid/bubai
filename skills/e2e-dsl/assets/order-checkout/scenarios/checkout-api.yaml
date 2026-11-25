@@ -1,0 +1,78 @@
+- id: checkout-out-of-stock-api
+  title: 库存不足时拒绝下单且不写入订单或发起支付
+  actorRef: buyer
+  outcome: rejected
+  tags: [checkout, inventory, api]
+  entryParticipant: gateway
+  steps:
+    - id: create-order-oos
+      title: 提交缺货商品下单请求
+      branch:
+        label: 商品库存是否充足？
+        outcome: 库存不足
+      request:
+        method: POST
+        path: /api/orders
+        body:
+          sku: $fixtures.outOfStockProduct.sku
+          qty: 1
+          shippingAddress: 上海市浦东新区张江高科技园区 88 号
+      exchanges:
+        - from: gateway
+          to: orderService
+          protocol: rpc
+          operation: OrderService.CreateOrder
+          status: OUT_OF_STOCK
+        - from: orderService
+          to: db
+          protocol: db
+          operation: SELECT products
+          status: ok
+
+    - id: expect-oos-conflict
+      title: 返回 409 OUT_OF_STOCK
+      expectResponse:
+        status: 409
+        body:
+          code: OUT_OF_STOCK
+
+    - id: verify-no-order-written
+      title: 确认未落库任何订单记录
+      expectRow:
+        model: Order
+        where:
+          userId: $fixtures.buyerUser.id
+          sku: $fixtures.outOfStockProduct.sku
+        count: 0
+
+- id: checkout-anonymous-rejected-api
+  title: 未登录用户下单返回 401
+  actorRef: anonymous
+  outcome: rejected
+  tags: [auth, api]
+  entryParticipant: gateway
+  steps:
+    - id: request-without-auth
+      title: 匿名调用下单接口
+      branch:
+        label: 会话是否已认证？
+        outcome: 未认证
+      request:
+        method: POST
+        path: /api/orders
+        body:
+          sku: $fixtures.inStockProduct.sku
+          qty: 1
+      exchanges:
+        - from: user
+          to: gateway
+          protocol: http
+          operation: POST /api/orders
+          status: 401
+
+    - id: expect-unauthenticated
+      title: 返回 401 UNAUTHENTICATED
+      expectResponse:
+        status: 401
+        body:
+          code: UNAUTHENTICATED

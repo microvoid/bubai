@@ -1,0 +1,30 @@
+@reference "../../design-system/styles/globals.css";
+
+.emojiPicker {
+  border: 0;
+  padding: 0;
+  margin: 0;
+  min-width: 0;
+}
+.emojiContent {
+  --picker-panel-height: min(26rem, 55vh);
+  display: flex;
+  flex-direction: column;
+  max-height: calc(var(--available-height, 60vh) - 2px);
+}
+.emojiMart {
+  position: relative;
+  height: var(--emoji-picker-height, var(--picker-panel-height, min(21.75rem, 40vh)));
+  min-height: 0;
+  width: 352px;
+  max-width: calc(100vw - 2rem);
+}
+.emojiMart > div {
+  height: 100%;
+}
+.emojiMart em-emoji-picker {
+  width: 100%;
+  height: 100%;
+  --border-radius: 0;
+  --shadow: none;
+}

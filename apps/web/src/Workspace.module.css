@@ -1,0 +1,113 @@
+.shell {
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+  height: 100dvh;
+  overflow: hidden;
+  background: var(--surface-base);
+  color: var(--text-standard);
+}
+
+.titleBar {
+  display: grid;
+  min-height: 2.75rem;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-items: center;
+  padding-inline: var(--space-4);
+}
+
+.titleBar > * {
+  width: 100%;
+}
+
+.workspace {
+  display: flex;
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  padding-inline: var(--space-panel-gap);
+  padding-block-end: var(--space-panel-gap);
+}
+
+.columns,
+.conversationLayout,
+.conversation {
+  position: relative;
+  display: flex;
+  min-width: 0;
+  min-height: 0;
+}
+
+.columns {
+  height: 100%;
+}
+
+.conversationLayout {
+  flex: 1;
+  container: workspace-conversation / inline-size;
+}
+
+.conversation {
+  flex: 1;
+  flex-direction: column;
+}
+
+.details {
+  --details-width: 22rem;
+  --details-share: 40%;
+  display: flex;
+  flex: 0 0 min(var(--details-width), var(--details-share), calc(100% - 20rem));
+  min-width: 0;
+  min-height: 0;
+  border-inline-start: 1px solid var(--border-standard);
+  background: var(--surface-panel);
+}
+
+.details[data-pane="agent"] {
+  --details-width: 400px;
+  --details-share: 48%;
+}
+
+.details[data-pane="terminal"] {
+  --details-width: 540px;
+  --details-share: 55%;
+}
+
+.terminal {
+  display: flex;
+  flex: 1;
+  min-width: 0;
+  flex-direction: column;
+}
+
+@container workspace-conversation (width < 42rem) {
+  .details {
+    position: absolute;
+    inset-block: 0;
+    inset-inline-end: 0;
+    width: min(var(--details-width), 100%);
+    z-index: 5;
+    box-shadow: var(--shadow-panel);
+  }
+}
+
+@media (max-width: 650px) {
+  .columns {
+    container: workspace-conversation / inline-size;
+  }
+
+  .conversationLayout {
+    display: contents;
+    container: none;
+  }
+}
+
+.navigationError {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding-inline: var(--space-4);
+  color: var(--text-danger);
+  border-bottom: 1px solid var(--border-subtle);
+}

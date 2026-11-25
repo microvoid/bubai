@@ -24,6 +24,7 @@ CREATE TABLE IF NOT EXISTS channels (
   visibility text NOT NULL DEFAULT 'public',
   kind text NOT NULL DEFAULT 'channel',
   reply_mode text NOT NULL DEFAULT 'follow_source',
+  archived boolean NOT NULL DEFAULT false,
   dm_key text UNIQUE,
   created_by_user_id text REFERENCES users(id) ON DELETE SET NULL,
   created_at timestamptz NOT NULL DEFAULT now()
@@ -31,14 +32,32 @@ CREATE TABLE IF NOT EXISTS channels (
 
 ALTER TABLE channels ADD COLUMN IF NOT EXISTS dm_key text UNIQUE;
 ALTER TABLE channels ADD COLUMN IF NOT EXISTS reply_mode text NOT NULL DEFAULT 'follow_source';
+ALTER TABLE channels ADD COLUMN IF NOT EXISTS archived boolean NOT NULL DEFAULT false;
 
 CREATE TABLE IF NOT EXISTS channel_reads (
   channel_id uuid NOT NULL REFERENCES channels(id) ON DELETE CASCADE,
   user_id text NOT NULL REFERENCES users(id) ON DELETE CASCADE,
   last_read_at timestamptz NOT NULL DEFAULT now(),
   muted boolean NOT NULL DEFAULT false,
+  hidden boolean NOT NULL DEFAULT false,
+  marked_unread boolean NOT NULL DEFAULT false,
+  starred boolean NOT NULL DEFAULT false,
+  group_id text,
   PRIMARY KEY (channel_id, user_id)
 );
+
+ALTER TABLE channel_reads ADD COLUMN IF NOT EXISTS hidden boolean NOT NULL DEFAULT false;
+ALTER TABLE channel_reads ADD COLUMN IF NOT EXISTS marked_unread boolean NOT NULL DEFAULT false;
+ALTER TABLE channel_reads ADD COLUMN IF NOT EXISTS starred boolean NOT NULL DEFAULT false;
+ALTER TABLE channel_reads ADD COLUMN IF NOT EXISTS group_id text;
+
+CREATE TABLE IF NOT EXISTS sidebar_groups (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  user_id text NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  name text NOT NULL,
+  created_at timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS sidebar_groups_user_idx ON sidebar_groups (user_id);
 
 CREATE TABLE IF NOT EXISTS thread_reads (
   channel_id uuid NOT NULL REFERENCES channels(id) ON DELETE CASCADE,

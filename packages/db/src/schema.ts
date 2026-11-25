@@ -43,6 +43,7 @@ export const channels = pgTable(
     visibility: text('visibility').notNull().default('public'),
     kind: text('kind').notNull().default('channel'),
     replyMode: text('reply_mode').notNull().default('follow_source'),
+    archived: boolean('archived').notNull().default(false),
     dmKey: text('dm_key'),
     createdByUserId: text('created_by_user_id').references(() => users.id, {
       onDelete: 'set null',
@@ -63,8 +64,25 @@ export const channelReads = pgTable(
       .references(() => users.id, { onDelete: 'cascade' }),
     lastReadAt: timestamp('last_read_at', { withTimezone: true }).notNull().defaultNow(),
     muted: boolean('muted').notNull().default(false),
+    hidden: boolean('hidden').notNull().default(false),
+    markedUnread: boolean('marked_unread').notNull().default(false),
+    starred: boolean('starred').notNull().default(false),
+    groupId: text('group_id'),
   },
   (t) => [primaryKey({ columns: [t.channelId, t.userId] })]
+);
+
+export const sidebarGroups = pgTable(
+  'sidebar_groups',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    userId: text('user_id')
+      .notNull()
+      .references(() => users.id, { onDelete: 'cascade' }),
+    name: text('name').notNull(),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [index().on(t.userId)]
 );
 
 export const threadReads = pgTable(

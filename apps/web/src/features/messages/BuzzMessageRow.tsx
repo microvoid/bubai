@@ -14,7 +14,7 @@
  *           .pinnedMarker?
  *           MessageTimestampHint (.messagePayload)
  *             .messageBubble[data-own]
- *               BuzzMessageMarkdown (.text) / inline edit / Botmux card
+ *               BuzzMessageMarkdown (.text) / inline edit
  *               MessageReactions (.reactions)
  *             .messageAttachments? (images -> in-app MediaViewer, video/audio previews, files -> FileTypeIcon + download)
  *         reply preview?
@@ -25,13 +25,11 @@ import { Avatar } from '../../design-system/ui/Avatar';
 import { Button } from '../../design-system/ui/Button';
 import { IconButton } from '../../design-system/ui/IconButton';
 import { Input } from '../../design-system/ui/Input';
-import { TypingDots } from '../../design-system/ui/TypingDots';
 import {
   ArrowsOutIcon,
   DownloadIcon,
   PinIcon,
   RobotIcon,
-  TerminalWindowIcon,
 } from '../../design-system/icons/index';
 import { BuzzMessageMarkdown } from './BuzzMessageMarkdown';
 import { resolveAttachmentSource } from './BuzzMediaViewer';
@@ -117,6 +115,7 @@ export function BuzzMessageRow({
   const isAgent = msg.senderRole === 'agent';
   const isViewer = msg.senderRole === 'human' && msg.senderId === currentUserId;
   const senderName = sender?.name || msg.senderId;
+  const terminalSessionId = msg.botmuxSessionId;
 
   const attachments = msg.attachments ?? [];
   const hasAttachments = attachments.length > 0;
@@ -130,10 +129,9 @@ export function BuzzMessageRow({
       !a.mimeType.startsWith('audio/'),
   );
 
-  const hasTextOrCard = Boolean(msg.content.trim() || msg.card || isEditing);
-  const attachmentOnly = !hasTextOrCard && hasAttachments;
+  const hasBubble = Boolean(msg.content.trim() || isEditing);
+  const attachmentOnly = !hasBubble && hasAttachments;
   const ownBubble = isViewer && alignViewer && !attachmentOnly;
-  const reactionsInBubble = hasTextOrCard;
   const avatarSize = compactAvatar ? 'small' : 'default';
 
   const replyHandler =
@@ -162,7 +160,7 @@ export function BuzzMessageRow({
         <div className={styles.messageBody}>
           <div
             className={styles.messageContent}
-            data-bubble={hasTextOrCard || undefined}
+            data-bubble={hasBubble || undefined}
           >
             {!stackNext && (
               <div className={styles.messageAvatar}>
@@ -209,6 +207,11 @@ export function BuzzMessageRow({
                 replyLabel={inThread ? 'Reply to message' : 'Reply in thread'}
                 onReply={replyHandler}
                 onTogglePin={onTogglePin ? () => onTogglePin(msg) : undefined}
+                onOpenTerminal={
+                  terminalSessionId && onOpenTerminal
+                    ? () => onOpenTerminal(terminalSessionId)
+                    : undefined
+                }
                 onReact={(emoji) => onToggleReaction(msg.id, emoji)}
                 onEdit={onStartEdit ? () => onStartEdit(msg) : undefined}
                 onDelete={onDelete ? () => onDelete(msg.id) : undefined}
@@ -266,7 +269,7 @@ export function BuzzMessageRow({
               createdAt={stackPrevious ? msg.createdAt : undefined}
               attachments={hasAttachments}
             >
-              {hasTextOrCard && (
+              {hasBubble && (
                 <div
                   className={styles.messageBubble}
                   data-message-action-anchor=""
@@ -298,67 +301,17 @@ export function BuzzMessageRow({
                       </Button>
                     </form>
                   ) : (
-                    <>
-                      {msg.content && (
-                        <BuzzMessageMarkdown
-                          content={msg.content}
-                          edited={Boolean(msg.updatedAt)}
-                        />
-                      )}
-                      {msg.card && (
-                        <div
-                          style={{
-                            marginTop: msg.content ? 8 : 0,
-                            padding: '8px 10px',
-                            borderRadius: 'var(--radius-control)',
-                            border: '1px solid var(--border-standard)',
-                            background: 'var(--surface-panel)',
-                            color: 'var(--text-standard)',
-                            display: 'flex',
-                            alignItems: 'center',
-                            justifyContent: 'space-between',
-                            gap: 12,
-                          }}
-                        >
-                          <div style={{ minWidth: 0 }}>
-                            <div
-                              className="text-caption"
-                              style={{ display: 'flex', alignItems: 'center', gap: 8 }}
-                            >
-                              <span>{msg.card.title}</span>
-                              {msg.card.status === 'running' && <TypingDots />}
-                            </div>
-                            {msg.card.summary && (
-                              <div
-                                className="text-caption text-subtle"
-                                style={{ fontFamily: 'var(--buzz-mono-family)' }}
-                              >
-                                {msg.card.summary}
-                              </div>
-                            )}
-                          </div>
-                          {msg.botmuxSessionId && onOpenTerminal && (
-                            <Button
-                              variant="outline"
-                              size="sm"
-                              onClick={() => onOpenTerminal(msg.botmuxSessionId!)}
-                            >
-                              <TerminalWindowIcon size={14} />
-                              <span>Terminal</span>
-                            </Button>
-                          )}
-                        </div>
-                      )}
-                    </>
-                  )}
-
-                  {reactionsInBubble && (
-                    <MessageReactions
-                      reactions={msg.reactions}
-                      currentUserId={currentUserId}
-                      onToggle={(emoji) => onToggleReaction(msg.id, emoji)}
+                    <BuzzMessageMarkdown
+                      content={msg.content}
+                      edited={Boolean(msg.updatedAt) && !(isAgent && msg.card)}
                     />
                   )}
+
+                  <MessageReactions
+                    reactions={msg.reactions}
+                    currentUserId={currentUserId}
+                    onToggle={(emoji) => onToggleReaction(msg.id, emoji)}
+                  />
                 </div>
               )}
 
@@ -472,7 +425,7 @@ export function BuzzMessageRow({
             </MessageTimestampHint>
           </div>
 
-          {!reactionsInBubble && (
+          {!hasBubble && (
             <MessageReactions
               reactions={msg.reactions}
               currentUserId={currentUserId}

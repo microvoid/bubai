@@ -11,6 +11,7 @@ import {
   PencilSimpleIcon,
   PinIcon,
   PinOffIcon,
+  TerminalWindowIcon,
   ThreadIcon,
   TrashIcon,
 } from '../../design-system/icons/index';
@@ -25,6 +26,7 @@ export function MessageActionBar({
   replyLabel = 'Reply in thread',
   onReply,
   onTogglePin,
+  onOpenTerminal,
   onReact,
   onEdit,
   onDelete,
@@ -35,6 +37,7 @@ export function MessageActionBar({
   replyLabel?: string;
   onReply?: () => void;
   onTogglePin?: () => void;
+  onOpenTerminal?: () => void;
   onReact: (emoji: string) => void;
   onEdit?: () => void;
   onDelete?: () => void;
@@ -68,6 +71,16 @@ export function MessageActionBar({
             title={pinned ? '取消置顶' : '置顶消息'}
             icon={pinned ? <PinOffIcon size={16} /> : <PinIcon size={16} />}
             onClick={onTogglePin}
+          />
+        )}
+        {onOpenTerminal && (
+          <IconButton
+            hint="familiar"
+            size="sm"
+            aria-label="Open terminal"
+            title="Open terminal"
+            icon={<TerminalWindowIcon size={16} />}
+            onClick={onOpenTerminal}
           />
         )}
         <IconButton

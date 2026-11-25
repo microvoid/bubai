@@ -1,0 +1,22 @@
+{
+  "name": "@buzz-botmux/server",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "bun --watch src/main.ts",
+    "start": "bun src/main.ts",
+    "build": "bun build src/main.ts --target=bun --outdir=dist",
+    "typecheck": "tsc --noEmit",
+    "lint": "echo 'ok'"
+  },
+  "dependencies": {
+    "@buzz-botmux/botmux-client": "workspace:*",
+    "@buzz-botmux/db": "workspace:*",
+    "hono": "^4.7.4"
+  },
+  "devDependencies": {
+    "@types/bun": "^1.2.5",
+    "typescript": "^5.8.2"
+  }
+}

@@ -2411,7 +2411,13 @@
     color: var(--text-dock-count);
     box-shadow: 0 0 0 1px var(--bg-app);
   }
-  .navigation-item[data-selected] .buzz-count-badge {
+  .navigation-item[data-selected] .buzz-count-badge,
+  .buzz-sidebar-navigation
+    .navigation-item[data-variant="row"][data-selected]
+    :is(
+      .buzz-avatar[data-fallback-surface="subtle"]:has(> [data-avatar-fallback]),
+      .buzz-badge[data-tone="neutral"]
+    ) {
     background: var(--surface-row-selected-detail);
     color: var(--text-row-selected-detail);
   }

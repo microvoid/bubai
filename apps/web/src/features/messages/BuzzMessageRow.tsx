@@ -131,16 +131,25 @@ export function BuzzMessageRow({
       !a.mimeType.startsWith('audio/'),
   );
 
+  const cardStatus = msg.card?.status;
+  const hasTools = Boolean(
+    msg.card?.progress &&
+      (msg.card.progress.toolCount > 0 || msg.card.progress.steps.length > 0),
+  );
   const hasProgressCard = Boolean(
     isAgent &&
       msg.card &&
-      (msg.card.status === 'running' ||
-        (msg.card.progress && (msg.card.progress.toolCount > 0 || msg.card.progress.steps.length > 0))),
+      (cardStatus === 'running' ||
+        cardStatus === 'failed' ||
+        cardStatus === 'interrupted' ||
+        cardStatus === 'timeout' ||
+        cardStatus === 'dispatch_failed' ||
+        cardStatus === 'waiting_approval' ||
+        hasTools),
   );
   const showMarkdownContent =
-    !(isAgent && msg.card?.status === 'running' && msg.card.progress && msg.card.progress.steps.length > 0) &&
-    Boolean(msg.content.trim());
-  const hasBubble = Boolean(msg.content.trim() || hasProgressCard || isEditing);
+    !(isAgent && cardStatus === 'running') && Boolean(msg.content.trim());
+  const hasBubble = Boolean(showMarkdownContent || hasProgressCard || isEditing);
   const attachmentOnly = !hasBubble && hasAttachments;
   const ownBubble = isViewer && alignViewer && !attachmentOnly;
   const avatarSize = compactAvatar ? 'small' : 'default';
@@ -317,7 +326,15 @@ export function BuzzMessageRow({
                     </form>
                   ) : (
                     <>
-                      {hasProgressCard && msg.card && <AgentProgressCard card={msg.card} />}
+                      {hasProgressCard && msg.card && (
+                        <AgentProgressCard
+                          card={msg.card}
+                          createdAt={msg.createdAt}
+                          sessionId={terminalSessionId}
+                          onOpenTerminal={onOpenTerminal}
+                          hasContent={showMarkdownContent}
+                        />
+                      )}
                       {showMarkdownContent && (
                         <BuzzMessageMarkdown
                           content={msg.content}

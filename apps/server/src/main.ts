@@ -648,17 +648,25 @@ async function reconcileBotmuxTurn(
 
   let content: string | undefined;
   let status: MessageCardData['status'] = 'failed';
+  let settled = false;
 
   if (result?.state === 'completed') {
-    content = result.output?.content?.trim() || '（任务已完成，无文本输出）';
+    const trimmedOutput = result.output?.content?.trim() || '';
+    const hasTools = Boolean(latestProgress && (latestProgress.toolCount > 0 || latestProgress.steps.length > 0));
+    content = trimmedOutput || (hasTools ? '' : '（任务已完成，无文本输出）');
     status = 'completed';
+    settled = true;
   } else if (result?.state === 'interrupted') {
-    content = 'Botmux 执行已中断。';
+    content = result.output?.content?.trim() || '';
+    status = 'interrupted';
+    settled = true;
   } else if (
     result?.state === 'failed' ||
     (result?.state === 'not_found' && age >= BOTMUX_RESULT_GRACE_MS)
   ) {
-    content = result.error || 'Botmux 未能返回本轮回复。';
+    content = result.error || '未能获取本轮回复';
+    status = 'failed';
+    settled = true;
   } else if (
     result?.state === 'running' && age >= BOTMUX_RESULT_GRACE_MS && isLocalBotmux &&
     (!bot || bot.cliId === 'antigravity')
@@ -670,15 +678,21 @@ async function reconcileBotmuxTurn(
       session.state === 'idle' && !session.queued && !session.tuiPromptActive &&
       LOCAL_BOTMUX_BACKENDS.has(session.backendType ?? '')
     ) {
-      content = await readAntigravityResult({ triggerId, botId, channelId, createdAt: row.createdAt });
-      if (content) status = 'completed';
+      const agyContent = await readAntigravityResult({ triggerId, botId, channelId, createdAt: row.createdAt });
+      if (agyContent) {
+        content = agyContent;
+        status = 'completed';
+        settled = true;
+      }
     }
   }
 
-  if (!content && age >= BOTMUX_RESULT_TIMEOUT_MS) {
-    content = '等待 Botmux 回复超时。可打开终端查看执行情况。';
+  if (!settled && age >= BOTMUX_RESULT_TIMEOUT_MS) {
+    content = '等待回复超时';
+    status = 'timeout';
+    settled = true;
   }
-  if (!content) {
+  if (!settled) {
     if (latestProgress) {
       await applyMessageProgress(row, latestProgress);
     }
@@ -689,15 +703,20 @@ async function reconcileBotmuxTurn(
     latestProgress,
     status === 'completed' ? 'completed' : 'failed',
   );
+  const finishedAt = Date.now();
+  const startedAt = card.startedAt ?? row.createdAt.getTime();
 
   const [updated] = await db
     .update(messages)
     .set({
-      content,
+      content: content ?? '',
       card: {
         title: card.title,
         status,
-        summary: status === 'completed' ? `Botmux turn completed (${triggerId})` : content,
+        ...(card.parallel ? { parallel: true } : {}),
+        startedAt,
+        finishedAt,
+        summary: status === 'completed' ? `Botmux turn completed (${triggerId})` : content || status,
         ...(settledProgress ? { progress: settledProgress } : {}),
       },
     })
@@ -1434,6 +1453,7 @@ app.post('/api/bot/messages', async (c) => {
   const resolvedThreadId = body.threadId ? body.threadId.trim() : null;
   const resolvedReplyToId = resolvedThreadId && body.replyToId ? body.replyToId.trim() : null;
   const requestedMessageId = body.messageId ? body.messageId.trim() : null;
+  const requestedSessionId = body.botmuxSessionId ? body.botmuxSessionId.trim() : null;
 
   // If this outbound message corresponds to an active running placeholder for this bot/channel,
   // settle that placeholder in place so we never leave an orphaned "执行中" card or duplicate reply.
@@ -1445,10 +1465,15 @@ app.post('/api/bot/messages', async (c) => {
   ];
   if (requestedMessageId) {
     placeholderConditions.push(eq(messages.id, requestedMessageId));
-  } else if (resolvedThreadId) {
-    placeholderConditions.push(eq(messages.threadId, resolvedThreadId));
   } else {
-    placeholderConditions.push(isNull(messages.threadId));
+    if (requestedSessionId) {
+      placeholderConditions.push(eq(messages.botmuxSessionId, requestedSessionId));
+    }
+    if (resolvedThreadId) {
+      placeholderConditions.push(eq(messages.threadId, resolvedThreadId));
+    } else {
+      placeholderConditions.push(isNull(messages.threadId));
+    }
   }
 
   const [pendingPlaceholder] = await db
@@ -1460,6 +1485,8 @@ app.post('/api/bot/messages', async (c) => {
 
   if (pendingPlaceholder) {
     const settledProgress = finalizeProgressSnapshot(pendingPlaceholder.card?.progress, 'completed');
+    const finishedAt = Date.now();
+    const startedAt = pendingPlaceholder.card?.startedAt ?? pendingPlaceholder.createdAt.getTime();
     const [settled] = await db
       .update(messages)
       .set({
@@ -1468,8 +1495,11 @@ app.post('/api/bot/messages', async (c) => {
         botmuxSessionId: body.botmuxSessionId || pendingPlaceholder.botmuxSessionId,
         updatedAt: new Date(),
         card: {
-          title: pendingPlaceholder.card?.title || `${matchedBot?.botName || botId} · Reply`,
+          title: pendingPlaceholder.card?.title || matchedBot?.botName || botId,
           status: 'completed',
+          ...(pendingPlaceholder.card?.parallel ? { parallel: true } : {}),
+          startedAt,
+          finishedAt,
           summary: 'Botmux turn completed (outbound reply)',
           ...(settledProgress ? { progress: settledProgress } : {}),
         },
@@ -2342,8 +2372,11 @@ Bun.serve<WsClientData>({
           const historyMessages: BuzzTurnContext['messages'] = rawHistoryRows
             .filter(
               (row) =>
+                row.card?.status !== 'running' &&
+                row.content.trim().length > 0 &&
                 !row.content.startsWith('正在向本地 Botmux') &&
-                !row.content.startsWith('已在本地 Botmux 启动会话')
+                !row.content.startsWith('已在本地 Botmux 启动会话') &&
+                !row.content.startsWith('主会话正忙，正在并行启动')
             )
             .map((row) => ({
               sender: row.senderAgentId
@@ -2404,24 +2437,21 @@ Bun.serve<WsClientData>({
               saved.id
             );
 
+            const turnStartedAt = Date.now();
             const [placeholder] = await db
               .insert(messages)
               .values({
                 channelId,
                 threadId: replyThreadId,
                 senderAgentId: bot.larkAppId,
-                content: isOverflowParallel
-                  ? `主会话正忙，正在并行启动新的 Botmux (${bot.botName}) 会话...`
-                  : `正在向本地 Botmux (${bot.botName}) 派发指令...`,
+                content: '',
                 botmuxSessionId: existingSessionId,
                 card: {
-                  title: `${bot.botName} · ${bot.cliId}`,
+                  title: bot.botName,
                   status: 'running',
-                  summary: isOverflowParallel
-                    ? '主会话正忙，正在并行启动新会话...'
-                    : existingSessionId
-                      ? `复用会话 ${existingSessionId}`
-                      : '正在创建新的 Botmux 会话...',
+                  phase: 'connecting',
+                  ...(isOverflowParallel ? { parallel: true } : {}),
+                  startedAt: turnStartedAt,
                 },
               })
               .returning();
@@ -2470,14 +2500,17 @@ Bun.serve<WsClientData>({
 
             const sessionId = triggered.target?.sessionId || existingSessionId;
             if (!triggered.ok || !sessionId || !triggered.triggerId) {
-              const errMsg = triggered.error || 'Botmux 未返回本轮派发信息。';
+              const errMsg = triggered.error || 'Botmux 未返回本轮派发信息';
               const [failed] = await db
                 .update(messages)
                 .set({
-                  content: `派发失败：${errMsg}`,
+                  content: errMsg,
                   card: {
-                    title: `${bot.botName} · Error`,
-                    status: 'failed',
+                    title: bot.botName,
+                    status: 'dispatch_failed',
+                    ...(isOverflowParallel ? { parallel: true } : {}),
+                    startedAt: turnStartedAt,
+                    finishedAt: Date.now(),
                     summary: errMsg,
                   },
                 })
@@ -2501,11 +2534,14 @@ Bun.serve<WsClientData>({
               .update(messages)
               .set({
                 botmuxSessionId: sessionId,
-                content: `已在本地 Botmux 启动会话 \`${sessionId}\`，执行中...`,
+                content: '',
                 updatedAt: new Date(),
                 card: {
-                  title: `${bot.botName} · ${sessionId}`,
+                  title: bot.botName,
                   status: 'running',
+                  phase: 'thinking',
+                  ...(isOverflowParallel ? { parallel: true } : {}),
+                  startedAt: turnStartedAt,
                   summary: `${BOTMUX_TRIGGER_SUMMARY_PREFIX}${triggered.triggerId}`,
                 },
               })

@@ -46,13 +46,25 @@ export function AgentProgressCard({ card, textColor }: AgentProgressCardProps) {
     }
   }, [isRunning, userToggled]);
 
-  if (!isRunning && !hasSteps) return null;
+  const isAbnormal =
+    card.status === 'failed' ||
+    card.status === 'interrupted' ||
+    card.status === 'timeout' ||
+    card.status === 'dispatch_failed';
+
+  if (!isRunning && !isAbnormal && !hasSteps) return null;
 
   const headerLabel = isRunning
-    ? progress?.activeLabel || card.title || '正在执行…'
-    : card.status === 'failed'
-      ? '执行失败'
-      : '已完成';
+    ? progress?.activeLabel || (card.phase === 'connecting' ? '连接中' : '思考中')
+    : card.status === 'dispatch_failed'
+      ? '派发失败'
+      : card.status === 'failed'
+        ? '执行失败'
+        : card.status === 'interrupted'
+          ? '已中断'
+          : card.status === 'timeout'
+            ? '响应超时'
+            : '已完成';
 
   const mutedColor = colors.onSurfaceVariant;
   const toggle = () => {

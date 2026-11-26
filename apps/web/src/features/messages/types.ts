@@ -39,9 +39,22 @@ export interface AgentProgressSnapshot {
   updatedAt?: number;
 }
 
+export type MessageCardStatus =
+  | 'running'
+  | 'waiting_approval'
+  | 'completed'
+  | 'failed'
+  | 'interrupted'
+  | 'timeout'
+  | 'dispatch_failed';
+
 export interface MessageCard {
   title: string;
-  status: 'running' | 'waiting_approval' | 'completed' | 'failed';
+  status: MessageCardStatus;
+  phase?: 'connecting' | 'thinking';
+  parallel?: boolean;
+  startedAt?: number;
+  finishedAt?: number;
   summary?: string;
   progress?: AgentProgressSnapshot;
 }

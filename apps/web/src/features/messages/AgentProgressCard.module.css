@@ -2,33 +2,100 @@
   display: flex;
   flex-direction: column;
   gap: 6px;
-  margin-bottom: 6px;
+  margin-bottom: 8px;
 }
 
-.root[data-running] {
-  margin-bottom: 2px;
+.root[data-compact] {
+  margin-bottom: 0;
 }
 
-.statusHeader {
+.headerRow {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  min-width: 0;
+}
+
+.statusBarBtn,
+.statusBarStatic {
   display: inline-flex;
   align-items: center;
   gap: 6px;
-  align-self: flex-start;
-  padding: 0;
+  min-width: 0;
+  padding: 1px 0;
   border: 0;
   background: transparent;
-  color: var(--text-primary, #1f2329);
-  font-size: 14px;
-  font-weight: 500;
+  font-size: 13px;
   line-height: 1.4;
-  cursor: pointer;
+  text-align: left;
+  color: var(--text-subtle, #646a73);
 }
 
-.statusText {
-  max-width: 420px;
+.statusBarBtn {
+  cursor: pointer;
+  flex: 1 1 auto;
+}
+
+.statusBarBtn:hover {
+  opacity: 0.82;
+}
+
+.root[data-tone="running"] .statusBarBtn,
+.root[data-tone="running"] .statusBarStatic {
+  color: var(--text-standard, #1f2329);
+}
+
+.root[data-tone="connecting"] .statusBarBtn,
+.root[data-tone="connecting"] .statusBarStatic {
+  color: var(--text-subtle, #646a73);
+}
+
+.root[data-tone="danger"] .statusBarBtn,
+.root[data-tone="danger"] .statusBarStatic {
+  color: var(--text-danger, #d93025);
+}
+
+.root[data-tone="warning"] .statusBarBtn,
+.root[data-tone="warning"] .statusBarStatic {
+  color: var(--text-warning, #b45309);
+}
+
+.primaryLabel {
+  font-weight: 500;
+  white-space: nowrap;
+}
+
+.metaText {
+  display: inline-flex;
+  align-items: center;
+  color: var(--text-subtle, #646a73);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.metaPart {
+  display: inline-flex;
+  align-items: center;
+}
+
+.metaSep {
+  margin: 0 5px;
+  opacity: 0.65;
+}
+
+.statusIcon {
+  flex-shrink: 0;
+}
+
+.chevron {
+  flex-shrink: 0;
+  margin-left: 2px;
+  opacity: 0.72;
 }
 
 .liveDot {
@@ -40,82 +107,97 @@
   animation: progressPulse 1.4s ease-in-out infinite;
 }
 
-.toolSection {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
+.connectingDot {
+  width: 7px;
+  height: 7px;
+  border-radius: 999px;
+  border: 1.5px solid var(--accent, #2563eb);
+  background: transparent;
+  box-sizing: border-box;
+  flex-shrink: 0;
+  animation: progressPulse 1.4s ease-in-out infinite;
 }
 
-.toolSummaryBtn {
+.terminalBtn {
   display: inline-flex;
   align-items: center;
-  gap: 6px;
-  align-self: flex-start;
-  padding: 2px 0;
-  border: 0;
-  background: transparent;
-  color: var(--text-secondary, #646a73);
-  font-size: 13px;
+  gap: 4px;
+  flex-shrink: 0;
+  padding: 2px 8px;
+  border-radius: 6px;
+  border: 1px solid var(--border-standard, rgba(0, 0, 0, 0.14));
+  background: var(--surface-panel, transparent);
+  color: var(--text-standard, #1f2329);
+  font-size: 12px;
   line-height: 1.4;
   cursor: pointer;
 }
 
-.toolSummaryBtn:hover,
-.statusHeader:hover {
+.terminalBtn:hover {
   opacity: 0.82;
-}
-
-.summaryIcon,
-.chevron {
-  flex-shrink: 0;
-  opacity: 0.78;
 }
 
 .stepList {
   list-style: none;
-  margin: 2px 0 4px;
-  padding: 0 0 0 2px;
+  margin: 2px 0 2px;
+  padding: 7px 0 0;
+  border-top: 1px solid var(--border-subtle, rgba(127, 127, 127, 0.2));
   display: flex;
   flex-direction: column;
-  gap: 7px;
+  gap: 6px;
+  max-height: 172px;
+  overflow-y: auto;
 }
 
 .stepItem {
   display: flex;
   align-items: center;
   gap: 7px;
-  color: var(--text-secondary, #646a73);
-  font-size: 13px;
+  color: var(--text-subtle, #646a73);
+  font-size: 12px;
   line-height: 1.4;
   min-width: 0;
 }
 
 .stepItem[data-status="running"] {
-  color: var(--text-primary, #1f2329);
+  color: var(--text-standard, #1f2329);
 }
 
 .stepItem[data-status="failed"] {
-  color: var(--danger, #d93025);
+  color: var(--text-danger, #d93025);
 }
 
-.stepIcon {
+.stepMark {
+  width: 13px;
+  height: 13px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
   flex-shrink: 0;
-  opacity: 0.78;
 }
 
-.stepLabel {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.stepSpinner {
+.stepLiveDot {
   width: 6px;
   height: 6px;
   border-radius: 999px;
   background: var(--accent, #2563eb);
-  flex-shrink: 0;
   animation: progressPulse 1.2s ease-in-out infinite;
+}
+
+.stepVerb {
+  flex-shrink: 0;
+  font-weight: 500;
+}
+
+.stepDetail {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  opacity: 0.85;
+  font-family: var(--buzz-mono-family, ui-monospace, SFMono-Regular, Menlo, monospace);
+  font-size: 11.5px;
 }
 
 @keyframes progressPulse {

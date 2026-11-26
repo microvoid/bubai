@@ -20,7 +20,7 @@
  *         reply preview?
  *         [data-thread-summary][data-reply-connector]?
  */
-import type { ReactNode } from 'react';
+import { useLayoutEffect, useRef, useState, type CSSProperties, type ReactNode } from 'react';
 import { Avatar } from '../../design-system/ui/Avatar';
 import { Button } from '../../design-system/ui/Button';
 import { IconButton } from '../../design-system/ui/IconButton';
@@ -46,6 +46,106 @@ import {
 import styles from './Messages.module.css';
 import type { UploadedAttachment } from './ProseMirrorComposer';
 import type { ChatMessage, Participant } from './types';
+
+const MAX_IMAGE_WIDTH = 360;
+const MAX_IMAGE_HEIGHT = 320;
+const MAX_DIMENSION_CACHE_SIZE = 500;
+const imageDimensionCache = new Map<string, { width: number; height: number }>();
+
+function rememberImageDimensions(src: string, width: number, height: number): void {
+  if (!Number.isFinite(width) || !Number.isFinite(height) || width <= 0 || height <= 0) {
+    return;
+  }
+  if (imageDimensionCache.size >= MAX_DIMENSION_CACHE_SIZE && !imageDimensionCache.has(src)) {
+    const oldest = imageDimensionCache.keys().next().value;
+    if (oldest) imageDimensionCache.delete(oldest);
+  }
+  imageDimensionCache.set(src, { width, height });
+}
+
+function BuzzAttachmentImage({
+  src,
+  alt,
+  compact,
+  onClick,
+}: {
+  src: string;
+  alt: string;
+  compact: boolean;
+  onClick: () => void;
+}) {
+  const imgRef = useRef<HTMLImageElement>(null);
+  const [dimensions, setDimensions] = useState<{ width: number; height: number } | undefined>(() =>
+    imageDimensionCache.get(src),
+  );
+  const [ready, setReady] = useState(() => imageDimensionCache.has(src));
+
+  const syncFromImage = (img: HTMLImageElement | null) => {
+    if (!img || !img.complete || img.naturalWidth <= 0 || img.naturalHeight <= 0) {
+      return;
+    }
+    const next = { width: img.naturalWidth, height: img.naturalHeight };
+    rememberImageDimensions(src, next.width, next.height);
+    setDimensions(next);
+    setReady(true);
+  };
+
+  useLayoutEffect(() => {
+    const cached = imageDimensionCache.get(src);
+    if (cached) {
+      setDimensions(cached);
+      setReady(true);
+      return;
+    }
+    setDimensions(undefined);
+    setReady(false);
+    syncFromImage(imgRef.current);
+  }, [src]);
+
+  let style: CSSProperties | undefined;
+  if (compact) {
+    style = { width: '100%', height: 0, paddingBottom: '100%', aspectRatio: 'auto' };
+  } else if (dimensions) {
+    const previewWidth = Math.max(
+      1,
+      Math.min(
+        MAX_IMAGE_WIDTH,
+        dimensions.width,
+        (MAX_IMAGE_HEIGHT * dimensions.width) / dimensions.height,
+      ),
+    );
+    const previewHeight = Math.max(1, (previewWidth * dimensions.height) / dimensions.width);
+    if (Number.isFinite(previewWidth) && Number.isFinite(previewHeight)) {
+      style = {
+        width: previewWidth,
+        aspectRatio: `${previewWidth} / ${previewHeight}`,
+      };
+    }
+  }
+
+  return (
+    <button
+      type="button"
+      className={styles.attachmentImage}
+      style={style}
+      data-media-preview=""
+      data-image-ready={ready || undefined}
+      aria-label={`View image ${alt}`}
+      onClick={onClick}
+    >
+      <span className={styles.attachmentImagePixels}>
+        <img
+          ref={imgRef}
+          src={src}
+          alt={alt}
+          loading="lazy"
+          onLoad={(e) => syncFromImage(e.currentTarget)}
+        />
+      </span>
+      <span className={styles.imageOutline} data-image-outline="" aria-hidden="true" />
+    </button>
+  );
+}
 
 function formatBytes(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`;
@@ -413,18 +513,13 @@ export function BuzzMessageRow({
                         {imageAttachments.map((att) => {
                           const fullUrl = resolveAttachmentSource(att.url, serverHttp);
                           return (
-                            <button
+                            <BuzzAttachmentImage
                               key={att.id}
-                              type="button"
-                              className={styles.attachmentImage}
-                              data-image-ready=""
-                              aria-label={`View image ${att.name}`}
+                              src={fullUrl}
+                              alt={att.name}
+                              compact={imageAttachments.length >= 4}
                               onClick={() => onOpenMedia?.(attachments, att.id)}
-                            >
-                              <span className={styles.attachmentImagePixels}>
-                                <img src={fullUrl} alt={att.name} />
-                              </span>
-                            </button>
+                            />
                           );
                         })}
                       </div>

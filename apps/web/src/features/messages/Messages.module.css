@@ -259,7 +259,9 @@
   display: inline-flex;
   align-items: center;
   gap: var(--space-1);
+  flex-shrink: 0;
   min-width: 0;
+  max-width: 100%;
 }
 .author {
   font-weight: var(--type-weight-medium);
@@ -272,6 +274,8 @@
   font-size: inherit;
   line-height: inherit;
   font-family: inherit;
+  white-space: nowrap;
+  text-align: left;
 }
 .authorMentionBtn {
   background: transparent;
@@ -282,6 +286,8 @@
   cursor: pointer;
   font-weight: 600;
   color: inherit;
+  white-space: nowrap;
+  text-align: left;
   transition: background-color 120ms ease, color 120ms ease;
 }
 .authorPrefixSlot {
@@ -691,6 +697,9 @@ html[data-keyboard-navigation] .authorLink:focus-visible {
      imeta dimensions override this bounded fallback without waiting for decode. */
   position: relative;
   display: block;
+  padding: 0;
+  border: 0;
+  background: transparent;
   width: 360px;
   max-width: 100%;
   min-width: 1px;
@@ -786,6 +795,9 @@ html[data-keyboard-navigation] .authorLink:focus-visible {
   align-items: start;
   width: 22.5rem;
   max-width: 100%;
+}
+.imageGrid .attachmentImage img {
+  object-fit: cover;
 }
 .imageOverflow {
   @apply text-heading;

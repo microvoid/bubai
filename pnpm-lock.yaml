@@ -303,11 +303,17 @@ importers:
         version: 0.5.8
       drizzle-orm:
         specifier: ^0.45.3
-        version: 0.45.4(@electric-sql/pglite@0.5.8)(bun-types@1.4.5)
+        version: 0.45.4(@electric-sql/pglite@0.5.8)(@types/pg@8.23.1)(bun-types@1.4.5)(kysely@0.29.9)(pg@8.23.1)
+      pg:
+        specifier: ^8.23.1
+        version: 8.23.1
     devDependencies:
       '@types/node':
         specifier: ^22.13.10
         version: 22.20.5
+      '@types/pg':
+        specifier: ^8.23.1
+        version: 8.23.1
       typescript:
         specifier: ^5.8.2
         version: 5.9.3
@@ -7814,11 +7820,6 @@ snapshots:
       bun-types: 1.4.5
       kysely: 0.29.9
       pg: 8.23.1
-
-  drizzle-orm@0.45.4(@electric-sql/pglite@0.5.8)(bun-types@1.4.5):
-    optionalDependencies:
-      '@electric-sql/pglite': 0.5.8
-      bun-types: 1.4.5
 
   eastasianwidth@0.2.0: {}
 

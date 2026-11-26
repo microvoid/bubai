@@ -53,6 +53,7 @@ import {
   proxyTerminalHttpRequest,
   resolveTerminalUpstreamUrl,
 } from './terminal-proxy';
+import { createUploadStorage } from './storage';
 
 const PORT = Number(process.env.PORT || 4000);
 const BOTMUX_ENDPOINT = process.env.BOTMUX_ENDPOINT || 'http://127.0.0.1:7891';
@@ -109,10 +110,12 @@ function resolveReplyThreadId(
       return incomingThreadId || null;
   }
 }
-const UPLOADS_DIR = path.resolve(process.cwd(), '.data/uploads');
-fs.mkdirSync(UPLOADS_DIR, { recursive: true });
+const uploadStorage = createUploadStorage();
+const STATIC_DIR = process.env.STATIC_DIR?.trim()
+  ? path.resolve(process.env.STATIC_DIR.trim())
+  : '';
 
-const { db } = await openChatDatabase();
+const { db, driver: dbDriver } = await openChatDatabase();
 const botmux = new BotmuxClient(BOTMUX_ENDPOINT, BOTMUX_TOKEN);
 
 interface WsClientData {
@@ -925,7 +928,12 @@ app.delete('/api/channels/:channelId/pins/:messageId', async (c) => {
   return c.json({ pins });
 });
 
-/** Local File / Image Attachment Upload & Static Serving */
+/** Healthcheck endpoint for Docker / reverse proxy */
+app.get('/healthz', (c) =>
+  c.json({ ok: true, db: dbDriver, storage: uploadStorage.driver }),
+);
+
+/** File / Image Attachment Upload & Serving (S3 when configured, local disk fallback) */
 app.post('/api/uploads', async (c) => {
   const form = await c.req.formData();
   const file = form.get('file');
@@ -935,33 +943,27 @@ app.post('/api/uploads', async (c) => {
   const id = randomUUID();
   const safeName = file.name.replace(/[^a-zA-Z0-9._\u4e00-\u9fa5-]+/g, '_').slice(0, 120);
   const storedName = `${id}-${safeName}`;
-  const fullPath = path.join(UPLOADS_DIR, storedName);
+  const mimeType = file.type || 'application/octet-stream';
   const bytes = await file.arrayBuffer();
-  await Bun.write(fullPath, bytes);
+  const { url } = await uploadStorage.put(storedName, bytes, mimeType);
 
   const attachment: MessageAttachment = {
     id,
     name: file.name,
-    mimeType: file.type || 'application/octet-stream',
+    mimeType,
     size: file.size,
-    url: `/api/uploads/${encodeURIComponent(storedName)}`,
+    url,
   };
   return c.json({ attachment }, 201);
 });
 
 app.get('/api/uploads/:filename', async (c) => {
   const filename = path.basename(c.req.param('filename'));
-  const fullPath = path.join(UPLOADS_DIR, filename);
-  const bunFile = Bun.file(fullPath);
-  if (!(await bunFile.exists())) {
+  const res = await uploadStorage.get(filename);
+  if (!res) {
     return c.json({ error: 'File not found' }, 404);
   }
-  return new Response(bunFile, {
-    headers: {
-      'Content-Type': bunFile.type || 'application/octet-stream',
-      'Cache-Control': 'public, max-age=31536000, immutable',
-    },
-  });
+  return res;
 });
 
 app.get('/api/channels/:channelId/threads/:rootMessageId/preview', async (c) => {
@@ -2009,6 +2011,32 @@ Bun.serve<WsClientData>({
       }
       return new Response('Terminal WebSocket upgrade failed', { status: 400 });
     }
+    if (
+      STATIC_DIR &&
+      !url.pathname.startsWith('/api/') &&
+      url.pathname !== '/healthz' &&
+      url.pathname !== '/ws'
+    ) {
+      const reqPath = url.pathname === '/' ? '/index.html' : url.pathname;
+      const candidate = path.resolve(STATIC_DIR, `.${reqPath}`);
+      if (candidate.startsWith(STATIC_DIR) && fs.existsSync(candidate) && fs.statSync(candidate).isFile()) {
+        const file = Bun.file(candidate);
+        return new Response(file, {
+          headers: {
+            'Content-Type': file.type || 'application/octet-stream',
+            ...(reqPath.startsWith('/assets/')
+              ? { 'Cache-Control': 'public, max-age=31536000, immutable' }
+              : {}),
+          },
+        });
+      }
+      const indexFile = path.join(STATIC_DIR, 'index.html');
+      if (fs.existsSync(indexFile)) {
+        return new Response(Bun.file(indexFile), {
+          headers: { 'Content-Type': 'text/html; charset=utf-8' },
+        });
+      }
+    }
     return app.fetch(req);
   },
   websocket: {
@@ -2516,5 +2544,6 @@ Bun.serve<WsClientData>({
 
 scheduleBotmuxResultPoll();
 
-console.log(`[Server] Bun + Hono + PGlite server listening on http://localhost:${PORT}`);
+console.log(`[Server] Bun + Hono server listening on http://0.0.0.0:${PORT} (db=${dbDriver}, storage=${uploadStorage.driver}: ${uploadStorage.detail})`);
+if (STATIC_DIR) console.log(`[Server] Serving static frontend from ${STATIC_DIR}`);
 console.log(`[Server] Connected to Botmux at ${BOTMUX_ENDPOINT} (${cachedBots.length} real bots)`);

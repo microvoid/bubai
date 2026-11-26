@@ -132,7 +132,12 @@ interface BotmuxStatus {
   detail: string;
 }
 
-const SERVER_HTTP = import.meta.env.VITE_SERVER_URL || 'http://localhost:4000';
+const SERVER_HTTP =
+  import.meta.env.VITE_SERVER_URL !== undefined
+    ? import.meta.env.VITE_SERVER_URL || window.location.origin
+    : import.meta.env.PROD
+      ? window.location.origin
+      : 'http://localhost:4000';
 const SERVER_WS = SERVER_HTTP.replace(/^http/, 'ws') + '/ws';
 const MESSAGE_SEND_TIMEOUT_MS = 10_000;
 const THREAD_REPLY_PREVIEW_LIMIT = 5;

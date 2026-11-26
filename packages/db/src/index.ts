@@ -1,13 +1,68 @@
 import fs from 'node:fs';
+import net from 'node:net';
 import path from 'node:path';
+import tls from 'node:tls';
 import { PGlite } from '@electric-sql/pglite';
-import { drizzle, type PgliteDatabase } from 'drizzle-orm/pglite';
+import { drizzle as drizzlePglite, type PgliteDatabase } from 'drizzle-orm/pglite';
+import { drizzle as drizzlePg, type NodePgDatabase } from 'drizzle-orm/node-postgres';
+import { Pool, type PoolConfig } from 'pg';
 import * as schema from './schema.js';
 
 export * from './schema.js';
 export { eq, asc, desc, and, lt, gt, isNull, inArray, ilike, sql } from 'drizzle-orm';
 
-export type ChatDb = PgliteDatabase<typeof schema>;
+export type ChatDb = NodePgDatabase<typeof schema>;
+
+function buildPgPoolConfig(databaseUrl: string): PoolConfig {
+  const parsed = new URL(databaseUrl);
+  const sslmode = (parsed.searchParams.get('sslmode') || '').toLowerCase();
+  const sslnegotiation = (parsed.searchParams.get('sslnegotiation') || '').toLowerCase();
+
+  // Direct TLS (PostgreSQL 17+): immediately negotiate TLS with ALPN "postgresql"
+  // instead of sending a plaintext SSLRequest packet.
+  if (sslnegotiation === 'direct') {
+    const host = parsed.hostname;
+    const port = Number(parsed.port || 5432);
+    const rejectUnauthorized = sslmode === 'verify-full' || sslmode === 'verify-ca';
+    parsed.searchParams.delete('sslmode');
+    parsed.searchParams.delete('sslnegotiation');
+    return {
+      connectionString: parsed.toString(),
+      ssl: false,
+      stream: () => {
+        const sock = tls.connect({
+          host,
+          port,
+          ...(net.isIP(host) ? {} : { servername: host }),
+          ALPNProtocols: ['postgresql'],
+          rejectUnauthorized,
+        });
+        // pg calls stream.connect(port, host) after constructing the stream,
+        // whereas tls.connect() has already initiated the TLS connection.
+        (sock as unknown as { connect: () => typeof sock }).connect = () => sock;
+        return sock;
+      },
+    };
+  }
+
+  if (sslmode === 'require' || sslmode === 'prefer') {
+    parsed.searchParams.delete('sslmode');
+    return {
+      connectionString: parsed.toString(),
+      ssl: { rejectUnauthorized: false },
+    };
+  }
+
+  if (sslmode === 'verify-full' || sslmode === 'verify-ca') {
+    parsed.searchParams.delete('sslmode');
+    return {
+      connectionString: parsed.toString(),
+      ssl: { rejectUnauthorized: true },
+    };
+  }
+
+  return { connectionString: databaseUrl };
+}
 
 const DDL = `
 CREATE TABLE IF NOT EXISTS users (
@@ -139,15 +194,46 @@ CREATE TABLE IF NOT EXISTS agent_profiles (
 );
 `;
 
-export async function openChatDatabase(dataDir?: string): Promise<{
-  pglite: PGlite;
+export interface OpenChatDatabaseOptions {
+  dataDir?: string;
+  databaseUrl?: string;
+}
+
+export async function openChatDatabase(
+  options?: string | OpenChatDatabaseOptions,
+): Promise<{
+  driver: 'postgres' | 'pglite';
+  pglite?: PGlite;
+  pool?: Pool;
   db: ChatDb;
+  close: () => Promise<void>;
 }> {
-  const dir = dataDir || path.resolve(process.cwd(), '.data/pglite');
+  const opts: OpenChatDatabaseOptions =
+    typeof options === 'string' ? { dataDir: options } : options || {};
+  const databaseUrl = opts.databaseUrl ?? process.env.DATABASE_URL?.trim();
+
+  if (databaseUrl) {
+    const pool = new Pool(buildPgPoolConfig(databaseUrl));
+    await pool.query(DDL);
+    const db = drizzlePg(pool, { schema });
+    return {
+      driver: 'postgres',
+      pool,
+      db,
+      close: () => pool.end(),
+    };
+  }
+
+  const dir = opts.dataDir || path.resolve(process.cwd(), '.data/pglite');
   fs.mkdirSync(dir, { recursive: true });
   const pglite = new PGlite(dir);
   await pglite.waitReady;
   await pglite.exec(DDL);
-  const db = drizzle(pglite, { schema });
-  return { pglite, db };
+  const db = drizzlePglite(pglite, { schema }) as unknown as ChatDb;
+  return {
+    driver: 'pglite',
+    pglite,
+    db,
+    close: () => pglite.close(),
+  };
 }

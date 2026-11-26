@@ -297,6 +297,41 @@ async function locateTranscript(root: string, name: string) {
   return undefined;
 }
 
+const MAX_CACHE_ENTRIES = 64;
+const triggerPathCache = new Map<string, string>();
+const parsedSnapshotCache = new Map<
+  string,
+  { path: string; mtimeMs: number; size: number; progress: AgentProgressSnapshot }
+>();
+
+function rememberCache<K, V>(map: Map<K, V>, key: K, value: V) {
+  if (map.size >= MAX_CACHE_ENTRIES && !map.has(key)) {
+    const oldest = map.keys().next().value;
+    if (oldest !== undefined) map.delete(oldest);
+  }
+  map.set(key, value);
+}
+
+async function readIfChanged(
+  cacheKey: string,
+  path: string,
+  mtimeMs: number,
+  size: number,
+  query: TurnProgressQuery,
+): Promise<AgentProgressSnapshot | undefined> {
+  const cached = parsedSnapshotCache.get(cacheKey);
+  if (cached && cached.path === path && cached.mtimeMs === mtimeMs && cached.size === size) {
+    return cached.progress;
+  }
+  const content = await readFile(path, 'utf8');
+  const progress = parseAntigravityProgress(content, query);
+  if (progress) {
+    rememberCache(triggerPathCache, cacheKey, path);
+    rememberCache(parsedSnapshotCache, cacheKey, { path, mtimeMs, size, progress });
+  }
+  return progress;
+}
+
 export const antigravityProgressAdapter: TurnProgressAdapter = {
   id: 'antigravity',
   supports(cliId?: string) {
@@ -306,6 +341,22 @@ export const antigravityProgressAdapter: TurnProgressAdapter = {
     const root = query.roots?.antigravity ?? join(homedir(), '.gemini', 'antigravity-cli', 'brain');
     const earliest = query.createdAt.getTime() - CLOCK_SKEW_MS;
     if (!Number.isFinite(earliest)) return undefined;
+
+    const cacheKey = `${root}::${query.triggerId}`;
+    const knownPath = triggerPathCache.get(cacheKey);
+    if (knownPath) {
+      const info = await stat(knownPath).catch(() => null);
+      if (info && info.isFile() && info.size <= MAX_LOG_BYTES) {
+        try {
+          const hit = await readIfChanged(cacheKey, knownPath, info.mtimeMs, info.size, query);
+          if (hit) return hit;
+        } catch {
+          // Fall through to full scan if cached file rotated or vanished.
+        }
+      }
+      triggerPathCache.delete(cacheKey);
+      parsedSnapshotCache.delete(cacheKey);
+    }
 
     const entries = await readdir(root, { withFileTypes: true }).catch(() => []);
     const logs = await Promise.all(
@@ -322,8 +373,13 @@ export const antigravityProgressAdapter: TurnProgressAdapter = {
 
     for (const log of recent) {
       try {
-        const content = await readFile(log.path, 'utf8');
-        const progress = parseAntigravityProgress(content, query);
+        const progress = await readIfChanged(
+          cacheKey,
+          log.path,
+          log.info.mtimeMs,
+          log.info.size,
+          query,
+        );
         if (progress) return progress;
       } catch {
         // Ignore transient read errors while CLI is appending.

@@ -9,6 +9,7 @@
     "build": "turbo run build",
     "lint": "turbo run lint",
     "typecheck": "turbo run typecheck",
+    "test": "bun test packages/chat-client/src apps/server/src",
     "buzz:send": "node scripts/buzz-send.mjs",
     "format": "prettier --write \"**/*.{ts,tsx,js,json,md}\""
   },

@@ -1,0 +1,204 @@
+import { buzzGrid, buzzRadii, buzzTypography } from '@buzz-botmux/design-tokens';
+import * as Haptics from 'expo-haptics';
+import React from 'react';
+import { Pressable, StyleSheet, Text, View, type ViewStyle } from 'react-native';
+import { useBuzzTheme } from '../theme/ThemeProvider';
+
+export function BuzzBadge({
+  label,
+  tone = 'neutral',
+}: {
+  label: string;
+  tone?: 'neutral' | 'success' | 'warning' | 'danger';
+}) {
+  const { colors } = useBuzzTheme();
+  const bg =
+    tone === 'success'
+      ? `${colors.success}22`
+      : tone === 'warning'
+        ? `${colors.warning}26`
+        : tone === 'danger'
+          ? colors.errorContainer
+          : colors.surfaceContainerHigh;
+  const fg =
+    tone === 'success'
+      ? colors.success
+      : tone === 'warning'
+        ? colors.warning
+        : tone === 'danger'
+          ? colors.error
+          : colors.onSurfaceVariant;
+
+  return (
+    <View style={[styles.badge, { backgroundColor: bg }]}>
+      <Text style={[buzzTypography.micro, { color: fg }]} numberOfLines={1}>
+        {label}
+      </Text>
+    </View>
+  );
+}
+
+export function BuzzCountBadge({ count }: { count: number }) {
+  const { accent } = useBuzzTheme();
+  if (count <= 0) return null;
+  return (
+    <View style={[styles.countBadge, { backgroundColor: accent.fill }]}>
+      <Text style={[buzzTypography.micro, { color: accent.foreground }]}>
+        {count > 99 ? '99+' : count}
+      </Text>
+    </View>
+  );
+}
+
+export function BuzzFilterPill({
+  label,
+  selected,
+  count,
+  onPress,
+}: {
+  label: string;
+  selected: boolean;
+  count?: number;
+  onPress: () => void;
+}) {
+  const { colors } = useBuzzTheme();
+  return (
+    <Pressable
+      onPress={() => {
+        void Haptics.selectionAsync();
+        onPress();
+      }}
+      style={({ pressed }) => [
+        styles.pill,
+        {
+          backgroundColor: selected ? colors.primary : colors.surfaceContainerLow,
+          opacity: pressed ? 0.8 : 1,
+        },
+      ]}
+    >
+      <Text
+        style={[
+          buzzTypography.label,
+          { color: selected ? colors.onPrimary : colors.onSurfaceVariant },
+        ]}
+      >
+        {label}
+        {count !== undefined && count > 0 ? ` ${count}` : ''}
+      </Text>
+    </Pressable>
+  );
+}
+
+export function BuzzSectionGroup({
+  title,
+  children,
+  style,
+}: {
+  title?: string;
+  children: React.ReactNode;
+  style?: ViewStyle;
+}) {
+  const { colors } = useBuzzTheme();
+  return (
+    <View style={[styles.sectionWrap, style]}>
+      {title && (
+        <Text style={[buzzTypography.caption, styles.sectionTitle, { color: colors.onSurfaceVariant }]}>
+          {title}
+        </Text>
+      )}
+      <View
+        style={[
+          styles.sectionCard,
+          {
+            backgroundColor: colors.surfaceContainerLow,
+            borderColor: colors.outline,
+          },
+        ]}
+      >
+        {children}
+      </View>
+    </View>
+  );
+}
+
+export function BuzzConnectionPill({
+  connected,
+  label,
+  onPress,
+}: {
+  connected: boolean;
+  label: string;
+  onPress?: () => void;
+}) {
+  const { colors } = useBuzzTheme();
+  return (
+    <Pressable
+      onPress={onPress}
+      disabled={!onPress}
+      style={[
+        styles.connPill,
+        {
+          backgroundColor: colors.surfaceContainerLow,
+          borderColor: colors.outline,
+        },
+      ]}
+    >
+      <View
+        style={{
+          width: 7,
+          height: 7,
+          borderRadius: 4,
+          backgroundColor: connected ? colors.success : colors.warning,
+        }}
+      />
+      <Text style={[buzzTypography.micro, { color: colors.onSurfaceVariant }]}>{label}</Text>
+    </Pressable>
+  );
+}
+
+const styles = StyleSheet.create({
+  badge: {
+    paddingHorizontal: 8,
+    paddingVertical: 3,
+    borderRadius: buzzRadii.pill,
+    alignSelf: 'flex-start',
+  },
+  countBadge: {
+    minWidth: 22,
+    height: 22,
+    paddingHorizontal: 6,
+    borderRadius: 11,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  pill: {
+    paddingHorizontal: 14,
+    paddingVertical: 8,
+    minHeight: 34,
+    justifyContent: 'center',
+    alignItems: 'center',
+    borderRadius: buzzRadii.pill,
+  },
+  sectionWrap: {
+    gap: 6,
+  },
+  sectionTitle: {
+    paddingHorizontal: buzzGrid.xxs,
+    textTransform: 'uppercase',
+    letterSpacing: 0.5,
+  },
+  sectionCard: {
+    borderRadius: buzzRadii.card,
+    borderWidth: StyleSheet.hairlineWidth,
+    overflow: 'hidden',
+  },
+  connPill: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    paddingHorizontal: 10,
+    paddingVertical: 5,
+    borderRadius: buzzRadii.pill,
+    borderWidth: StyleSheet.hairlineWidth,
+  },
+});

@@ -120,6 +120,7 @@ export interface BuzzChannelTimelineProps {
   onOpenTerminal: (sessionId: string) => void;
   onOpenMedia?: (attachments: readonly UploadedAttachment[], selectedId: string) => void;
   onOpenAgentProfile?: (agentId: string) => void;
+  onMentionParticipant?: (participant: { id: string; name: string; role: 'human' | 'agent' }) => void;
   emptyState: ReactNode;
 }
 
@@ -155,6 +156,7 @@ function Timeline({
   onOpenTerminal,
   onOpenMedia,
   onOpenAgentProfile,
+  onMentionParticipant,
   emptyState,
 }: BuzzChannelTimelineProps) {
   const scroller = useRef<HTMLElement | null>(null);
@@ -620,6 +622,7 @@ function Timeline({
                     onOpenTerminal={onOpenTerminal}
                     onOpenMedia={onOpenMedia}
                     onOpenAgentProfile={onOpenAgentProfile}
+                    onMentionParticipant={onMentionParticipant}
                   />
                 </div>
               );

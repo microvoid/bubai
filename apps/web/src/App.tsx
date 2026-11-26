@@ -40,6 +40,7 @@ import {
 import type { ReactionGroup } from './features/messages/MessageReactions';
 import {
   ProseMirrorComposer,
+  type ProseMirrorComposerHandle,
   type UploadedAttachment,
 } from './features/messages/ProseMirrorComposer';
 import type { ChatMessage as Message, MessageFocus, Participant } from './features/messages/types';
@@ -246,6 +247,7 @@ function ConversationSurface({
   onUnarchiveChannel?: (channel: Channel) => void;
 }) {
   const dockRef = useComposerDockRef();
+  const composerRef = useRef<ProseMirrorComposerHandle | null>(null);
   const isArchived = Boolean(activeChannel?.archived);
   const canUnarchive = Boolean(
     activeChannel &&
@@ -281,6 +283,7 @@ function ConversationSurface({
         onOpenTerminal={onOpenTerminal}
         onOpenMedia={onOpenMedia}
         onOpenAgentProfile={onOpenAgentProfile}
+        onMentionParticipant={(p) => composerRef.current?.insertMention(p)}
         emptyState={
           <EmptyState
             icon={<SparklesIcon size={24} />}
@@ -344,6 +347,7 @@ function ConversationSurface({
 
       <ProseMirrorComposer
         dockRef={dockRef}
+        composerRef={composerRef}
         draftScope={JSON.stringify([currentUserId, activeChannel?.id])}
         candidates={participants}
         disabled={!activeChannel || isArchived}

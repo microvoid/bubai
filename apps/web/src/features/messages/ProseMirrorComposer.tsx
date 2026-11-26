@@ -15,6 +15,7 @@
 import { bytesToHex } from '@noble/hashes/utils.js';
 import {
   useEffect,
+  useImperativeHandle,
   useRef,
   useState,
   type Ref,
@@ -413,6 +414,10 @@ function toggleBlockNode(
   return true;
 }
 
+export interface ProseMirrorComposerHandle {
+  insertMention: (candidate: Pick<MentionCandidate, 'id' | 'name'>) => void;
+}
+
 export function ProseMirrorComposer({
   placeholder = 'Send a message',
   disabled = false,
@@ -423,6 +428,7 @@ export function ProseMirrorComposer({
   onUploadFile,
   serverHttp,
   dockRef,
+  composerRef,
   replyContext,
   autoFocus = false,
 }: {
@@ -435,6 +441,7 @@ export function ProseMirrorComposer({
   onUploadFile?: (file: File) => Promise<UploadedAttachment | null>;
   serverHttp: string;
   dockRef?: Ref<HTMLDivElement>;
+  composerRef?: Ref<ProseMirrorComposerHandle>;
   replyContext?: ReplyContextTarget | null;
   autoFocus?: boolean;
 }) {
@@ -568,6 +575,42 @@ export function ProseMirrorComposer({
     setMentionState(null);
     setMentionIndex(0);
   };
+
+  useImperativeHandle(
+    composerRef,
+    () => ({
+      insertMention(candidate: Pick<MentionCandidate, 'id' | 'name'>) {
+        const view = viewRef.current;
+        if (!view || stateRef.current.disabled) return;
+        const firstParagraph = view.state.doc.firstChild;
+        const firstInline = firstParagraph?.firstChild;
+        const alreadyMentionedAtStart =
+          (firstInline?.type === composerSchema.nodes.mention &&
+            firstInline.attrs.id === candidate.id) ||
+          view.state.doc.textContent
+            .trimStart()
+            .toLowerCase()
+            .startsWith(`@${candidate.name.toLowerCase()}`);
+        if (alreadyMentionedAtStart) {
+          view.focus();
+          return;
+        }
+        const mentionNode = composerSchema.nodes.mention.create({
+          id: candidate.id,
+          label: candidate.name,
+        });
+        const { from, to } = view.state.selection;
+        const tr = view.state.tr.replaceWith(from, to, [
+          mentionNode,
+          composerSchema.text('\u00a0'),
+        ]);
+        tr.setSelection(TextSelection.create(tr.doc, from + 2));
+        view.dispatch(tr.scrollIntoView());
+        view.focus();
+      },
+    }),
+    [],
+  );
 
   const acceptActiveMention = (): boolean => {
     const ms = stateRef.current.mentionState;

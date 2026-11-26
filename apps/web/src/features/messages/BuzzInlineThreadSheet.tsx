@@ -23,6 +23,7 @@ import { continuesMessageGroup } from './message-grouping';
 import styles from './Messages.module.css';
 import {
   ProseMirrorComposer,
+  type ProseMirrorComposerHandle,
   type UploadedAttachment,
 } from './ProseMirrorComposer';
 import { replyTree } from './reply-tree';
@@ -273,6 +274,7 @@ export function BuzzInlineThreadSheet({
                 onOpenTerminal={onOpenTerminal}
                 onOpenMedia={onOpenMedia}
                 onOpenAgentProfile={onOpenAgentProfile}
+                onMentionParticipant={(p) => threadComposerRef.current?.insertMention(p)}
               />
             }
           >
@@ -287,6 +289,7 @@ export function BuzzInlineThreadSheet({
     });
   };
 
+  const threadComposerRef = useRef<ProseMirrorComposerHandle | null>(null);
   const targetAuthor = replyTarget
     ? participantMap.get(replyTarget.senderId)?.name || replyTarget.senderId
     : '';
@@ -338,6 +341,7 @@ export function BuzzInlineThreadSheet({
                   onOpenTerminal={onOpenTerminal}
                   onOpenMedia={onOpenMedia}
                   onOpenAgentProfile={onOpenAgentProfile}
+                  onMentionParticipant={(p) => threadComposerRef.current?.insertMention(p)}
                 />
               )}
 
@@ -350,6 +354,7 @@ export function BuzzInlineThreadSheet({
         </div>
 
         <ProseMirrorComposer
+          composerRef={threadComposerRef}
           candidates={participants}
           draftScope={JSON.stringify([currentUserId, root?.id, replyTarget?.id])}
           serverHttp={serverHttp}

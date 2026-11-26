@@ -53,6 +53,28 @@ function formatBytes(bytes: number): string {
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }
 
+function formatCliBadgeLabel(cliId?: string): string | null {
+  if (!cliId) return null;
+  const normalized = cliId.trim().toLowerCase();
+  if (!normalized) return null;
+  if (normalized === 'antigravity') return 'Antigravity';
+  if (normalized === 'codex' || normalized === 'codex-app' || normalized === 'codex-cli') {
+    return 'Codex';
+  }
+  if (normalized === 'claude' || normalized === 'claude-code') return 'Claude';
+  if (normalized === 'cursor' || normalized === 'cursor-cli') return 'Cursor';
+  if (normalized === 'opencode') return 'OpenCode';
+  if (normalized === 'gemini' || normalized === 'gemini-cli') return 'Gemini';
+  return normalized.charAt(0).toUpperCase() + normalized.slice(1);
+}
+
+function formatWorkingDirShort(workingDir?: string): string | null {
+  if (!workingDir) return null;
+  const cleaned = workingDir.replace(/\/+$/, '');
+  const idx = cleaned.lastIndexOf('/');
+  return idx >= 0 ? cleaned.slice(idx + 1) : cleaned;
+}
+
 export interface BuzzMessageRowProps {
   msg: ChatMessage;
   sender?: Participant;
@@ -82,6 +104,7 @@ export interface BuzzMessageRowProps {
   onOpenTerminal?: (sessionId: string) => void;
   onOpenMedia?: (attachments: readonly UploadedAttachment[], selectedId: string) => void;
   onOpenAgentProfile?: (agentId: string) => void;
+  onMentionParticipant?: (participant: { id: string; name: string; role: 'human' | 'agent' }) => void;
 }
 
 export function BuzzMessageRow({
@@ -113,6 +136,7 @@ export function BuzzMessageRow({
   onOpenTerminal,
   onOpenMedia,
   onOpenAgentProfile,
+  onMentionParticipant,
 }: BuzzMessageRowProps) {
   const isAgent = msg.senderRole === 'agent';
   const isViewer = msg.senderRole === 'human' && msg.senderId === currentUserId;
@@ -242,40 +266,64 @@ export function BuzzMessageRow({
               />
               <div className={stackPrevious ? 'sr-only select-none' : styles.byline}>
                 <span className={styles.authorWithStatus}>
-                  {isAgent && onOpenAgentProfile && !stackPrevious ? (
+                  {isAgent && !stackPrevious && onMentionParticipant ? (
                     <button
                       type="button"
-                      className={styles.author}
-                      onClick={() => onOpenAgentProfile(msg.senderId)}
-                      style={{
-                        background: 'transparent',
-                        border: 0,
-                        padding: 0,
-                        cursor: 'pointer',
-                        fontWeight: 600,
-                        color: 'inherit',
-                        display: 'inline-flex',
-                        alignItems: 'center',
-                      }}
+                      className={`${styles.author} ${styles.authorMentionBtn}`}
+                      onClick={() =>
+                        onMentionParticipant({
+                          id: msg.senderId,
+                          name: senderName,
+                          role: 'agent',
+                        })
+                      }
+                      title={`点击 @${senderName}`}
                     >
-                      <RobotIcon aria-hidden="true" className={styles.authorAgentIcon} />
-                      {senderName}
+                      <span className={styles.authorPrefixSlot} aria-hidden="true">
+                        <span className={styles.authorPrefixDefault}>
+                          <RobotIcon size={14} />
+                        </span>
+                        <span className={styles.authorPrefixHover}>@</span>
+                      </span>
+                      <span>{senderName}</span>
+                    </button>
+                  ) : isAgent && !stackPrevious && onOpenAgentProfile ? (
+                    <button
+                      type="button"
+                      className={`${styles.author} ${styles.authorMentionBtn}`}
+                      onClick={() => onOpenAgentProfile(msg.senderId)}
+                      title={`查看 ${senderName} 详情`}
+                    >
+                      <span className={styles.authorPrefixSlot} aria-hidden="true">
+                        <RobotIcon size={14} />
+                      </span>
+                      <span>{senderName}</span>
                     </button>
                   ) : (
                     <strong className={styles.author}>
                       {isAgent && !stackPrevious && (
-                        <RobotIcon aria-hidden="true" className={styles.authorAgentIcon} />
+                        <span className={styles.authorPrefixSlot} aria-hidden="true">
+                          <RobotIcon size={14} />
+                        </span>
                       )}
-                      {senderName}
+                      <span>{senderName}</span>
                     </strong>
                   )}
                 </span>
-                {isAgent && !stackPrevious && sender?.cliId && (
-                  <span className={styles.authorOwner}>
-                    <span aria-hidden="true">· </span>
-                    {sender.cliId}
-                  </span>
-                )}
+                {isAgent && !stackPrevious && (() => {
+                  const engineLabel = formatCliBadgeLabel(sender?.cliId);
+                  if (!engineLabel) return null;
+                  const dirShort = formatWorkingDirShort(sender?.workingDir);
+                  const statusLabel = sender?.status === 'online' ? '在线' : '离线';
+                  const tooltip = [engineLabel, statusLabel, dirShort]
+                    .filter(Boolean)
+                    .join(' · ');
+                  return (
+                    <span className={styles.authorEnginePill} title={tooltip}>
+                      {engineLabel}
+                    </span>
+                  );
+                })()}
                 {!stackPrevious && <MessageTimestamp createdAt={msg.createdAt} />}
               </div>
             </div>

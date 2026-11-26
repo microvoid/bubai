@@ -1,11 +1,25 @@
 ---
 name: e2e-dsl
-description: Design, statically validate, diagram, and verify full-stack E2E DSL bundles with mandatory sequence diagrams, flowcharts, interaction screenshots, and replayable cross-service data-flow mocks. Use whenever implementing a feature or requirement that must deliver E2E DSL, sequence/flow diagrams, and recorded execution artifacts (screenshots + full inter-module/service traffic capable of mocking the entire flow).
+description: Design, statically validate, diagram, and verify full-stack E2E DSL bundles and real-user E2E reproduction/verification loops (features, bug fixes, troubleshooting, AI code review, refactoring/optimization). Use whenever implementing a feature, investigating a bug, reviewing AI-generated code, or refactoring so every issue is first reproduced from a real user's interaction perspective, fixed using the captured E2E context, and verified RED → GREEN with recorded artifacts.
 ---
 
 # E2E DSL
 
-Every feature implementation must deliver a self-contained, verifiable E2E bundle alongside its code. Do not treat E2E as an afterthought or an opaque test script: express the test contract in YAML DSL, derive human-readable diagrams from it, and capture complete runtime artifacts on every execution so the entire flow can be inspected visually and replayed offline as a mock.
+Every engineering change — **feature/requirement delivery, bug fix, issue troubleshooting, AI-generated code review, or refactoring/optimization** — must be grounded in real-user E2E verification, not static guesswork. Express durable test contracts in YAML DSL, derive human-readable diagrams from them, and capture complete runtime artifacts on every execution so the entire flow can be inspected visually and replayed offline as a mock.
+
+## Core Rule: Real-User E2E First (RED → Fix in Context → GREEN)
+
+无论是排查问题、审查 AI 生成的代码、做需求开发、修 Bug 还是重构优化，都必须遵循以下闭环：
+
+1. **先以真实用户交互视角跑 E2E 复现（RED）**
+   - 禁止仅凭静态读代码盲猜或凭空加防御代码。
+   - 针对真实运行栈（真实浏览器/UI，或真实 WebSocket + HTTP + DB + 下游服务）构造贴近真实用户操作的隔离场景（如刷新后立刻操作、连续发送、并发任务、边界回调等），跑出明确的复现证据（失败断言、实际响应/WS 帧、截图或 trace）。
+   - 明确区分 **「已复现」** 与 **「未复现」** 的疑点：未复现且无确定性契约风险的理论猜想，不强行引入多余复杂度。
+2. **基于 E2E 上下文定向修复**
+   - 每一处代码改动都必须直接对应 E2E 捕获到的真实上下文（请求体、WS 事件、DB 状态、页面渲染结果）。
+3. **重跑同一份 E2E 验证 RED → GREEN，并清理现场**
+   - 修复后重跑完全相同的 E2E 场景，确认断言从 **RED 变为 GREEN**，同时补齐单测、`typecheck` 和 `build`。
+   - 跑完后自动清理临时测试频道、临时会话与测试数据，保证用户环境整洁。
 
 ## Mandatory Deliverables
 

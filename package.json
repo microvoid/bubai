@@ -9,7 +9,8 @@
     "build": "turbo run build",
     "lint": "turbo run lint",
     "typecheck": "turbo run typecheck",
-    "test": "bun test packages/chat-client/src apps/server/src",
+    "test": "bun test packages/botmux-client/src packages/chat-client/src apps/server/src",
+    "test:e2e": "bun test --timeout 30000 ./tests/e2e",
     "buzz:send": "node scripts/buzz-send.mjs",
     "format": "prettier --write \"**/*.{ts,tsx,js,json,md}\""
   },

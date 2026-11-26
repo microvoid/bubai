@@ -4,6 +4,7 @@ import fs from 'node:fs';
 import type { TriggerRequest, TriggerResponse } from './trigger-types.js';
 
 export * from './trigger-types.js';
+export * from './progress/index.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -23,6 +24,8 @@ export interface BuzzTurnContext {
     cliScriptPath?: string;
     botId: string;
     channelId: string;
+    threadId?: string;
+    placeholderMessageId?: string;
   };
   messages: Array<{
     sender: string;
@@ -30,6 +33,9 @@ export interface BuzzTurnContext {
     content: string;
   }>;
 }
+
+/** CLIs whose Botmux headless trigger relies on explicit outbound delivery rather than auto-final capture. */
+const EXPLICIT_OUTBOUND_CLIS = new Set(['antigravity']);
 
 export interface BotmuxSession {
   sessionId: string;
@@ -441,6 +447,7 @@ export class BotmuxClient {
 
   async triggerTurn(params: {
     botId: string;
+    cliId?: string;
     sessionId?: string;
     prompt: string;
     senderName: string;
@@ -448,6 +455,32 @@ export class BotmuxClient {
     context?: BuzzTurnContext;
   }): Promise<TriggerResponse> {
     const trimmedSystemPrompt = params.systemPrompt?.trim();
+    const outbound = params.context?.outboundApi;
+    const requiresExplicitOutbound = Boolean(
+      outbound && params.cliId && EXPLICIT_OUTBOUND_CLIS.has(params.cliId.toLowerCase()),
+    );
+    const threadArg = outbound?.threadId ? ` --thread "${outbound.threadId}"` : '';
+    const msgIdArg = outbound?.placeholderMessageId
+      ? ` --message-id "${outbound.placeholderMessageId}"`
+      : '';
+
+    const deliveryLines = requiresExplicitOutbound && outbound
+      ? [
+          outbound.cliScriptPath
+            ? `完成本轮回复后，请务必执行以下命令将最终答复发回 Buzz 对话（执行后会自动结束本轮「执行中」状态）：\nnode ${outbound.cliScriptPath} --bot "${outbound.botId}" --channel "${outbound.channelId}"${threadArg}${msgIdArg} --text "<最终答复>"\n也可直接 POST ${outbound.endpoint}（JSON 字段：botId、channelId、content、threadId、messageId）。`
+            : `完成本轮回复后，请务必调用 POST ${outbound.endpoint} 将最终答复发回 Buzz 对话，JSON 参数为 { "botId": "${outbound.botId}", "channelId": "${outbound.channelId}", "content": "<最终答复>", "threadId": ${outbound.threadId ? JSON.stringify(outbound.threadId) : 'null'}, "messageId": ${outbound.placeholderMessageId ? JSON.stringify(outbound.placeholderMessageId) : 'null'} }。`,
+        ]
+      : [
+          'Buzz 会把你的最终回复写回当前对话。',
+          ...(outbound
+            ? [
+                outbound.cliScriptPath
+                  ? `如需显式向频道主对话流或指定 Thread 发送消息，可执行：node ${outbound.cliScriptPath} --bot "${outbound.botId}" --channel "${outbound.channelId}"${threadArg}${msgIdArg} --text "<内容>"（不传 --thread 即发往主对话流；传 --thread "<rootMessageId>" 发往指定 Thread）；也可直接 POST ${outbound.endpoint}。`
+                  : `如需显式向频道主对话流或指定 Thread 发送消息，可调用 POST ${outbound.endpoint}，JSON 参数为 { "botId": "${outbound.botId}", "channelId": "${outbound.channelId}", "content": "...", "threadId": null }。`,
+              ]
+            : []),
+        ];
+
     const body: TriggerRequest = {
       source: {
         type: 'headless',
@@ -471,14 +504,7 @@ export class BotmuxClient {
         ...(trimmedSystemPrompt
           ? [`[Agent System Prompt]\n${trimmedSystemPrompt}`]
           : []),
-        'Buzz 会把你的最终回复写回当前对话。',
-        ...(params.context?.outboundApi
-          ? [
-              params.context.outboundApi.cliScriptPath
-                ? `如需显式向频道主对话流或指定 Thread 发送消息，可执行：node ${params.context.outboundApi.cliScriptPath} --bot "${params.context.outboundApi.botId}" --channel "${params.context.outboundApi.channelId}" --text "<内容>"（不传 --thread 即发往主对话流；传 --thread "<rootMessageId>" 发往指定 Thread）；也可直接 POST ${params.context.outboundApi.endpoint}。`
-                : `如需显式向频道主对话流或指定 Thread 发送消息，可调用 POST ${params.context.outboundApi.endpoint}，JSON 参数为 { "botId": "${params.context.outboundApi.botId}", "channelId": "${params.context.outboundApi.channelId}", "content": "...", "threadId": null }。`,
-            ]
-          : []),
+        ...deliveryLines,
         ...(params.context
           ? [
               '会话历史仅供理解上下文，请根据下面的最新消息回复。',

@@ -77,6 +77,8 @@ CREATE TABLE IF NOT EXISTS channel_members (
   UNIQUE (channel_id, user_id),
   UNIQUE (channel_id, agent_id)
 );
+CREATE UNIQUE INDEX IF NOT EXISTS channel_members_channel_user_uidx ON channel_members (channel_id, user_id);
+CREATE UNIQUE INDEX IF NOT EXISTS channel_members_channel_agent_uidx ON channel_members (channel_id, agent_id);
 
 CREATE TABLE IF NOT EXISTS messages (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),

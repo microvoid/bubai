@@ -54,6 +54,7 @@ Options:
   --text <message>      Message content (reads from stdin if omitted)
   --thread <rootId>     Optional thread root message ID (omit to post to main timeline)
   --reply-to <msgId>    Optional parent reply ID inside a thread
+  --message-id <id>     Optional running placeholder message ID to settle in place
   --session <sid>       Optional Botmux session ID
   --server <url>        Buzz server URL (default: env BUZZ_SERVER_URL or http://127.0.0.1:4000)
   --token <token>       Optional Bearer token (env: BUZZ_BOT_TOKEN)
@@ -98,6 +99,7 @@ async function main() {
     content: text,
     ...(args.thread ? { threadId: args.thread } : {}),
     ...(args['reply-to'] ? { replyToId: args['reply-to'] } : {}),
+    ...(args['message-id'] ? { messageId: args['message-id'] } : {}),
     ...(args.session ? { botmuxSessionId: args.session } : {}),
   };
 

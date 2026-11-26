@@ -5,6 +5,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
+import { isDeepStrictEqual } from 'node:util';
 import { Hono } from 'hono';
 import { cors } from 'hono/cors';
 import type { ServerWebSocket } from 'bun';
@@ -35,6 +36,11 @@ import {
 } from '@buzz-botmux/db';
 import {
   BotmuxClient,
+  finalizeProgressSnapshot,
+  normalizeProgressSnapshot,
+  progressSnapshotEquals,
+  readTurnProgress,
+  type AgentProgressSnapshot,
   type BotmuxBot,
   type BotmuxSession,
   type BuzzTurnContext,
@@ -42,6 +48,11 @@ import {
   type TriggerResponse,
 } from '@buzz-botmux/botmux-client';
 import { readAntigravityResult } from './antigravity-result';
+import {
+  buildProxiedTerminalUrl,
+  proxyTerminalHttpRequest,
+  resolveTerminalUpstreamUrl,
+} from './terminal-proxy';
 
 const PORT = Number(process.env.PORT || 4000);
 const BOTMUX_ENDPOINT = process.env.BOTMUX_ENDPOINT || 'http://127.0.0.1:7891';
@@ -105,7 +116,11 @@ const { db } = await openChatDatabase();
 const botmux = new BotmuxClient(BOTMUX_ENDPOINT, BOTMUX_TOKEN);
 
 interface WsClientData {
+  kind?: 'chat' | 'terminal-proxy';
   userId?: string;
+  upstreamWsUrl?: string;
+  upstreamWs?: WebSocket | null;
+  pendingFrames?: Array<string | ArrayBuffer | Uint8Array>;
 }
 
 const clients = new Set<ServerWebSocket<WsClientData>>();
@@ -344,7 +359,7 @@ async function listChannelsWithUnread(userId: string) {
   const visibleChannels = channelRows.filter((ch) => {
     if (!channelVisibleTo(ch, userId)) return false;
     const readRow = readMap.get(ch.id);
-    if (ch.kind === 'dm' && readRow?.hidden) return false;
+    if (readRow?.hidden) return false;
     return true;
   });
 
@@ -380,6 +395,7 @@ async function listChannelsWithUnread(userId: string) {
         createdByUserId: ch.createdByUserId || undefined,
         dmKey: ch.dmKey || undefined,
         unreadCount: markedUnread ? Math.max(1, rawUnread) : rawUnread,
+        lastReadAt: lastRead ? lastRead.getTime() : undefined,
         muted: Boolean(readRow?.muted),
         markedUnread,
         starred: Boolean(readRow?.starred),
@@ -567,6 +583,38 @@ function findMentionedBots(
   });
 }
 
+async function applyMessageProgress(
+  row: typeof messages.$inferSelect,
+  rawProgress: unknown,
+): Promise<typeof messages.$inferSelect | null> {
+  if (!row.card || row.card.status !== 'running') return null;
+  const normalized = normalizeProgressSnapshot(rawProgress);
+  if (!normalized) return null;
+  if (progressSnapshotEquals(row.card.progress, normalized)) return null;
+
+  const [updated] = await db
+    .update(messages)
+    .set({
+      card: {
+        ...row.card,
+        progress: normalized,
+      },
+    })
+    .where(and(
+      eq(messages.id, row.id),
+      isNull(messages.deletedAt),
+      sql`${messages.card}->>'status' = 'running'`,
+    ))
+    .returning();
+
+  if (updated) {
+    const reactions = (await getReactionsForMessages([updated.id])).get(updated.id) || [];
+    broadcast({ type: 'message.updated', payload: formatMessageRow(updated, 0, reactions) });
+    return updated;
+  }
+  return null;
+}
+
 async function reconcileBotmuxTurn(
   row: typeof messages.$inferSelect,
   getSessions: () => Promise<BotmuxSession[]>
@@ -579,6 +627,22 @@ async function reconcileBotmuxTurn(
   // A transient lookup error must leave the row eligible for the next poll.
   const result = await botmux.pollTriggerResult(sessionId, triggerId).catch(() => undefined);
   const bot = cachedBots.find((item) => item.larkAppId === botId);
+  let latestProgress: AgentProgressSnapshot | undefined = card.progress;
+
+  if (isLocalBotmux) {
+    const extracted = await readTurnProgress({
+      cliId: bot?.cliId,
+      triggerId,
+      botId,
+      channelId,
+      sessionId,
+      createdAt: row.createdAt,
+    }).catch(() => undefined);
+    if (extracted) {
+      latestProgress = extracted;
+    }
+  }
+
   let content: string | undefined;
   let status: MessageCardData['status'] = 'failed';
 
@@ -611,7 +675,17 @@ async function reconcileBotmuxTurn(
   if (!content && age >= BOTMUX_RESULT_TIMEOUT_MS) {
     content = '等待 Botmux 回复超时。可打开终端查看执行情况。';
   }
-  if (!content) return;
+  if (!content) {
+    if (latestProgress) {
+      await applyMessageProgress(row, latestProgress);
+    }
+    return;
+  }
+
+  const settledProgress = finalizeProgressSnapshot(
+    latestProgress,
+    status === 'completed' ? 'completed' : 'failed',
+  );
 
   const [updated] = await db
     .update(messages)
@@ -621,6 +695,7 @@ async function reconcileBotmuxTurn(
         title: card.title,
         status,
         summary: status === 'completed' ? `Botmux turn completed (${triggerId})` : content,
+        ...(settledProgress ? { progress: settledProgress } : {}),
       },
     })
     .where(and(
@@ -657,11 +732,30 @@ async function pollBotmuxTurns() {
   }
 }
 
+let botmuxPollRunning = false;
+let botmuxPollQueued = false;
+
+async function runBotmuxTurnPoll() {
+  if (botmuxPollRunning) {
+    botmuxPollQueued = true;
+    return;
+  }
+  botmuxPollRunning = true;
+  try {
+    do {
+      botmuxPollQueued = false;
+      await pollBotmuxTurns();
+    } while (botmuxPollQueued);
+  } catch (err) {
+    console.error('[Server] Botmux reply poll failed:', err);
+  } finally {
+    botmuxPollRunning = false;
+  }
+}
+
 function scheduleBotmuxResultPoll() {
   setTimeout(() => {
-    void pollBotmuxTurns()
-      .catch((err) => console.error('[Server] Botmux reply poll failed:', err))
-      .finally(scheduleBotmuxResultPoll);
+    void runBotmuxTurnPoll().finally(scheduleBotmuxResultPoll);
   }, BOTMUX_RESULT_POLL_MS);
 }
 
@@ -671,6 +765,25 @@ app.use('*', cors());
 app.get('/health', async (c) => {
   const botmuxStatus = await botmux.checkHealth();
   return c.json({ status: 'ok', botmux: botmuxStatus });
+});
+
+app.get('/api/instance', async (c) => {
+  const botmuxStatus = await botmux.checkHealth();
+  return c.json({
+    name: process.env.BUBAI_INSTANCE_NAME || 'Bubai',
+    version: '0.1.0',
+    authRequired: false,
+    publicUrl: process.env.PUBLIC_URL || undefined,
+    botmux: {
+      connected: botmuxStatus.connected,
+      authenticated: botmuxStatus.authenticated,
+      detail: botmuxStatus.detail,
+    },
+    capabilities: {
+      terminalProxy: true,
+      ws: true,
+    },
+  });
 });
 
 app.get('/api/bootstrap', async (c) => {
@@ -993,12 +1106,176 @@ app.post('/api/channels/:channelId/read', async (c) => {
   const now = new Date();
   await db
     .insert(channelReads)
-    .values({ channelId, userId, lastReadAt: now })
+    .values({ channelId, userId, lastReadAt: now, markedUnread: false, hidden: false })
     .onConflictDoUpdate({
       target: [channelReads.channelId, channelReads.userId],
-      set: { lastReadAt: now },
+      set: { lastReadAt: now, markedUnread: false, hidden: false },
     });
   return c.json({ ok: true, channelId, userId, lastReadAt: now.getTime() });
+});
+
+app.post('/api/channels/:channelId/unread', async (c) => {
+  const channelId = c.req.param('channelId');
+  const body = await c.req.json<{ userId?: string }>().catch(() => ({ userId: undefined }));
+  const userId = body.userId || 'u-owner';
+  await db
+    .insert(channelReads)
+    .values({ channelId, userId, markedUnread: true })
+    .onConflictDoUpdate({
+      target: [channelReads.channelId, channelReads.userId],
+      set: { markedUnread: true },
+    });
+  return c.json({ ok: true, channelId, userId, markedUnread: true });
+});
+
+app.post('/api/channels/:channelId/mute', async (c) => {
+  const channelId = c.req.param('channelId');
+  const body = await c.req.json<{ userId?: string; muted?: boolean }>();
+  const userId = body.userId || 'u-owner';
+  const muted = Boolean(body.muted);
+  await db
+    .insert(channelReads)
+    .values({ channelId, userId, muted })
+    .onConflictDoUpdate({
+      target: [channelReads.channelId, channelReads.userId],
+      set: { muted },
+    });
+  return c.json({ ok: true, channelId, userId, muted });
+});
+
+app.post('/api/channels/:channelId/hide', async (c) => {
+  const channelId = c.req.param('channelId');
+  const body = await c.req.json<{ userId?: string; hidden?: boolean }>();
+  const userId = body.userId || 'u-owner';
+  const hidden = body.hidden !== undefined ? Boolean(body.hidden) : true;
+  await db
+    .insert(channelReads)
+    .values({ channelId, userId, hidden })
+    .onConflictDoUpdate({
+      target: [channelReads.channelId, channelReads.userId],
+      set: { hidden },
+    });
+  return c.json({ ok: true, channelId, userId, hidden });
+});
+
+app.post('/api/channels/:channelId/placement', async (c) => {
+  const channelId = c.req.param('channelId');
+  const body = await c.req.json<{
+    userId?: string;
+    starred?: boolean;
+    groupId?: string | null;
+  }>();
+  const userId = body.userId || 'u-owner';
+  const [existing] = await db
+    .select()
+    .from(channelReads)
+    .where(and(eq(channelReads.channelId, channelId), eq(channelReads.userId, userId)));
+
+  const nextStarred = body.starred !== undefined ? Boolean(body.starred) : Boolean(existing?.starred);
+  const nextGroupId =
+    body.groupId !== undefined ? (body.groupId ? body.groupId : null) : (existing?.groupId ?? null);
+
+  await db
+    .insert(channelReads)
+    .values({ channelId, userId, starred: nextStarred, groupId: nextGroupId })
+    .onConflictDoUpdate({
+      target: [channelReads.channelId, channelReads.userId],
+      set: { starred: nextStarred, groupId: nextGroupId },
+    });
+  return c.json({ ok: true, channelId, userId, starred: nextStarred, groupId: nextGroupId });
+});
+
+app.patch('/api/channels/:channelId/archive', async (c) => {
+  const channelId = c.req.param('channelId');
+  const body = await c.req.json<{ userId?: string; archived?: boolean }>();
+  const userId = body.userId || 'u-owner';
+  const archived = Boolean(body.archived);
+
+  const [existing] = await db.select().from(channels).where(eq(channels.id, channelId));
+  if (!existing) return c.json({ error: 'Channel not found' }, 404);
+  if (existing.kind === 'dm') {
+    return c.json({ error: 'Direct messages cannot be archived; use hide instead' }, 400);
+  }
+  if (existing.createdByUserId && existing.createdByUserId !== userId) {
+    return c.json({ error: 'Only the channel creator can archive or unarchive this channel' }, 403);
+  }
+
+  const [updated] = await db
+    .update(channels)
+    .set({ archived })
+    .where(eq(channels.id, channelId))
+    .returning();
+
+  const dto = {
+    id: updated.id,
+    name: updated.name,
+    topic: updated.topic,
+    kind: updated.kind as 'channel' | 'dm',
+    replyMode: parseReplyMode(updated.replyMode, DEFAULT_REPLY_MODE),
+    archived: Boolean(updated.archived),
+    createdByUserId: updated.createdByUserId || undefined,
+    createdAt: updated.createdAt.getTime(),
+  };
+  broadcast({ type: 'channel.updated', payload: dto });
+  return c.json({ channel: dto });
+});
+
+app.delete('/api/channels/:channelId', async (c) => {
+  const channelId = c.req.param('channelId');
+  const userId = c.req.query('userId') || 'u-owner';
+
+  const [existing] = await db.select().from(channels).where(eq(channels.id, channelId));
+  if (!existing) return c.json({ error: 'Channel not found' }, 404);
+  if (existing.kind === 'dm') {
+    return c.json({ error: 'Direct messages cannot be deleted; use hide instead' }, 400);
+  }
+  if (existing.createdByUserId && existing.createdByUserId !== userId) {
+    return c.json({ error: 'Only the channel creator can delete this channel' }, 403);
+  }
+
+  await db.delete(channels).where(eq(channels.id, channelId));
+  broadcast({ type: 'channel.deleted', payload: { id: channelId } });
+  return c.json({ ok: true, id: channelId });
+});
+
+app.post('/api/sidebar-groups', async (c) => {
+  const body = await c.req.json<{ userId?: string; name?: string }>();
+  const userId = body.userId || 'u-owner';
+  const name = (body.name || '').trim().slice(0, 60);
+  if (!name) return c.json({ error: 'Group name required' }, 400);
+  const [created] = await db
+    .insert(sidebarGroups)
+    .values({ userId, name })
+    .returning();
+  return c.json({ group: { id: created.id, name: created.name } }, 201);
+});
+
+app.patch('/api/sidebar-groups/:groupId', async (c) => {
+  const groupId = c.req.param('groupId');
+  const body = await c.req.json<{ userId?: string; name?: string }>();
+  const userId = body.userId || 'u-owner';
+  const name = (body.name || '').trim().slice(0, 60);
+  if (!name) return c.json({ error: 'Group name required' }, 400);
+  const [updated] = await db
+    .update(sidebarGroups)
+    .set({ name })
+    .where(and(eq(sidebarGroups.id, groupId), eq(sidebarGroups.userId, userId)))
+    .returning();
+  if (!updated) return c.json({ error: 'Group not found' }, 404);
+  return c.json({ group: { id: updated.id, name: updated.name } });
+});
+
+app.delete('/api/sidebar-groups/:groupId', async (c) => {
+  const groupId = c.req.param('groupId');
+  const userId = c.req.query('userId') || 'u-owner';
+  await db
+    .update(channelReads)
+    .set({ groupId: null })
+    .where(and(eq(channelReads.userId, userId), eq(channelReads.groupId, groupId)));
+  await db
+    .delete(sidebarGroups)
+    .where(and(eq(sidebarGroups.id, groupId), eq(sidebarGroups.userId, userId)));
+  return c.json({ ok: true, id: groupId });
 });
 
 app.post('/api/channels', async (c) => {
@@ -1034,7 +1311,14 @@ app.post('/api/channels', async (c) => {
 
 app.patch('/api/channels/:channelId/settings', async (c) => {
   const channelId = c.req.param('channelId');
-  const body = await c.req.json<{ replyMode?: string }>();
+  const body = await c.req.json<{
+    userId?: string;
+    name?: string;
+    topic?: string;
+    replyMode?: string;
+  }>();
+  const [existing] = await db.select().from(channels).where(eq(channels.id, channelId));
+  if (!existing) return c.json({ error: 'Channel not found' }, 404);
   if (
     body.replyMode !== undefined &&
     !(REPLY_MODES as readonly string[]).includes(body.replyMode)
@@ -1044,25 +1328,50 @@ app.patch('/api/channels/:channelId/settings', async (c) => {
       400
     );
   }
-  const [updated] = await db
-    .update(channels)
-    .set({
-      ...(body.replyMode !== undefined ? { replyMode: body.replyMode } : {}),
-    })
-    .where(eq(channels.id, channelId))
-    .returning();
-  if (!updated) return c.json({ error: 'Channel not found' }, 404);
-  return c.json({
-    channel: {
-      id: updated.id,
-      name: updated.name,
-      topic: updated.topic,
-      kind: updated.kind as 'channel' | 'dm',
-      replyMode: parseReplyMode(updated.replyMode, DEFAULT_REPLY_MODE),
-      dmKey: updated.dmKey || undefined,
-      createdAt: updated.createdAt.getTime(),
-    },
-  });
+
+  const updates: Partial<typeof channels.$inferInsert> = {};
+  if (body.name !== undefined) {
+    const cleanName = body.name
+      .trim()
+      .toLowerCase()
+      .replace(/[^a-z0-9\u4e00-\u9fa5_-]+/g, '-');
+    if (!cleanName) return c.json({ error: 'Channel name required' }, 400);
+    updates.name = cleanName;
+  }
+  if (body.topic !== undefined) {
+    updates.topic = body.topic.trim().slice(0, 280);
+  }
+  if (body.replyMode !== undefined) {
+    updates.replyMode = body.replyMode;
+  }
+
+  let updated = existing;
+  if (Object.keys(updates).length > 0) {
+    try {
+      const [row] = await db
+        .update(channels)
+        .set(updates)
+        .where(eq(channels.id, channelId))
+        .returning();
+      if (row) updated = row;
+    } catch {
+      return c.json({ error: 'Channel name already exists' }, 409);
+    }
+  }
+
+  const dto = {
+    id: updated.id,
+    name: updated.name,
+    topic: updated.topic,
+    kind: updated.kind as 'channel' | 'dm',
+    replyMode: parseReplyMode(updated.replyMode, DEFAULT_REPLY_MODE),
+    archived: Boolean(updated.archived),
+    createdByUserId: updated.createdByUserId || undefined,
+    dmKey: updated.dmKey || undefined,
+    createdAt: updated.createdAt.getTime(),
+  };
+  broadcast({ type: 'channel.updated', payload: dto });
+  return c.json({ channel: dto });
 });
 
 /** Explicit outbound endpoint for Bots / automated tasks to post into main timeline or a Thread */
@@ -1082,6 +1391,7 @@ app.post('/api/bot/messages', async (c) => {
     content?: string;
     threadId?: string | null;
     replyToId?: string | null;
+    messageId?: string | null;
     attachments?: MessageAttachment[];
     botmuxSessionId?: string;
   }>();
@@ -1115,9 +1425,63 @@ app.post('/api/bot/messages', async (c) => {
   if (!channelRow) {
     return c.json({ error: 'Channel not found' }, 404);
   }
+  if (channelRow.archived) {
+    return c.json({ error: 'Channel is archived' }, 400);
+  }
 
   const resolvedThreadId = body.threadId ? body.threadId.trim() : null;
   const resolvedReplyToId = resolvedThreadId && body.replyToId ? body.replyToId.trim() : null;
+  const requestedMessageId = body.messageId ? body.messageId.trim() : null;
+
+  // If this outbound message corresponds to an active running placeholder for this bot/channel,
+  // settle that placeholder in place so we never leave an orphaned "执行中" card or duplicate reply.
+  const placeholderConditions = [
+    eq(messages.channelId, channelRow.id),
+    eq(messages.senderAgentId, botId),
+    isNull(messages.deletedAt),
+    sql`${messages.card}->>'status' = 'running'`,
+  ];
+  if (requestedMessageId) {
+    placeholderConditions.push(eq(messages.id, requestedMessageId));
+  } else if (resolvedThreadId) {
+    placeholderConditions.push(eq(messages.threadId, resolvedThreadId));
+  } else {
+    placeholderConditions.push(isNull(messages.threadId));
+  }
+
+  const [pendingPlaceholder] = await db
+    .select()
+    .from(messages)
+    .where(and(...placeholderConditions))
+    .orderBy(desc(messages.createdAt))
+    .limit(1);
+
+  if (pendingPlaceholder) {
+    const settledProgress = finalizeProgressSnapshot(pendingPlaceholder.card?.progress, 'completed');
+    const [settled] = await db
+      .update(messages)
+      .set({
+        content: trimmed,
+        attachments: hasFiles ? body.attachments! : pendingPlaceholder.attachments,
+        botmuxSessionId: body.botmuxSessionId || pendingPlaceholder.botmuxSessionId,
+        updatedAt: new Date(),
+        card: {
+          title: pendingPlaceholder.card?.title || `${matchedBot?.botName || botId} · Reply`,
+          status: 'completed',
+          summary: 'Botmux turn completed (outbound reply)',
+          ...(settledProgress ? { progress: settledProgress } : {}),
+        },
+      })
+      .where(and(eq(messages.id, pendingPlaceholder.id), sql`${messages.card}->>'status' = 'running'`))
+      .returning();
+
+    if (settled) {
+      const reactions = (await getReactionsForMessages([settled.id])).get(settled.id) || [];
+      const dto = formatMessageRow(settled, 0, reactions);
+      broadcast({ type: 'message.updated', payload: dto });
+      return c.json({ message: dto, settledPlaceholder: true }, 200);
+    }
+  }
 
   const [saved] = await db
     .insert(messages)
@@ -1135,6 +1499,47 @@ app.post('/api/bot/messages', async (c) => {
   const dto = formatMessageRow(saved);
   broadcast({ type: 'message.created', payload: dto });
   return c.json({ message: dto }, 201);
+});
+
+/** Fixed-contract progress endpoint for external adapters / runners to push live tool steps */
+app.post('/api/bot/messages/:messageId/progress', async (c) => {
+  if (BUZZ_BOT_TOKEN) {
+    const auth = c.req.header('authorization') || '';
+    const token = auth.startsWith('Bearer ') ? auth.slice(7).trim() : '';
+    if (token !== BUZZ_BOT_TOKEN) {
+      return c.json({ error: 'Unauthorized' }, 401);
+    }
+  }
+
+  const messageId = c.req.param('messageId')?.trim();
+  if (!messageId) return c.json({ error: 'messageId is required' }, 400);
+
+  const body = await c.req.json<{ progress?: unknown } & Record<string, unknown>>().catch(() => null);
+  const rawProgress = body && 'progress' in body ? body.progress : body;
+  const normalized = normalizeProgressSnapshot(rawProgress);
+  if (!normalized) {
+    return c.json({ error: 'Invalid progress payload: expected { activeLabel?, toolCount, steps[] }' }, 400);
+  }
+
+  const [row] = await db
+    .select()
+    .from(messages)
+    .where(and(eq(messages.id, messageId), isNull(messages.deletedAt)))
+    .limit(1);
+
+  if (!row) return c.json({ error: 'Message not found' }, 404);
+  if (!row.card || row.card.status !== 'running') {
+    return c.json({ error: 'Message is not in running state' }, 409);
+  }
+
+  const updated = await applyMessageProgress(row, normalized);
+  const effective = updated ?? row;
+  const reactions = (await getReactionsForMessages([effective.id])).get(effective.id) || [];
+  return c.json({
+    ok: true,
+    updated: Boolean(updated),
+    message: formatMessageRow(effective, 0, reactions),
+  });
 });
 
 app.post('/api/dms', async (c) => {
@@ -1155,12 +1560,23 @@ app.post('/api/dms', async (c) => {
 
   const [existing] = await db.select().from(channels).where(eq(channels.dmKey, dmKey));
   if (existing) {
+    // Reopening a closed/hidden DM brings it back into the user's sidebar with full history
+    await db
+      .insert(channelReads)
+      .values({ channelId: existing.id, userId, hidden: false })
+      .onConflictDoUpdate({
+        target: [channelReads.channelId, channelReads.userId],
+        set: { hidden: false },
+      });
     return c.json({
       channel: {
         id: existing.id,
         name: existing.name,
         topic: existing.topic,
         kind: 'dm' as const,
+        replyMode: parseReplyMode(existing.replyMode, DEFAULT_REPLY_MODE),
+        archived: false,
+        createdByUserId: existing.createdByUserId || undefined,
         dmKey: existing.dmKey || undefined,
         unreadCount: 0,
         createdAt: existing.createdAt.getTime(),
@@ -1244,22 +1660,46 @@ app.post('/api/channels/:channelId/members', async (c) => {
   }
 
   if (body.agentId) {
+    const existing = await db
+      .select()
+      .from(channelMembers)
+      .where(
+        and(eq(channelMembers.channelId, channelId), eq(channelMembers.agentId, body.agentId)),
+      );
+    if (existing.length > 0) {
+      const [row] = await db
+        .update(channelMembers)
+        .set({ autoReply: Boolean(body.autoReply) })
+        .where(eq(channelMembers.id, existing[0].id))
+        .returning();
+      return c.json({ member: row });
+    }
     const [row] = await db
       .insert(channelMembers)
       .values({ channelId, agentId: body.agentId, autoReply: Boolean(body.autoReply) })
-      .onConflictDoUpdate({
-        target: [channelMembers.channelId, channelMembers.agentId],
-        set: { autoReply: Boolean(body.autoReply) },
-      })
       .returning();
     return c.json({ member: row });
   }
 
-  const [row] = await db
-    .insert(channelMembers)
-    .values({ channelId, userId: body.userId!, autoReply: false })
-    .onConflictDoNothing()
-    .returning();
+  const existingUser = await db
+    .select()
+    .from(channelMembers)
+    .where(and(eq(channelMembers.channelId, channelId), eq(channelMembers.userId, body.userId!)));
+  const row =
+    existingUser[0] ??
+    (
+      await db
+        .insert(channelMembers)
+        .values({ channelId, userId: body.userId!, autoReply: false })
+        .returning()
+    )[0];
+  await db
+    .insert(channelReads)
+    .values({ channelId, userId: body.userId!, hidden: false })
+    .onConflictDoUpdate({
+      target: [channelReads.channelId, channelReads.userId],
+      set: { hidden: false },
+    });
   return c.json({ member: row });
 });
 
@@ -1276,6 +1716,13 @@ app.delete('/api/channels/:channelId/members', async (c) => {
     await db
       .delete(channelMembers)
       .where(and(eq(channelMembers.channelId, channelId), eq(channelMembers.userId, body.userId)));
+    await db
+      .insert(channelReads)
+      .values({ channelId, userId: body.userId, hidden: true })
+      .onConflictDoUpdate({
+        target: [channelReads.channelId, channelReads.userId],
+        set: { hidden: true },
+      });
   }
   return c.json({ ok: true });
 });
@@ -1294,10 +1741,84 @@ app.post('/api/humans', async (c) => {
   );
 });
 
+app.patch('/api/humans/:userId', async (c) => {
+  const userId = c.req.param('userId');
+  const body = await c.req.json<{ name?: string; avatarUrl?: string | null }>();
+  const [existing] = await db.select().from(users).where(eq(users.id, userId));
+  if (!existing) return c.json({ error: 'User not found' }, 404);
+
+  const updates: Partial<typeof users.$inferInsert> = {};
+  if (body.name !== undefined) {
+    const trimmed = body.name.trim();
+    if (!trimmed) return c.json({ error: 'Name required' }, 400);
+    updates.name = trimmed;
+  }
+  if (body.avatarUrl !== undefined) {
+    const trimmed = typeof body.avatarUrl === 'string' ? body.avatarUrl.trim() : '';
+    updates.avatarUrl = trimmed || null;
+  }
+
+  let updated = existing;
+  if (Object.keys(updates).length > 0) {
+    const [row] = await db.update(users).set(updates).where(eq(users.id, userId)).returning();
+    if (row) updated = row;
+  }
+
+  broadcast({ type: 'presence.updated', payload: { participants: await listParticipants() } });
+  return c.json({
+    human: {
+      id: updated.id,
+      name: updated.name,
+      avatarUrl: updated.avatarUrl || undefined,
+      role: 'human' as const,
+      status: 'online' as const,
+    },
+  });
+});
+
+app.get('/api/messages/:messageId', async (c) => {
+  const messageId = c.req.param('messageId');
+  const userId = c.req.query('userId') || 'u-owner';
+  const [row] = await db
+    .select()
+    .from(messages)
+    .where(and(eq(messages.id, messageId), isNull(messages.deletedAt)));
+  if (!row) return c.json({ error: 'Message not found' }, 404);
+  const [ch] = await db.select().from(channels).where(eq(channels.id, row.channelId));
+  if (!ch || !channelVisibleTo(ch, userId)) return c.json({ error: 'Message not found' }, 404);
+  return c.json({ message: formatMessageRow(row) });
+});
+
 app.get('/api/sessions/:sessionId/write-link', async (c) => {
   const sessionId = c.req.param('sessionId');
-  const url = await botmux.getSessionWriteLink(sessionId);
-  return c.json({ sessionId, url });
+  const upstreamUrl = await botmux.getSessionWriteLink(sessionId);
+  if (!upstreamUrl) {
+    return c.json({ sessionId, url: null });
+  }
+  const shouldProxy = process.env.BOTMUX_PROXY_TERMINAL !== 'false';
+  if (!shouldProxy) {
+    return c.json({ sessionId, url: upstreamUrl });
+  }
+  const reqOrigin =
+    process.env.PUBLIC_URL?.replace(/\/+$/, '') || new URL(c.req.url).origin;
+  const proxiedUrl = buildProxiedTerminalUrl(reqOrigin, sessionId, upstreamUrl);
+  return c.json({ sessionId, url: proxiedUrl, directUrl: upstreamUrl });
+});
+
+app.all('/api/terminal-proxy/:sessionId/*', async (c) => {
+  const url = new URL(c.req.url);
+  const upstreamUrl = resolveTerminalUpstreamUrl(url.pathname, url.search, BOTMUX_ENDPOINT);
+  if (!upstreamUrl) {
+    return c.json({ error: 'Invalid terminal proxy path' }, 400);
+  }
+  try {
+    return await proxyTerminalHttpRequest(c.req.raw, upstreamUrl);
+  } catch (err) {
+    return c.json(
+      { error: err instanceof Error ? err.message : 'Terminal proxy failed' },
+      502,
+    );
+  }
 });
 
 app.post('/api/sessions/:sessionId/:op', async (c) => {
@@ -1458,6 +1979,7 @@ botmux.subscribeEvents((eventName, data) => {
     void botmux.getPendingAsks().then((asks) => {
       broadcast({ type: 'asks.updated', payload: { asks } });
     });
+    void runBotmuxTurnPoll();
   }
   broadcast({ type: 'botmux.event', payload: { eventName, data } });
 });
@@ -1467,22 +1989,92 @@ Bun.serve<WsClientData>({
   fetch(req, server) {
     const url = new URL(req.url);
     if (url.pathname === '/ws') {
-      if (server.upgrade(req, { data: {} })) return undefined;
+      if (server.upgrade(req, { data: { kind: 'chat' } })) return undefined;
       return new Response('WebSocket upgrade failed', { status: 400 });
+    }
+    if (
+      url.pathname.startsWith('/api/terminal-proxy/') &&
+      req.headers.get('upgrade')?.toLowerCase() === 'websocket'
+    ) {
+      const upstreamHttp = resolveTerminalUpstreamUrl(url.pathname, url.search, BOTMUX_ENDPOINT);
+      if (upstreamHttp) {
+        const upstreamWsUrl = upstreamHttp.replace(/^http/i, 'ws');
+        if (
+          server.upgrade(req, {
+            data: { kind: 'terminal-proxy', upstreamWsUrl, upstreamWs: null, pendingFrames: [] },
+          })
+        ) {
+          return undefined;
+        }
+      }
+      return new Response('Terminal WebSocket upgrade failed', { status: 400 });
     }
     return app.fetch(req);
   },
   websocket: {
+    idleTimeout: 960,
+    sendPings: true,
     open(ws) {
+      if (ws.data.kind === 'terminal-proxy' && ws.data.upstreamWsUrl) {
+        const upstream = new WebSocket(ws.data.upstreamWsUrl);
+        upstream.binaryType = 'arraybuffer';
+        ws.data.upstreamWs = upstream;
+        upstream.addEventListener('open', () => {
+          const queued = ws.data.pendingFrames ?? [];
+          ws.data.pendingFrames = [];
+          for (const frame of queued) {
+            upstream.send(frame);
+          }
+        });
+        upstream.addEventListener('message', (evt) => {
+          try {
+            if (typeof evt.data === 'string' || evt.data instanceof ArrayBuffer) {
+              ws.send(evt.data);
+            }
+          } catch {
+            // client closed
+          }
+        });
+        upstream.addEventListener('close', () => {
+          try {
+            ws.close();
+          } catch {
+            // ignore
+          }
+        });
+        upstream.addEventListener('error', () => {
+          try {
+            ws.close();
+          } catch {
+            // ignore
+          }
+        });
+        return;
+      }
       clients.add(ws);
     },
     async message(ws, raw) {
+      if (ws.data.kind === 'terminal-proxy') {
+        const upstream = ws.data.upstreamWs;
+        const payload = typeof raw === 'string' ? raw : new Uint8Array(raw);
+        if (upstream && upstream.readyState === WebSocket.OPEN) {
+          upstream.send(payload);
+        } else {
+          ws.data.pendingFrames = ws.data.pendingFrames ?? [];
+          ws.data.pendingFrames.push(payload);
+        }
+        return;
+      }
+      let failSend: ((message: string) => void) | undefined;
       try {
         const event = JSON.parse(String(raw)) as
+          | { type: 'ping' }
           | { type: 'presence.identify'; payload: { userId: string } }
+          | { type: 'typing.start'; payload: { channelId: string; userId: string } }
           | {
               type: 'message.send';
               payload: {
+                messageId?: string;
                 channelId: string;
                 senderId: string;
                 content: string;
@@ -1491,6 +2083,13 @@ Bun.serve<WsClientData>({
                 attachments?: MessageAttachment[];
               };
             };
+
+        if (event.type === 'ping') {
+          if (ws.readyState === WebSocket.OPEN) {
+            ws.send(JSON.stringify({ type: 'pong', payload: { ts: Date.now() } }));
+          }
+          return;
+        }
 
         if (event.type === 'presence.identify') {
           ws.data.userId = event.payload.userId;
@@ -1501,24 +2100,127 @@ Bun.serve<WsClientData>({
           return;
         }
 
+        if (event.type === 'typing.start') {
+          const { channelId, userId } = event.payload || {};
+          if (channelId && userId) {
+            broadcast({
+              type: 'typing.updated',
+              payload: { channelId, userId, typing: true },
+            });
+          }
+          return;
+        }
+
         if (event.type === 'message.send') {
-          const { channelId, senderId, content, threadId, replyToId, attachments } = event.payload;
+          const { messageId, channelId, senderId, content, threadId, replyToId, attachments } =
+            event.payload;
+          if (messageId !== undefined) {
+            failSend = (message) => {
+              if (ws.readyState === WebSocket.OPEN) {
+                ws.send(JSON.stringify({
+                  type: 'message.send_failed',
+                  payload: { messageId, message },
+                }));
+              }
+            };
+          }
+          if (
+            messageId !== undefined &&
+            (typeof messageId !== 'string' || !/^[a-f\d]{8}(?:-[a-f\d]{4}){3}-[a-f\d]{12}$/i.test(messageId))
+          ) {
+            failSend?.('The message ID is invalid.');
+            return;
+          }
           const trimmed = content.trim();
           const hasFiles = Array.isArray(attachments) && attachments.length > 0;
-          if (!trimmed && !hasFiles) return;
+          if (!trimmed && !hasFiles) {
+            failSend?.('Enter a message or add an attachment.');
+            return;
+          }
 
-          const [saved] = await db
-            .insert(messages)
-            .values({
-              channelId,
-              threadId: threadId || null,
-              replyToId: threadId && replyToId ? replyToId : null,
-              senderUserId: senderId,
-              content: trimmed,
-              attachments: hasFiles ? attachments : null,
-            })
-            .returning();
+          const storedThreadId = threadId?.toLowerCase() || null;
+          const storedReplyToId = storedThreadId ? replyToId?.toLowerCase() || null : null;
+          const storedAttachments = hasFiles ? attachments : null;
+          const [channelRow] = await db
+            .select()
+            .from(channels)
+            .where(eq(channels.id, channelId));
+          if (!channelRow) {
+            failSend?.('This channel no longer exists.');
+            return;
+          }
+
+          const [saved] = channelRow.archived
+            ? []
+            : await db
+                .insert(messages)
+                .values({
+                  id: messageId,
+                  channelId,
+                  threadId: storedThreadId,
+                  replyToId: storedReplyToId,
+                  senderUserId: senderId,
+                  content: trimmed,
+                  attachments: storedAttachments,
+                })
+                .onConflictDoNothing({ target: messages.id })
+                .returning();
+
+          if (!saved) {
+            if (messageId === undefined) return;
+            const [existing] = await db.select().from(messages).where(eq(messages.id, messageId));
+            if (!existing) {
+              failSend?.(
+                channelRow.archived ? 'This channel is archived.' : 'Could not send the message. Try again.'
+              );
+              return;
+            }
+            if (
+              existing.channelId !== channelRow.id ||
+              existing.senderUserId !== senderId ||
+              existing.threadId !== storedThreadId ||
+              existing.replyToId !== storedReplyToId ||
+              (!existing.updatedAt && (
+                existing.content !== trimmed || !isDeepStrictEqual(existing.attachments, storedAttachments)
+              ))
+            ) {
+              failSend?.('This message ID is already in use.');
+              return;
+            }
+            if (existing.deletedAt) {
+              failSend?.('This message was already sent and has since been deleted.');
+              return;
+            }
+            failSend = undefined;
+            ws.send(JSON.stringify({ type: 'message.created', payload: formatMessageRow(existing) }));
+            return;
+          }
+
+          failSend = undefined;
           broadcast({ type: 'message.created', payload: formatMessageRow(saved) });
+
+          // Auto-unhide DM for all participants when a new message arrives
+          if (channelRow.kind === 'dm') {
+            await db
+              .update(channelReads)
+              .set({ hidden: false })
+              .where(eq(channelReads.channelId, channelId));
+            broadcast({
+              type: 'channel.updated',
+              payload: {
+                id: channelRow.id,
+                name: channelRow.name,
+                topic: channelRow.topic,
+                kind: 'dm' as const,
+                replyMode: parseReplyMode(channelRow.replyMode, DEFAULT_REPLY_MODE),
+                archived: false,
+                createdByUserId: channelRow.createdByUserId || undefined,
+                dmKey: channelRow.dmKey || undefined,
+                unreadCount: 1,
+                createdAt: channelRow.createdAt.getTime(),
+              },
+            });
+          }
 
           if (!threadId) {
             await db
@@ -1561,10 +2263,6 @@ Bun.serve<WsClientData>({
 
           if (targetBotMap.size === 0) return;
 
-          const [channelRow] = await db
-            .select()
-            .from(channels)
-            .where(eq(channels.id, channelId));
           const [senderUser] = await db.select().from(users).where(eq(users.id, senderId));
 
           const attachmentNote = hasFiles
@@ -1629,6 +2327,10 @@ Bun.serve<WsClientData>({
 
           const channelReplyMode = parseReplyMode(channelRow?.replyMode, DEFAULT_REPLY_MODE);
 
+          const liveSessions = await botmux.getSessions().catch(() => [] as BotmuxSession[]);
+          const liveSessionById = new Map(liveSessions.map((s) => [s.sessionId, s]));
+          const BUSY_SESSION_STATES = new Set(['running', 'working', 'busy', 'thinking', 'starting']);
+
           for (const bot of targetBotMap.values()) {
             const [binding] = await db
               .select()
@@ -1637,7 +2339,36 @@ Bun.serve<WsClientData>({
                 and(eq(botmuxBindings.channelId, channelId), eq(botmuxBindings.botId, bot.larkAppId))
               );
 
-            const existingSessionId = binding?.sessionId;
+            let existingSessionId: string | undefined = binding?.sessionId;
+            let isOverflowParallel = false;
+
+            if (existingSessionId) {
+              const [runningOnSession] = await db
+                .select({ id: messages.id })
+                .from(messages)
+                .where(
+                  and(
+                    eq(messages.botmuxSessionId, existingSessionId),
+                    isNull(messages.deletedAt),
+                    sql`${messages.card}->>'status' = 'running'`
+                  )
+                )
+                .limit(1);
+
+              const liveSession = liveSessionById.get(existingSessionId);
+              const liveState = (liveSession?.state || liveSession?.status || '').toLowerCase();
+              const sessionBusy =
+                Boolean(runningOnSession) ||
+                Boolean(liveSession?.queued) ||
+                BUSY_SESSION_STATES.has(liveState);
+
+              if (sessionBusy) {
+                // Primary session is busy: overflow into a fresh parallel session so turns run concurrently.
+                existingSessionId = undefined;
+                isOverflowParallel = true;
+              }
+            }
+
             const replyThreadId = resolveReplyThreadId(
               channelReplyMode,
               channelRow?.kind,
@@ -1651,14 +2382,18 @@ Bun.serve<WsClientData>({
                 channelId,
                 threadId: replyThreadId,
                 senderAgentId: bot.larkAppId,
-                content: `正在向本地 Botmux (${bot.botName}) 派发指令...`,
+                content: isOverflowParallel
+                  ? `主会话正忙，正在并行启动新的 Botmux (${bot.botName}) 会话...`
+                  : `正在向本地 Botmux (${bot.botName}) 派发指令...`,
                 botmuxSessionId: existingSessionId,
                 card: {
                   title: `${bot.botName} · ${bot.cliId}`,
                   status: 'running',
-                  summary: existingSessionId
-                    ? `复用会话 ${existingSessionId}`
-                    : '正在创建新的 Botmux 会话...',
+                  summary: isOverflowParallel
+                    ? '主会话正忙，正在并行启动新会话...'
+                    : existingSessionId
+                      ? `复用会话 ${existingSessionId}`
+                      : '正在创建新的 Botmux 会话...',
                 },
               })
               .returning();
@@ -1678,14 +2413,17 @@ Bun.serve<WsClientData>({
                 cliScriptPath: BUZZ_SEND_CLI_PATH,
                 botId: bot.larkAppId,
                 channelId,
+                ...(replyThreadId ? { threadId: replyThreadId } : {}),
+                placeholderMessageId: placeholder.id,
               },
               messages: historyMessages,
             };
 
             const botSystemPrompt = profileByAgentId.get(bot.larkAppId)?.systemPrompt?.trim();
-            const triggered = await botmux.triggerTurn({
+            const triggerTurn = (sessionId?: string) => botmux.triggerTurn({
               botId: bot.larkAppId,
-              sessionId: existingSessionId,
+              cliId: bot.cliId,
+              sessionId,
               prompt: `${trimmed}${attachmentNote}`,
               senderName: senderUser?.name || senderId,
               systemPrompt: botSystemPrompt || undefined,
@@ -1694,6 +2432,13 @@ Bun.serve<WsClientData>({
               ok: false,
               error: err instanceof Error ? err.message : String(err),
             }));
+
+            let triggered = await triggerTurn(existingSessionId);
+            if (existingSessionId && !triggered.ok && triggered.errorCode === 'session_not_found') {
+              // Botmux rejects a closed session before dispatching the turn.
+              existingSessionId = undefined;
+              triggered = await triggerTurn();
+            }
 
             const sessionId = triggered.target?.sessionId || existingSessionId;
             if (!triggered.ok || !sessionId || !triggered.triggerId) {
@@ -1714,13 +2459,15 @@ Bun.serve<WsClientData>({
               continue;
             }
 
-            await db
-              .insert(botmuxBindings)
-              .values({ channelId, botId: bot.larkAppId, sessionId, updatedAt: new Date() })
-              .onConflictDoUpdate({
-                target: [botmuxBindings.channelId, botmuxBindings.botId],
-                set: { sessionId, updatedAt: new Date() },
-              });
+            if (!isOverflowParallel) {
+              await db
+                .insert(botmuxBindings)
+                .values({ channelId, botId: bot.larkAppId, sessionId, updatedAt: new Date() })
+                .onConflictDoUpdate({
+                  target: [botmuxBindings.channelId, botmuxBindings.botId],
+                  set: { sessionId, updatedAt: new Date() },
+                });
+            }
 
             const [running] = await db
               .update(messages)
@@ -1745,9 +2492,19 @@ Bun.serve<WsClientData>({
         }
       } catch (err) {
         console.error('[Server] WS message error:', err);
+        failSend?.('Could not send the message. Try again.');
       }
     },
     async close(ws) {
+      if (ws.data.kind === 'terminal-proxy') {
+        try {
+          ws.data.upstreamWs?.close();
+        } catch {
+          // ignore
+        }
+        ws.data.upstreamWs = null;
+        return;
+      }
       clients.delete(ws);
       broadcast({
         type: 'presence.updated',

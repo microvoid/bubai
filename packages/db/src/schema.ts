@@ -13,10 +13,37 @@ import {
   uuid,
 } from 'drizzle-orm/pg-core';
 
+export type AgentProgressStepKind =
+  | 'read'
+  | 'shell'
+  | 'task'
+  | 'search'
+  | 'edit'
+  | 'web'
+  | 'tool';
+
+export type AgentProgressStepStatus = 'running' | 'done' | 'failed';
+
+export interface AgentProgressStep {
+  id: string;
+  kind: AgentProgressStepKind;
+  label: string;
+  status: AgentProgressStepStatus;
+  detail?: string;
+}
+
+export interface AgentProgressSnapshot {
+  activeLabel?: string;
+  toolCount: number;
+  steps: AgentProgressStep[];
+  updatedAt?: number;
+}
+
 export interface MessageCardData {
   title: string;
   status: 'running' | 'waiting_approval' | 'completed' | 'failed';
   summary?: string;
+  progress?: AgentProgressSnapshot;
 }
 
 export interface MessageAttachment {

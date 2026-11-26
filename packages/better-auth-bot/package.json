@@ -11,8 +11,7 @@
     "./credentials": {
       "types": "./dist/credentials.d.ts",
       "import": "./dist/credentials.js"
-    },
-    "./prisma/schema.prisma": "./prisma/schema.prisma"
+    }
   },
   "scripts": {
     "build": "tsc -p tsconfig.json",

@@ -18,8 +18,7 @@
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "lint": "echo 'ok'",
     "test": "tsx --test test/*.test.ts",
-    "auth:generate": "auth generate --config auth.config.ts --output src/schema.ts --yes && node scripts/annotate-self-references.mjs src/schema.ts",
-    "db:generate": "drizzle-kit generate --dialect postgresql --schema src/schema.ts --out drizzle"
+    "auth:generate": "auth generate --config auth.config.ts --output src/schema.ts --yes && node scripts/annotate-self-references.mjs src/schema.ts"
   },
   "dependencies": {
     "@better-auth/api-key": "1.7.26",

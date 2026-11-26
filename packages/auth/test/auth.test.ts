@@ -1,23 +1,16 @@
 import assert from 'node:assert/strict';
-import fs from 'node:fs';
-import path from 'node:path';
 import test from 'node:test';
-import { fileURLToPath } from 'node:url';
 import { PGlite } from '@electric-sql/pglite';
+import { pushSchema } from 'drizzle-kit/api';
 import { drizzle } from 'drizzle-orm/pglite';
-import { botCredentials, createAuth } from '../src/index.js';
-
-const migrationsDir = path.resolve(
-  path.dirname(fileURLToPath(import.meta.url)),
-  '../drizzle',
-);
+import { authSchema, botCredentials, createAuth } from '../src/index.js';
 
 async function openDatabase() {
   const pglite = new PGlite();
-  for (const file of fs.readdirSync(migrationsDir).filter((f) => f.endsWith('.sql')).sort()) {
-    await pglite.exec(fs.readFileSync(path.join(migrationsDir, file), 'utf8'));
-  }
-  return { db: drizzle(pglite), close: () => pglite.close() };
+  const db = drizzle(pglite, { schema: authSchema });
+  const { apply } = await pushSchema(authSchema, db as never);
+  await apply();
+  return { db, close: () => pglite.close() };
 }
 
 test('createAuth works with the plugin-generated schema', async () => {

@@ -47,6 +47,7 @@ export interface ChannelMember {
 
 export function ChannelHeaderIdentity({
   name,
+  topic,
   members,
   participants,
   open,
@@ -55,6 +56,7 @@ export function ChannelHeaderIdentity({
   ref,
 }: {
   name: string;
+  topic?: string;
   members: readonly ChannelMember[];
   participants: readonly Participant[];
   open: boolean;
@@ -105,6 +107,11 @@ export function ChannelHeaderIdentity({
       </span>
       <span className={styles.label}>
         <span className={`${styles.name} text-body-sm`}>{name}</span>
+        {topic && (
+          <span className={`${styles.topic} text-caption`} title={topic} data-channel-topic="">
+            {topic}
+          </span>
+        )}
       </span>
     </SurfaceButton>
   );

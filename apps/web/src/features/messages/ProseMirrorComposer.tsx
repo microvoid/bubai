@@ -12,6 +12,7 @@
  * - Enter-to-send / Shift+Enter newline, file/image uploads & Ctrl+V paste
  * - data-message-composer="" & dockRef for Buzz's inline ComposerSheet
  */
+import { bytesToHex } from '@noble/hashes/utils.js';
 import {
   useEffect,
   useRef,
@@ -64,6 +65,16 @@ export interface ReplyContextTarget {
   author: string;
   excerpt: string;
   onCancel: () => void;
+}
+
+function createMessageId() {
+  if (typeof crypto.randomUUID === 'function') return crypto.randomUUID();
+  // getRandomValues is also available on the Vite dev server's plain HTTP LAN URL.
+  const bytes = crypto.getRandomValues(new Uint8Array(16));
+  bytes[6] = (bytes[6] & 0x0f) | 0x40;
+  bytes[8] = (bytes[8] & 0x3f) | 0x80;
+  const hex = bytesToHex(bytes);
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
 }
 
 const composerSchema = new Schema({
@@ -406,7 +417,9 @@ export function ProseMirrorComposer({
   placeholder = 'Send a message',
   disabled = false,
   candidates = [],
+  draftScope,
   onSend,
+  onTyping,
   onUploadFile,
   serverHttp,
   dockRef,
@@ -416,7 +429,9 @@ export function ProseMirrorComposer({
   placeholder?: string;
   disabled?: boolean;
   candidates?: readonly MentionCandidate[];
-  onSend: (text: string, attachments: UploadedAttachment[]) => void;
+  draftScope: string;
+  onSend: (text: string, attachments: UploadedAttachment[], messageId: string) => Promise<void>;
+  onTyping?: () => void;
   onUploadFile?: (file: File) => Promise<UploadedAttachment | null>;
   serverHttp: string;
   dockRef?: Ref<HTMLDivElement>;
@@ -426,11 +441,20 @@ export function ProseMirrorComposer({
   const hostRef = useRef<HTMLDivElement | null>(null);
   const viewRef = useRef<EditorView | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const sendInProgress = useRef(false);
+  const lastAttempt = useRef<{
+    messageId: string;
+    scope: string;
+    text: string;
+    files: UploadedAttachment[];
+  } | null>(null);
 
   const [isEmpty, setIsEmpty] = useState(true);
   const [activeFormats, setActiveFormats] = useState<ComposerFormat[]>([]);
   const [attachments, setAttachments] = useState<UploadedAttachment[]>([]);
   const [uploading, setUploading] = useState(false);
+  const [sending, setSending] = useState(false);
+  const [sendError, setSendError] = useState<string | null>(null);
   const [mentionState, setMentionState] = useState<{
     from: number;
     to: number;
@@ -448,7 +472,10 @@ export function ProseMirrorComposer({
     candidates,
     attachments,
     disabled,
+    draftScope,
+    uploading,
     onSend,
+    onTyping,
   });
   stateRef.current = {
     mentionState,
@@ -456,7 +483,10 @@ export function ProseMirrorComposer({
     candidates,
     attachments,
     disabled,
+    draftScope,
+    uploading,
     onSend,
+    onTyping,
   };
 
   const applyFormat = (format: ComposerFormat) => {
@@ -551,23 +581,47 @@ export function ProseMirrorComposer({
     return true;
   };
 
-  const triggerSend = () => {
+  const triggerSend = async () => {
     const view = viewRef.current;
-    if (!view || stateRef.current.disabled) return;
-    const text = serializeDoc(view.state.doc).trim();
-    const files = stateRef.current.attachments;
+    const { disabled, draftScope: scope, uploading, attachments: files, onSend } = stateRef.current;
+    if (!view || disabled || uploading || sendInProgress.current) return;
+    const doc = view.state.doc;
+    const text = serializeDoc(doc).trim();
     if (!text && files.length === 0) return;
-    stateRef.current.onSend(text, files);
-    const fresh = EditorState.create({
-      schema: composerSchema,
-      plugins: view.state.plugins,
-    });
-    view.updateState(fresh);
-    setIsEmpty(true);
-    setActiveFormats([]);
-    setAttachments([]);
-    setMentionState(null);
-    setMentionIndex(0);
+
+    const previous = lastAttempt.current;
+    const messageId =
+      previous?.scope === scope && previous.text === text && previous.files === files
+        ? previous.messageId
+        : createMessageId();
+    lastAttempt.current = { messageId, scope, text, files };
+    sendInProgress.current = true;
+    setSending(true);
+    setSendError(null);
+
+    try {
+      await onSend(text, files, messageId);
+      lastAttempt.current = null;
+      if (viewRef.current !== view) return;
+      if (view.state.doc.eq(doc)) {
+        const fresh = EditorState.create({ schema: composerSchema, plugins: view.state.plugins });
+        view.updateState(fresh);
+        setIsEmpty(true);
+        setActiveFormats([]);
+        setMentionState(null);
+        setMentionIndex(0);
+      }
+      if (files.length > 0) {
+        setAttachments((current) => current.filter((file) => !files.includes(file)));
+      }
+    } catch (error) {
+      if (viewRef.current === view) {
+        setSendError(error instanceof Error ? error.message : 'Could not send. Try again.');
+      }
+    } finally {
+      sendInProgress.current = false;
+      if (viewRef.current === view) setSending(false);
+    }
   };
 
   const handleFiles = async (fileList: FileList | File[]) => {
@@ -675,7 +729,7 @@ export function ProseMirrorComposer({
       },
       Enter: () => {
         if (formatActionRef.current.acceptActiveMention()) return true;
-        formatActionRef.current.triggerSend();
+        void formatActionRef.current.triggerSend();
         return true;
       },
     });
@@ -698,6 +752,9 @@ export function ProseMirrorComposer({
         view.updateState(nextState);
         const text = serializeDoc(nextState.doc);
         setIsEmpty(text.trim().length === 0);
+        if (tr.docChanged && text.trim().length > 0) {
+          stateRef.current.onTyping?.();
+        }
         setActiveFormats(getActiveFormats(nextState));
         const ms = getActiveMentionAtCursor(nextState);
         setMentionState(ms);
@@ -735,7 +792,7 @@ export function ProseMirrorComposer({
     }
   }, [disabled, autoFocus]);
 
-  const canSend = !disabled && !uploading && (!isEmpty || attachments.length > 0);
+  const canSend = !disabled && !uploading && !sending && (!isEmpty || attachments.length > 0);
 
   return (
     <div className={styles.composerContext}>
@@ -758,7 +815,7 @@ export function ProseMirrorComposer({
           data-disabled={disabled || undefined}
           onSubmit={(e) => {
             e.preventDefault();
-            triggerSend();
+            void triggerSend();
           }}
         >
           <div
@@ -919,6 +976,9 @@ export function ProseMirrorComposer({
             </div>
           </div>
 
+          {sendError && (
+            <p className={styles.composerStatus} role="alert">{sendError}</p>
+          )}
           <div className={styles.composerActions}>
             <div className={styles.composerToolRow}>
               <div className={styles.composerLeadingTools} style={{ marginInlineEnd: 'auto' }}>
@@ -966,8 +1026,9 @@ export function ProseMirrorComposer({
                 hint="familiar"
                 type="submit"
                 size="toolbar"
-                aria-label="Send message"
+                aria-label={sending ? 'Sending message' : 'Send message'}
                 title="Send message (Enter)"
+                loading={sending}
                 disabled={!canSend}
                 icon={<ArrowUpIcon size={16} aria-hidden="true" />}
               />

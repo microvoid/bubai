@@ -1,0 +1,49 @@
+.row {
+  position: relative;
+  display: flex;
+  align-items: center;
+  min-width: 0;
+}
+
+.row > :first-child {
+  flex: 1;
+  min-width: 0;
+}
+
+.row[data-muted="true"] > :first-child {
+  opacity: 0.62;
+}
+
+.row[data-archived="true"] > :first-child {
+  opacity: 0.72;
+}
+
+.menuTrigger {
+  position: absolute;
+  inset-inline-end: 4px;
+  top: 50%;
+  transform: translateY(-50%);
+  opacity: 0;
+  pointer-events: none;
+  z-index: 2;
+  transition: opacity var(--duration-fast, 120ms) ease;
+}
+
+.row:hover .menuTrigger,
+.row:focus-within .menuTrigger,
+.row[data-menu-open="true"] .menuTrigger {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+.row:hover :global(.navigation-item-trailing),
+.row:focus-within :global(.navigation-item-trailing),
+.row[data-menu-open="true"] :global(.navigation-item-trailing) {
+  opacity: 0;
+}
+
+.mutedGlyph {
+  display: inline-flex;
+  align-items: center;
+  color: var(--text-subtle);
+}

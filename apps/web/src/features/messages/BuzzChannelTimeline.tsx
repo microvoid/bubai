@@ -105,6 +105,7 @@ export interface BuzzChannelTimelineProps {
   onLoadOlder: () => void;
   activeThreadRootId: string | null;
   messageFocus?: MessageFocus;
+  unreadSince?: number | null;
   editingMessageId: string | null;
   editingDraft: string;
   onEditingDraftChange: (value: string) => void;
@@ -139,6 +140,7 @@ function Timeline({
   onLoadOlder,
   activeThreadRootId,
   messageFocus,
+  unreadSince,
   editingMessageId,
   editingDraft,
   onEditingDraftChange,
@@ -520,8 +522,18 @@ function Timeline({
               const previous = messages[index - 1];
               const next = messages[index + 1];
               const replies = msg.replyPreviews;
+              const isFirstUnread =
+                unreadSince != null &&
+                msg.createdAt > unreadSince &&
+                msg.senderId !== currentUserId &&
+                (!previous || previous.createdAt <= unreadSince || previous.senderId === currentUserId) &&
+                !messages.slice(0, index).some(
+                  (m) => m.createdAt > unreadSince && m.senderId !== currentUserId,
+                );
               const stackPrevious =
-                !previous?.replyPreviews?.length && continuesMessageGroup(previous, msg);
+                !isFirstUnread &&
+                !previous?.replyPreviews?.length &&
+                continuesMessageGroup(previous, msg);
               const stackNext = !!next && !replies?.length && continuesMessageGroup(msg, next);
               const day =
                 index === 0 ||
@@ -529,9 +541,44 @@ function Timeline({
                   calendarDay(toUnixSeconds(msg.createdAt));
 
               return (
-                <BuzzMessageRow
-                  key={msg.id}
-                  msg={msg}
+                <div key={msg.id}>
+                  {isFirstUnread && (
+                    <div
+                      data-unread-divider="true"
+                      role="separator"
+                      aria-label="New messages"
+                      style={{
+                        display: 'flex',
+                        alignItems: 'center',
+                        gap: 10,
+                        margin: '12px 24px 6px',
+                        color: 'var(--accent-standard, #e5484d)',
+                        fontSize: 11,
+                        fontWeight: 600,
+                        letterSpacing: '0.02em',
+                      }}
+                    >
+                      <span
+                        style={{
+                          flex: 1,
+                          height: 1,
+                          background: 'var(--accent-standard, #e5484d)',
+                          opacity: 0.45,
+                        }}
+                      />
+                      <span>New messages</span>
+                      <span
+                        style={{
+                          flex: 1,
+                          height: 1,
+                          background: 'var(--accent-standard, #e5484d)',
+                          opacity: 0.45,
+                        }}
+                      />
+                    </div>
+                  )}
+                  <BuzzMessageRow
+                    msg={msg}
                   sender={participantMap.get(msg.senderId)}
                   currentUserId={currentUserId}
                   serverHttp={serverHttp}
@@ -570,10 +617,11 @@ function Timeline({
                       })}
                     </ol>
                   ) : null}
-                  onOpenTerminal={onOpenTerminal}
-                  onOpenMedia={onOpenMedia}
-                  onOpenAgentProfile={onOpenAgentProfile}
-                />
+                    onOpenTerminal={onOpenTerminal}
+                    onOpenMedia={onOpenMedia}
+                    onOpenAgentProfile={onOpenAgentProfile}
+                  />
+                </div>
               );
             })}
           </Virtualizer>

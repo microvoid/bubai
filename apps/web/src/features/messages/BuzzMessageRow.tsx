@@ -32,7 +32,9 @@ import {
   RobotIcon,
 } from '../../design-system/icons/index';
 import { BuzzMessageMarkdown } from './BuzzMessageMarkdown';
+import { AgentProgressCard } from './AgentProgressCard';
 import { resolveAttachmentSource } from './BuzzMediaViewer';
+import { writeClipboardText } from '../../shared/clipboard';
 import { FileTypeIcon } from './FileTypeIcon';
 import { MessageActionBar } from './MessageActionBar';
 import { MessageReactions } from './MessageReactions';
@@ -129,7 +131,16 @@ export function BuzzMessageRow({
       !a.mimeType.startsWith('audio/'),
   );
 
-  const hasBubble = Boolean(msg.content.trim() || isEditing);
+  const hasProgressCard = Boolean(
+    isAgent &&
+      msg.card &&
+      (msg.card.status === 'running' ||
+        (msg.card.progress && (msg.card.progress.toolCount > 0 || msg.card.progress.steps.length > 0))),
+  );
+  const showMarkdownContent =
+    !(isAgent && msg.card?.status === 'running' && msg.card.progress && msg.card.progress.steps.length > 0) &&
+    Boolean(msg.content.trim());
+  const hasBubble = Boolean(msg.content.trim() || hasProgressCard || isEditing);
   const attachmentOnly = !hasBubble && hasAttachments;
   const ownBubble = isViewer && alignViewer && !attachmentOnly;
   const avatarSize = compactAvatar ? 'small' : 'default';
@@ -212,6 +223,10 @@ export function BuzzMessageRow({
                     ? () => onOpenTerminal(terminalSessionId)
                     : undefined
                 }
+                onCopyLink={() => {
+                  const url = `${window.location.origin}${window.location.pathname}#channel=${encodeURIComponent(msg.channelId)}&message=${encodeURIComponent(msg.id)}`;
+                  void writeClipboardText(url).catch(() => undefined);
+                }}
                 onReact={(emoji) => onToggleReaction(msg.id, emoji)}
                 onEdit={onStartEdit ? () => onStartEdit(msg) : undefined}
                 onDelete={onDelete ? () => onDelete(msg.id) : undefined}
@@ -301,10 +316,15 @@ export function BuzzMessageRow({
                       </Button>
                     </form>
                   ) : (
-                    <BuzzMessageMarkdown
-                      content={msg.content}
-                      edited={Boolean(msg.updatedAt) && !(isAgent && msg.card)}
-                    />
+                    <>
+                      {hasProgressCard && msg.card && <AgentProgressCard card={msg.card} />}
+                      {showMarkdownContent && (
+                        <BuzzMessageMarkdown
+                          content={msg.content}
+                          edited={Boolean(msg.updatedAt) && !(isAgent && msg.card)}
+                        />
+                      )}
+                    </>
                   )}
 
                   <MessageReactions

@@ -35,6 +35,18 @@
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  flex-shrink: 0;
+}
+
+.topic {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text-subtle);
+  padding-inline-start: var(--space-1);
+  border-inline-start: 1px solid var(--border-subtle);
+  margin-inline-start: var(--space-1);
 }
 
 .identity:hover {

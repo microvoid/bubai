@@ -30,6 +30,11 @@
   padding-block-end: var(--space-panel-gap);
 }
 
+.brandMark {
+  flex: none;
+  margin-inline-end: -2px;
+}
+
 .columns,
 .conversationLayout,
 .conversation {

@@ -53,8 +53,9 @@ export interface BuzzInlineThreadSheetProps {
   onSendReply: (
     text: string,
     attachments: UploadedAttachment[],
+    messageId: string,
     replyToId?: string,
-  ) => void;
+  ) => Promise<void>;
   onClose: () => void;
 }
 
@@ -350,6 +351,7 @@ export function BuzzInlineThreadSheet({
 
         <ProseMirrorComposer
           candidates={participants}
+          draftScope={JSON.stringify([currentUserId, root?.id, replyTarget?.id])}
           serverHttp={serverHttp}
           onUploadFile={onUploadFile}
           autoFocus
@@ -362,15 +364,14 @@ export function BuzzInlineThreadSheet({
                 }
               : null
           }
-          onSend={(text, attachments) => {
+          onSend={async (text, attachments, messageId) => {
             const targetId = replyTarget?.id;
+            await onSendReply(text, attachments, messageId, targetId);
             if (targetId) {
-              // Ensure the branch is expanded immediately so the user sees their reply land in-place
               const liftedParent = tree.parents.get(targetId) ?? targetId;
               expandBranch(liftedParent);
             }
-            onSendReply(text, attachments, targetId);
-            setReplyTarget(null);
+            setReplyTarget((current) => current?.id === targetId ? null : current);
           }}
           placeholder={
             replyTarget ? `Reply to ${targetAuthor}...` : 'Reply in thread...'

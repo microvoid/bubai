@@ -8,6 +8,7 @@ import { IconButton } from '../../design-system/ui/IconButton';
 import {
   CheckIcon,
   CopyIcon,
+  LinkIcon,
   PencilSimpleIcon,
   PinIcon,
   PinOffIcon,
@@ -27,6 +28,7 @@ export function MessageActionBar({
   onReply,
   onTogglePin,
   onOpenTerminal,
+  onCopyLink,
   onReact,
   onEdit,
   onDelete,
@@ -38,11 +40,13 @@ export function MessageActionBar({
   onReply?: () => void;
   onTogglePin?: () => void;
   onOpenTerminal?: () => void;
+  onCopyLink?: () => void;
   onReact: (emoji: string) => void;
   onEdit?: () => void;
   onDelete?: () => void;
 }) {
   const [copied, setCopied] = useState(false);
+  const [copiedLink, setCopiedLink] = useState(false);
 
   return (
     <div className={styles.messageActionsSlot}>
@@ -90,12 +94,28 @@ export function MessageActionBar({
           title={copied ? 'Copied' : 'Copy message'}
           icon={copied ? <CheckIcon size={16} /> : <CopyIcon size={16} />}
           onClick={() => {
-            void writeClipboardText(content).then(() => {
-              setCopied(true);
-              window.setTimeout(() => setCopied(false), 1400);
-            });
+            void writeClipboardText(content)
+              .then(() => {
+                setCopied(true);
+                window.setTimeout(() => setCopied(false), 1400);
+              })
+              .catch(() => undefined);
           }}
         />
+        {onCopyLink && (
+          <IconButton
+            hint="familiar"
+            size="sm"
+            aria-label={copiedLink ? 'Copied link' : 'Copy message link'}
+            title={copiedLink ? 'Copied link' : 'Copy message link'}
+            icon={copiedLink ? <CheckIcon size={16} /> : <LinkIcon size={16} />}
+            onClick={() => {
+              onCopyLink();
+              setCopiedLink(true);
+              window.setTimeout(() => setCopiedLink(false), 1400);
+            }}
+          />
+        )}
         {canEdit && onEdit && (
           <IconButton
             hint="familiar"

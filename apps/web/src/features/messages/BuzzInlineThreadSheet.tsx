@@ -94,6 +94,7 @@ export function BuzzInlineThreadSheet({
   const [replyTarget, setReplyTarget] = useState<ChatMessage | null>(null);
   const scrollerRef = useRef<HTMLElement | null>(null);
   const placedFocus = useRef<number | undefined>(undefined);
+  const threadComposerRef = useRef<ProseMirrorComposerHandle | null>(null);
 
   const participantMap = useMemo(
     () => new Map(participants.map((p) => [p.id, p])),
@@ -289,7 +290,6 @@ export function BuzzInlineThreadSheet({
     });
   };
 
-  const threadComposerRef = useRef<ProseMirrorComposerHandle | null>(null);
   const targetAuthor = replyTarget
     ? participantMap.get(replyTarget.senderId)?.name || replyTarget.senderId
     : '';

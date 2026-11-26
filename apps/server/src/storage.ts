@@ -52,7 +52,8 @@ export function createUploadStorage(): UploadStorage {
         const s3File = client.file(key);
         if (!(await s3File.exists())) return null;
         const stat = await s3File.stat().catch(() => null);
-        return new Response(s3File, {
+        // Stream the object so the response serves its bytes with our headers.
+        return new Response(s3File.stream(), {
           headers: {
             'Content-Type': stat?.type || s3File.type || 'application/octet-stream',
             'Cache-Control': 'public, max-age=31536000, immutable',

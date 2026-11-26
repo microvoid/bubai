@@ -1,0 +1,40 @@
+{
+  "name": "@bubai/auth",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./schema": {
+      "types": "./dist/schema.d.ts",
+      "import": "./dist/schema.js"
+    }
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "lint": "echo 'ok'",
+    "test": "tsx --test test/*.test.ts",
+    "auth:generate": "auth generate --config auth.config.ts --output src/schema.ts --yes && node scripts/annotate-self-references.mjs src/schema.ts",
+    "db:generate": "drizzle-kit generate --dialect postgresql --schema src/schema.ts --out drizzle"
+  },
+  "dependencies": {
+    "@better-auth/api-key": "1.7.26",
+    "@better-auth/expo": "1.7.26",
+    "@bubai/better-auth-bot": "workspace:*",
+    "better-auth": "1.7.26",
+    "better-call": "1.4.6",
+    "drizzle-orm": "^0.45.3"
+  },
+  "devDependencies": {
+    "@electric-sql/pglite": "0.5.8",
+    "@types/node": "^22.13.10",
+    "auth": "1.7.26",
+    "drizzle-kit": "^0.31.4",
+    "tsx": "^4.19.2",
+    "typescript": "^5.8.2"
+  }
+}

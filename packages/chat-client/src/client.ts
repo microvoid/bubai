@@ -374,15 +374,28 @@ export class BubaiClient {
     return this.requestJson(`/api/search?${params.toString()}`);
   }
 
-  async uploadFile(formData: FormData): Promise<MessageAttachment> {
+  async downloadTurnAttachment(turnId: string, sourceId: string, attachment: MessageAttachment, signal: AbortSignal) {
+    const stored = attachment.id + '-' + attachment.name.replace(/[^a-zA-Z0-9._\u4e00-\u9fa5-]+/g, '_').slice(0, 120);
+    const response = await this.fetchImpl(this.baseUrl + '/api/uploads/' + encodeURIComponent(stored), {
+      headers: { 'X-Bubai-Turn': turnId, 'X-Bubai-Source': sourceId,
+        ...(this.token ? { Authorization: 'Bearer ' + this.token } : {}) },
+      signal, redirect: 'error',
+    });
+    if (!response.ok || !response.body) throw new Error('Attachment download failed: HTTP ' + response.status);
+    return response.body;
+  }
+
+  async uploadFile(formData: FormData, options?: { turnId: string; signal: AbortSignal }): Promise<MessageAttachment> {
     const headers: Record<string, string> = {
       Accept: 'application/json',
       ...(this.token ? { Authorization: `Bearer ${this.token}` } : {}),
     };
     const res = await this.fetchImpl(`${this.baseUrl}/api/uploads`, {
       method: 'POST',
-      headers,
+      headers: { ...headers, ...(options ? { 'X-Bubai-Turn': options.turnId } : {}) },
       body: formData,
+      signal: options?.signal,
+      redirect: 'error',
     });
     if (!res.ok) {
       throw new Error(`Upload failed (HTTP ${res.status})`);
@@ -595,6 +608,7 @@ export class BubaiClient {
   }
 
   sendBotMessage(input: {
+    standalone?: boolean;
     botId: string;
     channelId?: string;
     channelName?: string;
@@ -633,6 +647,7 @@ export class BubaiClient {
     input: {
       content: string;
       status: Exclude<MessageCardStatus, 'running' | 'waiting_approval'>;
+      attachments?: MessageAttachment[];
       adapterMeta?: Record<string, unknown>;
     },
     options?: { signal?: AbortSignal },

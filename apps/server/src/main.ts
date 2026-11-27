@@ -103,6 +103,7 @@ const MAX_AGENT_MENTION_HOPS = parseMaxAgentMentionHops(process.env.BUBAI_MAX_AG
 const MESSAGE_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 type BotTurnCompletion = {
+  attachments?: MessageAttachment[];
   content: string;
   status: (typeof BOT_TURN_TERMINAL_STATUSES)[number];
   adapterMeta?: Record<string, unknown>;
@@ -1540,6 +1541,34 @@ app.use('/api/*', async (c, next) => {
     return next();
   }
 
+  const turnId = c.req.header('X-Bubai-Turn');
+  if (turnId && (pathname === '/api/uploads' || pathname.startsWith('/api/uploads/'))) {
+    if (!MESSAGE_ID_PATTERN.test(turnId)) return c.json({ error: 'Invalid turn' }, 400);
+    const bot = await verifyBotRequest(auth, c.req.raw.headers, BUZZ_BOT_TOKEN, null, AUTH_REQUIRED);
+    if (!bot.ok) return c.json({ error: 'Unauthorized' }, 401);
+    const turn = await findBotTurnMessage(turnId);
+    if (!turn?.senderAgentId || turn.card?.status !== 'running' ||
+        (bot.method === 'bot-key' && (bot.botUserId !== turn.senderAgentId ||
+          !await isBotChannelMember(turn.channelId, turn.senderAgentId)))) {
+      return c.json({ error: 'Forbidden' }, 403);
+    }
+    const org = await getChannelOrgId(turn.channelId);
+    if (c.req.method === 'GET') {
+      const sourceId = c.req.header('X-Bubai-Source');
+      if (!sourceId || !MESSAGE_ID_PATTERN.test(sourceId)) return c.json({ error: 'Invalid source' }, 400);
+      const source = await findBotTurnMessage(sourceId);
+      const filename = decodeURIComponent(pathname.slice('/api/uploads/'.length));
+      const [upload] = await db.select().from(uploads).where(eq(uploads.storedName, filename)).limit(1);
+      if (!upload || upload.organizationId !== (org ?? null) || source?.channelId !== turn.channelId ||
+          !source.attachments?.some(a => filename === a.id + '-' + a.name.replace(/[^a-zA-Z0-9._\u4e00-\u9fa5-]+/g, '_').slice(0, 120))) {
+        return c.json({ error: 'Forbidden' }, 403);
+      }
+    }
+    c.set('authUserId', null);
+    c.set('authOrgId', org ?? null);
+    return next();
+  }
+
   const identity = await resolveRequestIdentity({
     auth,
     headers: c.req.raw.headers,
@@ -2637,6 +2666,7 @@ app.post('/api/bot/messages', async (c) => {
   }
 
   const body = await c.req.json<{
+    standalone?: boolean;
     botId?: string;
     channelId?: string;
     channelName?: string;
@@ -2718,7 +2748,7 @@ app.post('/api/bot/messages', async (c) => {
     }
   }
 
-  const [pendingPlaceholder] = await db
+  const [pendingPlaceholder] = body.standalone === true ? [] : await db
     .select()
     .from(messages)
     .where(and(...placeholderConditions))
@@ -2872,7 +2902,7 @@ async function findBotTurnMessage(messageId: string) {
 
 async function settleBotTurn(
   row: typeof messages.$inferSelect,
-  { content, status, adapterMeta }: BotTurnCompletion,
+  { content, status, adapterMeta, attachments }: BotTurnCompletion,
   options?: { requireChannelMembership: boolean },
 ) {
   if (!row.senderAgentId || row.card?.status !== 'running') return;
@@ -2883,6 +2913,7 @@ async function settleBotTurn(
     .set({
       content: content.trim() || (status === 'completed' ? '' : `Agent turn ${status}`),
       adapterMeta: mergeAgentMentionHop(adapterMeta, row.adapterMeta),
+      ...(attachments ? { attachments } : {}),
       updatedAt: new Date(finishedAt),
       card: {
         title: row.card.title || row.senderAgentId,
@@ -2925,10 +2956,16 @@ app.post('/api/bot/messages/:messageId/complete', async (c) => {
   const messageId = c.req.param('messageId');
   if (!MESSAGE_ID_PATTERN.test(messageId)) return c.json({ error: 'Invalid message ID' }, 400);
 
-  const body = await c.req.json<{ content?: unknown; status?: unknown; adapterMeta?: unknown }>().catch(() => null);
+  const body = await c.req.json<{ content?: unknown; status?: unknown; adapterMeta?: unknown; attachments?: MessageAttachment[] }>().catch(() => null);
   const status = BOT_TURN_TERMINAL_STATUSES.find((value) => value === body?.status);
   if (!status || typeof body?.content !== 'string') {
     return c.json({ error: 'Expected content and a terminal turn status' }, 400);
+  }
+  if (body.attachments !== undefined && (!Array.isArray(body.attachments) || body.attachments.length > 16 ||
+      !body.attachments.every(a => a && typeof a.id === 'string' && typeof a.name === 'string' &&
+        typeof a.mimeType === 'string' && Number.isSafeInteger(a.size) && a.size >= 0 &&
+        typeof a.url === 'string' && (/^https?:\/\//i.test(a.url) || a.url.startsWith('/api/uploads/'))))) {
+    return c.json({ error: 'Invalid attachments' }, 400);
   }
   const { content, adapterMeta } = body;
   if (adapterMeta !== undefined && (!adapterMeta || typeof adapterMeta !== 'object' || Array.isArray(adapterMeta))) {
@@ -2946,6 +2983,7 @@ app.post('/api/bot/messages/:messageId/complete', async (c) => {
   const message = await settleBotTurn(row, {
     content,
     status,
+    attachments: body.attachments,
     adapterMeta: adapterMeta as Record<string, unknown> | undefined,
   }, { requireChannelMembership });
   if (message) return c.json({ ok: true, settled: true, message });

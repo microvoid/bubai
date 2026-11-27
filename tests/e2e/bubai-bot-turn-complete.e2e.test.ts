@@ -96,13 +96,24 @@ test('a scoped Bot settles its turn in place and retries cannot overwrite the te
       onEvent: () => {},
     });
     await until(() => chatOpen || undefined, 'chat websocket');
+    const form = new FormData();
+    form.set('file', new File(['reference'], 'reference.txt', {type:'text/plain'}));
+    const reference = await owner.uploadFile(form);
     chat.send({
       type: 'message.send',
-      payload: { channelId: channel.id, senderId: userId, content: '@Primary Bot test' },
+      payload: { channelId: channel.id, senderId: userId, content: '@Primary Bot test', attachments:[reference] },
     });
     const turn = await until(() => requestedTurn, 'turn.requested');
     const messageId = turn.replyTarget.messageId;
-    const completion = { content: 'Turn timed out', status: 'timeout' as const };
+    const signal = AbortSignal.timeout(3000);
+    const stream = await bot.downloadTurnAttachment(messageId, turn.triggerMessage.id, reference, signal);
+    expect(await new Response(stream).text()).toBe('reference');
+    await expect(otherBot.downloadTurnAttachment(messageId, turn.triggerMessage.id, reference, signal)).rejects.toThrow('403');
+    const output = await bot.uploadFile(form,{turnId:messageId, signal});
+    await expect(otherBot.uploadFile(form,{turnId:messageId,signal})).rejects.toThrow('403');
+    const notice = await bot.sendBotMessage({botId:main.agent.id,channelId:channel.id,content:'progress',standalone:true});
+    expect(notice.message.id).not.toBe(messageId);
+    const completion = { content: 'Turn timed out', status: 'timeout' as const, attachments:[output] };
 
     await expect(otherBot.completeBotTurn(messageId, completion)).rejects.toMatchObject({ status: 403 });
     const responses = await Promise.all([
@@ -114,9 +125,10 @@ test('a scoped Bot settles its turn in place and retries cannot overwrite the te
     expect(replay.settled).toBe(false);
     expect(replay.message.card?.status).toBe('timeout');
     expect(replay.message.content).toBe(completion.content);
+    expect(replay.message.attachments).toEqual([output]);
     const { messages } = await owner.getChannelMessages(channel.id);
     const replies = messages.filter((message) => message.senderId === main.agent.id);
-    expect(replies.map((reply) => reply.id)).toEqual([messageId]);
+    expect(replies.map((reply) => reply.id).sort()).toEqual([messageId,notice.message.id].sort());
 
     requestedTurn = undefined;
     chat.send({

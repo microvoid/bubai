@@ -25,7 +25,46 @@ export function writeJson(file: string, value: unknown) {
   }
 }
 
+export interface PiModelConfig {
+  provider: string;
+  model: string;
+  baseUrl?: string;
+  apiKey?: string;
+}
+export interface PiAgentConfig {
+  externalId: string;
+  name: string;
+  profile: string;
+  workingDir?: string;
+  bin?: string;
+  skill?: string;
+  timeoutMs?: number;
+}
+
+export function resolvePiModel(config = loadCliConfig(), env = process.env): PiModelConfig {
+  const stored = config.piModel;
+  const provider = env.BUBAI_LLM_PROVIDER || stored?.provider ||
+    (env.ANTHROPIC_API_KEY && !env.OPENAI_API_KEY ? 'anthropic' :
+      env.GEMINI_API_KEY && !env.OPENAI_API_KEY ? 'google' : 'openai');
+  const keys: Record<string, string | undefined> = {
+    openai: env.OPENAI_API_KEY, anthropic: env.ANTHROPIC_API_KEY, google: env.GEMINI_API_KEY,
+  };
+  const defaults: Record<string, string> = {
+    openai: 'gpt-4o-mini', anthropic: 'claude-sonnet-4-5', google: 'gemini-2.5-flash',
+  };
+  const previous = stored?.provider === provider ? stored : undefined;
+  const baseUrl = env.BUBAI_LLM_BASE_URL || previous?.baseUrl;
+  const sameEndpoint = baseUrl === previous?.baseUrl;
+  const apiKey = env.BUBAI_LLM_API_KEY || (sameEndpoint && previous?.apiKey) || (!baseUrl && keys[provider]);
+  if (!apiKey) throw new Error('Set BUBAI_LLM_API_KEY or run bub config set --llm-provider <provider> --llm-model <model> --llm-api-key <key>');
+  const model = env.BUBAI_LLM_MODEL || previous?.model || defaults[provider];
+  if (!model) throw new Error('Set BUBAI_LLM_MODEL for this provider');
+  return { provider, model, baseUrl, apiKey };
+}
+
 export interface BubaiCliConfig {
+  piModel?: PiModelConfig;
+  piAgents?: PiAgentConfig[];
   serverUrl?: string;
   token?: string;
   userId?: string;

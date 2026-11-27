@@ -4,7 +4,7 @@ import os from 'node:os';
 import { randomUUID } from 'node:crypto';
 import { createInterface } from 'node:readline/promises';
 import {
-  loadCliConfig,
+  loadCliConfig, resolvePiModel,
   saveCliConfig,
   type CliId,
   type DirectCliAgentConfig,
@@ -13,7 +13,7 @@ import {
 
 type Flags = Record<string, string | boolean>;
 const supported: CliId[] = ['claude', 'codex'];
-export type RuntimeMode = 'botmux' | 'direct' | 'hybrid';
+export type RuntimeMode = 'botmux' | 'direct' | 'hybrid' | 'pi';
 
 function installed(cli: CliId) {
   return (process.env.PATH || '').split(path.delimiter).some((dir) => {
@@ -78,8 +78,9 @@ export function configureAgents(flags: Flags) {
 
 export async function selectRuntime(flags: Flags, endpoint: string): Promise<{ mode: RuntimeMode; selectedAgents?: string[] }> {
   const mode = flags.mode ?? 'auto';
+  if (mode === 'pi') { resolvePiModel(); return { mode }; }
   if (!['auto', 'direct', 'botmux'].includes(String(mode)))
-    throw new Error('Expected --mode auto|direct|botmux');
+    throw new Error('Expected --mode auto|direct|botmux|pi');
   if (mode === 'botmux' || (mode === 'auto' && flags.bots)) return { mode: 'botmux' };
   if (flags.cli) {
     return { mode: 'direct', selectedAgents: configureAgents(flags).map(agent => agent.externalId) };
@@ -101,6 +102,8 @@ export async function selectRuntime(flags: Flags, endpoint: string): Promise<{ m
   }
   if (!configured) {
     const available = supported.filter(installed);
+    if (mode === 'auto' && loadCliConfig().piAgents?.length) { resolvePiModel(); return {mode:'pi'}; }
+    if (!available.length && mode === 'auto') { resolvePiModel(); return { mode: 'pi' }; }
     if (!available.length)
       throw new Error(
         'No local runtime available. Start Botmux or install and sign in to Claude Code or Codex.',

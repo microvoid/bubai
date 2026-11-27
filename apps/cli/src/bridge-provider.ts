@@ -1,3 +1,4 @@
+import type { TurnFiles } from './bridge-attachments';
 import type { BotGatewayAgentDescriptor, BotTurnRequestedEvent, BubaiClient } from '@buzz-botmux/chat-client';
 import type { AgentProgressSnapshot } from '@buzz-botmux/botmux-client';
 import type { PendingTurn, TurnCompletion } from './bridge-turn-journal';
@@ -16,6 +17,8 @@ export type GatewayOptions = {
 
 export interface TurnContext {
   initial: PendingTurn;
+  sdk?: BubaiClient;
+  files?: TurnFiles;
   event?: BotTurnRequestedEvent;
   progress(snapshot: AgentProgressSnapshot): Promise<void>;
 }

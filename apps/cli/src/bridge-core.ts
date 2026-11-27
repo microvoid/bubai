@@ -1,3 +1,4 @@
+import { withTurnFiles, uploadArtifacts, type TurnFiles } from './bridge-attachments';
 import { setTimeout as delay } from 'node:timers/promises';
 import {
   BubaiClient,
@@ -101,7 +102,8 @@ export async function startRuntimeBridge(
       let { turn } = loaded;
       if (turn.stage !== 'deliver') {
         let lastProgress: AgentProgressSnapshot | undefined;
-        const completion = await provider.executeTurn({
+        const execute = (files?: TurnFiles) => provider.executeTurn({
+          files, sdk,
           initial: turn,
           event: loaded.event,
           async progress(snapshot) {
@@ -114,6 +116,20 @@ export async function startRuntimeBridge(
             }
           },
         });
+        const event = loaded.event;
+        const turnSignal = AbortSignal.any([signal, AbortSignal.timeout(Math.max(0, turn.deadline - Date.now()))]);
+        const completion = await (event && (turn.stage === 'direct' || turn.stage === 'pi')
+          ? withTurnFiles(event, sdk, turnSignal, async files => {
+              const result = await execute(files);
+              if (result.status === 'completed' && files.artifacts.length) {
+                result.attachments = await uploadArtifacts(files, sdk, messageId, turnSignal);
+              }
+              return result;
+            })
+          : execute()).catch((err: Error) => ({
+            status: turnSignal.reason?.name === 'TimeoutError' ? 'timeout' as const : 'failed' as const,
+            content: err.message,
+          }));
         signal.throwIfAborted();
         turn = { ...turn, stage: 'deliver', completion };
         journal.save(turn);

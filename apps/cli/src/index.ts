@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { configurePiAgent, detectedProfiles } from './pi-profiles';
 import { BubaiClient } from '@buzz-botmux/chat-client';
 import { version } from '../package.json';
 import { loadCliConfig, saveCliConfig } from './config';
@@ -63,9 +64,11 @@ Usage:
   bub login [--server <url>] [--client-id <id>] [--community <name|slug|id>] [--json]
   bub community list [--server <url>] [--token <token>] [--json]
   bub community use <name|slug|id> [--server <url>] [--token <token>] [--json]
-  bub config set --server <url> [--token <token>]
-  bub start [--mode auto|botmux|direct] [--cli claude,codex] [--cwd <dir>] [--permission read-only|workspace-write|full-access] [--concurrency <n>]
+  bub config set [--server <url>] [--token <token>] [--llm-provider <provider> --llm-model <model> --llm-base-url <url> --llm-api-key <key>]
+  bub start [--mode auto|botmux|direct|pi] [--cli claude,codex] [--cwd <dir>] [--permission read-only|workspace-write|full-access] [--concurrency <n>]
   bub bridge direct [--cli claude,codex] [--cwd <dir>]
+  bub agent add --profile default|dreamina|libtv
+  bub agent wrap --bin <executable> --skill <SKILL.md> --name <name> [--cwd <directory>] [--timeout-ms <ms>]
   bub agent add --cli <claude|codex> [--name <name>] [--cwd <dir>] [--permission <mode>]
   bub agent remove <externalId|name>
   bub stop
@@ -240,8 +243,16 @@ async function main() {
   if (cmd === 'config' && sub === 'set') {
     const serverUrl = getStringFlag(flags, 'server');
     const token = getStringFlag(flags, 'token');
+    const prev = loadCliConfig().piModel;
+    const provider = getStringFlag(flags, 'llm-provider') || prev?.provider || 'openai';
+    const previous = prev?.provider === provider ? prev : undefined;
+    const baseUrl = getStringFlag(flags, 'llm-base-url') || previous?.baseUrl;
+    const llm = Object.keys(flags).some(key => key.startsWith('llm-'));
+    const model = getStringFlag(flags, 'llm-model') || previous?.model;
+    if (llm && !model) throw new Error('Specify --llm-model');
     const next = saveCliConfig(
       {
+        ...(llm && model ? { piModel: { provider, model, baseUrl, apiKey: getStringFlag(flags, 'llm-api-key') || (previous?.baseUrl === baseUrl ? previous?.apiKey : undefined) } } : {}),
         ...(serverUrl ? { serverUrl } : {}),
         ...(token ? { token } : {}),
       },
@@ -254,6 +265,7 @@ async function main() {
         config: {
           serverUrl: next.serverUrl,
           tokenSet: Boolean(next.token),
+          ...(next.piModel ? { llmProvider: next.piModel.provider, llmModel: next.piModel.model, llmKeySet: Boolean(next.piModel.apiKey) } : {}),
         },
       }),
     );
@@ -262,9 +274,13 @@ async function main() {
 
   if (cmd === 'start') {
     await startDaemon(async () => {
+      const configured = loadCliConfig().piAgents ?? [];
+      for (const id of detectedProfiles().filter(id => !configured.some(a => a.profile === id)))
+        console.log('Detected ' + id + '. Add with: bub agent add --profile ' + id);
       const endpoint = getStringFlag(flags, 'botmux') || process.env.BOTMUX_ENDPOINT || 'http://127.0.0.1:7891';
       const { mode, selectedAgents } = await selectRuntime(flags, endpoint);
-      return [...process.argv.slice(3), '--runtime', mode, ...(selectedAgents ? ['--selected-agents', selectedAgents.join(',')] : [])];
+      const includePi = (!flags.mode || flags.mode === 'auto') && configured.length && mode !== 'pi';
+      return [...process.argv.slice(3), '--runtime', mode, ...(includePi ? ['--include-pi'] : []), ...(selectedAgents ? ['--selected-agents', selectedAgents.join(',')] : [])];
     });
     return;
   }
@@ -274,6 +290,10 @@ async function main() {
     return;
   }
 
+  if (cmd === 'agent' && (sub === 'wrap' || (sub === 'add' && flags.profile))) {
+    console.log(JSON.stringify(configurePiAgent(flags, sub === 'wrap'), null, 2));
+    return;
+  }
   if (cmd === 'agent' && sub === 'add') {
     console.log(JSON.stringify(configureAgents(flags), null, 2));
     return;
@@ -452,7 +472,7 @@ async function main() {
     const concurrency = Number(flags.concurrency ?? 3);
     if (!Number.isSafeInteger(concurrency) || concurrency < 1 || !Number.isSafeInteger(timeout) || timeout < 1 || timeout > 2147483647)
       throw new Error('Expected positive integer concurrency and turn timeout');
-    const runtimeOptions = { ...options, turnTimeoutMs: timeout };
+    const runtimeOptions = { ...options, turnTimeoutMs: timeout, includePi: Boolean(flags['include-pi']) };
     if (cmd === '_bridge-daemon') {
       const mode = (getStringFlag(flags, 'runtime') || 'botmux') as RuntimeMode;
       const selected = getStringFlag(flags, 'selected-agents')?.split(',');

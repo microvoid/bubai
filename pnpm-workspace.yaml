@@ -5,6 +5,8 @@ packages:
 allowBuilds:
   esbuild: true
   "@tailwindcss/oxide": true
+  '@google/genai': false
+  protobufjs: false
 
 packageExtensions:
   expo-router@5.0.7:

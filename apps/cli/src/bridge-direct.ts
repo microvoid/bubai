@@ -7,11 +7,11 @@ import type { DirectCliAgentConfig } from './config';
 import { openSessions } from './direct-sessions';
 import { executeCli } from './direct-adapters';
 
-function promptFor(event: BotTurnRequestedEvent, resume: boolean) {
+function promptFor(event: BotTurnRequestedEvent, resume: boolean, inputs?: string[]) {
   const { content, attachments } = event.triggerMessage;
   const message = [
     content,
-    ...attachments.map((item) => `[附件] ${item.name} (${item.mimeType}) ${item.url}`),
+    ...(inputs ?? attachments.map((item) => `[附件] ${item.name} (${item.mimeType}) ${item.url}`)),
   ].join('\n');
   if (resume) return message;
   return [event.systemPrompt, event.history.length ? JSON.stringify(event.history) : '', message]
@@ -54,7 +54,7 @@ export async function startDirectBridge(
           deadline: Date.now() + timeoutMs,
         };
       },
-      async executeTurn({ initial, event, progress }) {
+      async executeTurn({ initial, event, progress, files }) {
         if (!event) return { status: 'failed', content: '本地 CLI 进程因重启已中断' };
         const { bindingKey } = initial;
         const prior = tails.get(bindingKey) || Promise.resolve();
@@ -77,7 +77,7 @@ export async function startDirectBridge(
               const signal = AbortSignal.any([controller.signal, timeout.signal]);
               const session = sessions.get(bindingKey);
               const invoke = (id?: string) =>
-                executeCli(agent, promptFor(event, Boolean(id)), id, signal, progress);
+                executeCli(agent, promptFor(event, Boolean(id), files?.inputs), id, signal, progress);
               const reply = await invoke(session).catch((err) => {
                 if (
                   !session ||

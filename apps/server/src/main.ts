@@ -65,13 +65,11 @@ import {
 import { AgentDispatcher } from './adapters/dispatcher';
 import { BotmuxAgentAdapter } from './adapters/botmux-adapter';
 import { BotGatewayAdapter, type BotGatewayWsData } from './adapters/gateway-adapter';
-import { WebhookAgentAdapter } from './adapters/webhook-adapter';
+import { WebhookAgentAdapter, validateWebhookUrl } from './adapters/webhook-adapter';
 import type { AgentRegistrationInput, ResolvedAgent } from './adapters/types';
 
 const PORT = Number(process.env.PORT || 4000);
-const AUTH_REQUIRED = process.env.BUBAI_AUTH_REQUIRED
-  ? process.env.BUBAI_AUTH_REQUIRED === 'true'
-  : process.env.NODE_ENV === 'production';
+const AUTH_REQUIRED = process.env.BUBAI_AUTH_REQUIRED !== 'false';
 const BOTMUX_DISABLED = process.env.BOTMUX_DISABLED === 'true';
 const BOTMUX_ENDPOINT = process.env.BOTMUX_ENDPOINT || 'http://127.0.0.1:7891';
 const BOTMUX_TOKEN = process.env.BOTMUX_TOKEN;
@@ -152,13 +150,13 @@ const gatewayAdapter = new BotGatewayAdapter({
   onAsksChanged: async () => {
     await broadcastAsksUpdated();
   },
-  onTurnProgress: async (messageId, progress) => {
+  onTurnProgress: async (botId, messageId, progress) => {
     const [row] = await db
       .select()
       .from(messages)
       .where(and(eq(messages.id, messageId), isNull(messages.deletedAt)))
       .limit(1);
-    if (row) {
+    if (row && row.senderAgentId === botId) {
       await applyMessageProgress(row, progress);
     }
   },
@@ -168,7 +166,7 @@ const gatewayAdapter = new BotGatewayAdapter({
       .from(messages)
       .where(and(eq(messages.id, messageId), isNull(messages.deletedAt)))
       .limit(1);
-    if (!row || row.card?.status !== 'running') return;
+    if (!row || row.senderAgentId !== botId || row.card?.status !== 'running') return;
     const finalStatus = status ?? 'completed';
     const settledProgress = finalizeProgressSnapshot(
       row.card.progress,
@@ -2274,6 +2272,15 @@ app.patch('/api/channels/:channelId/settings', async (c) => {
   return c.json({ channel: dto });
 });
 
+async function isBotChannelMember(channelId: string, botId: string): Promise<boolean> {
+  const [row] = await db
+    .select({ id: channelMembers.id })
+    .from(channelMembers)
+    .where(and(eq(channelMembers.channelId, channelId), eq(channelMembers.agentId, botId)))
+    .limit(1);
+  return Boolean(row);
+}
+
 /** Explicit outbound endpoint for Bots / automated tasks to post into main timeline or a Thread */
 app.post('/api/bot/messages', async (c) => {
   const botAuth = await verifyBotRequest(auth, c.req.raw.headers, BUZZ_BOT_TOKEN, null, AUTH_REQUIRED);
@@ -2332,6 +2339,9 @@ app.post('/api/bot/messages', async (c) => {
   }
   if (channelRow.archived) {
     return c.json({ error: 'Channel is archived' }, 400);
+  }
+  if (botAuth.method === 'bot-key' && !(await isBotChannelMember(channelRow.id, botId))) {
+    return c.json({ error: 'Forbidden: agent is not a member of this channel' }, 403);
   }
 
   const resolvedThreadId = body.threadId ? body.threadId.trim() : null;
@@ -2443,6 +2453,12 @@ app.post('/api/bot/messages/:messageId/progress', async (c) => {
     .limit(1);
 
   if (!row) return c.json({ error: 'Message not found' }, 404);
+  if (!row.senderAgentId) {
+    return c.json({ error: 'Forbidden: bots cannot update human messages' }, 403);
+  }
+  if (botAuth.method === 'bot-key' && botAuth.botUserId && row.senderAgentId !== botAuth.botUserId) {
+    return c.json({ error: 'Forbidden: message belongs to another agent' }, 403);
+  }
   if (!row.card || row.card.status !== 'running') {
     return c.json({ error: 'Message is not in running state' }, 409);
   }
@@ -2481,6 +2497,12 @@ app.patch('/api/bot/messages/:messageId', async (c) => {
     .where(and(eq(messages.id, messageId), isNull(messages.deletedAt)))
     .limit(1);
   if (!row) return c.json({ error: 'Message not found' }, 404);
+  if (!row.senderAgentId) {
+    return c.json({ error: 'Forbidden: bots cannot update human messages' }, 403);
+  }
+  if (botAuth.method === 'bot-key' && botAuth.botUserId && row.senderAgentId !== botAuth.botUserId) {
+    return c.json({ error: 'Forbidden: message belongs to another agent' }, 403);
+  }
 
   const nextStatus = body.status ?? row.card?.status ?? 'running';
   const normalizedProgress = body.progress ? normalizeProgressSnapshot(body.progress) : undefined;
@@ -2601,6 +2623,16 @@ app.get('/api/bot/channels/:channelId/messages', async (c) => {
   if (!botAuth.ok) return c.json({ error: 'Unauthorized' }, 401);
 
   const channelId = c.req.param('channelId');
+  const requestedBotId = c.req.query('botId')?.trim() || botAuth.botUserId;
+  if (botAuth.method === 'bot-key') {
+    if (!botAuth.botUserId || !(await isBotChannelMember(channelId, botAuth.botUserId))) {
+      return c.json({ error: 'Forbidden: agent is not a member of this channel' }, 403);
+    }
+  } else if (AUTH_REQUIRED && requestedBotId) {
+    if (!(await isBotChannelMember(channelId, requestedBotId))) {
+      return c.json({ error: 'Forbidden: agent is not a member of this channel' }, 403);
+    }
+  }
   const threadId = c.req.query('threadId')?.trim() || null;
   const limit = Math.min(Math.max(Number(c.req.query('limit') || 30), 1), 100);
 
@@ -3090,42 +3122,112 @@ app.post('/api/agents/provision', async (c) => {
   const name = body?.name?.trim();
   if (!name) return c.json({ error: 'name is required' }, 400);
 
-  const adapterType = body?.adapterType ?? (body?.webhookUrl ? 'webhook' : 'gateway');
+  const authUserId = c.get('authUserId');
+  const authOrgId = c.get('authOrgId');
+
+  // P0-1: Only system admins may issue multi-bot `bot-server_` keys
+  let isAdmin = false;
+  if (authUserId) {
+    const [caller] = await db
+      .select({ role: authSchema.user.role })
+      .from(authSchema.user)
+      .where(eq(authSchema.user.id, authUserId))
+      .limit(1);
+    isAdmin = caller?.role === 'admin';
+  }
+  if (body?.issueKey && body?.keyScope === 'bot-server' && !isAdmin) {
+    return c.json({ error: 'Forbidden: only admins can issue bot-server keys' }, 403);
+  }
+
+  // Validate webhookUrl against SSRF / blocked hosts
+  let validatedWebhookUrl: string | undefined;
+  if (body?.webhookUrl !== undefined && body.webhookUrl.trim()) {
+    const check = validateWebhookUrl(body.webhookUrl);
+    if (!check.ok) {
+      return c.json({ error: check.error }, 400);
+    }
+    validatedWebhookUrl = check.url;
+  }
+
+  // Validate requested channel BEFORE mutating DB so missing channel returns 404
+  const rawChannelId = body?.channelId?.trim();
+  const rawChannelName = body?.channelName?.trim().replace(/^#/, '');
+  let targetChannel: typeof channels.$inferSelect | undefined;
+  if (rawChannelId || rawChannelName) {
+    const [ch] = rawChannelId
+      ? await db.select().from(channels).where(eq(channels.id, rawChannelId))
+      : await db.select().from(channels).where(
+          authOrgId
+            ? and(eq(channels.name, rawChannelName!), eq(channels.organizationId, authOrgId))
+            : eq(channels.name, rawChannelName!),
+        );
+    if (!ch || !channelBelongsToOrg(ch, authOrgId)) {
+      return c.json({ error: 'Channel not found' }, 404);
+    }
+    targetChannel = ch;
+  }
+
+  const adapterType = body?.adapterType ?? (validatedWebhookUrl ? 'webhook' : 'gateway');
   const externalId = body?.externalId?.trim() || body?.agentId?.trim() || undefined;
 
-  // Idempotent lookup by agentId or (adapterType, externalId)
-  const existingRows = await db.select().from(agentProfiles);
-  const existing = existingRows.find(
-    (row) =>
-      (body?.agentId?.trim() && row.agentId === body.agentId.trim()) ||
-      (externalId && row.adapterType === adapterType && row.externalId === externalId),
-  );
+  // Idempotent lookup scoped to current organization by agentId or (adapterType, externalId)
+  const findExistingAgent = async () => {
+    const rows = await db.select().from(agentProfiles);
+    return rows.find(
+      (row) =>
+        (body?.agentId?.trim() && row.agentId === body.agentId.trim()) ||
+        (externalId &&
+          (row.organizationId ?? null) === (authOrgId ?? null) &&
+          row.adapterType === adapterType &&
+          row.externalId === externalId),
+    );
+  };
 
-  const agentId =
+  let existing = await findExistingAgent();
+  if (
+    existing &&
+    authUserId &&
+    existing.ownerUserId &&
+    existing.ownerUserId !== authUserId &&
+    !isAdmin &&
+    body?.issueKey
+  ) {
+    return c.json({ error: 'Forbidden: cannot issue key for an agent owned by another user' }, 403);
+  }
+
+  let agentId =
     existing?.agentId ||
     body?.agentId?.trim() ||
     `agent_${name.toLowerCase().replace(/[^a-z0-9_-]+/g, '-').replace(/^-+|-+$/g, '') || 'bot'}_${randomUUID().slice(0, 6)}`;
 
-  await dispatcher.upsertAgents([
-    {
-      agentId,
-      adapterType,
-      externalId: externalId ?? agentId,
-      defaultName: name,
-      description: body?.description,
-      systemPrompt: body?.systemPrompt,
-      avatarUrl: body?.avatarUrl,
-      cliId: body?.cliId,
-      workingDir: body?.workingDir,
-      capabilities: body?.capabilities,
-      webhookUrl: body?.webhookUrl,
-      webhookSecret: body?.webhookSecret,
-    },
-  ]);
+  try {
+    await dispatcher.upsertAgents([
+      {
+        agentId,
+        organizationId: authOrgId ?? null,
+        ownerUserId: existing?.ownerUserId ?? authUserId ?? null,
+        adapterType,
+        externalId: externalId ?? agentId,
+        defaultName: name,
+        description: body?.description,
+        systemPrompt: body?.systemPrompt,
+        avatarUrl: body?.avatarUrl,
+        cliId: body?.cliId,
+        workingDir: body?.workingDir,
+        capabilities: body?.capabilities,
+        webhookUrl: validatedWebhookUrl,
+        webhookSecret: body?.webhookSecret,
+      },
+    ]);
+  } catch (err) {
+    // Handle concurrent provision unique-index race gracefully
+    const raced = await findExistingAgent();
+    if (!raced) throw err;
+    existing = raced;
+    agentId = raced.agentId;
+  }
 
   let apiKey: string | undefined;
-  const authUserId = c.get('authUserId');
-  const authOrgId = c.get('authOrgId');
   if (authUserId) {
     const botEmail = `${agentId.replace(/[^a-zA-Z0-9._-]+/g, '_').toLowerCase()}@bot.bubai.local`;
     try {
@@ -3163,47 +3265,36 @@ app.post('/api/agents/provision', async (c) => {
     }
 
     if (body?.issueKey) {
-      try {
-        const scope = body.keyScope === 'bot-server' ? 'bot-server' : 'bot';
-        const issued = await botCredentials(auth.api, scope).issueBotKey(agentId, {
-          name: `cli-${adapterType}`,
-        });
-        apiKey = issued.key;
-      } catch {
-        // Ignore if Better Auth user doesn't exist in dev mode
-      }
+      const scope = body.keyScope === 'bot-server' ? 'bot-server' : 'bot';
+      const issued = await botCredentials(auth.api, scope).issueBotKey(agentId, {
+        name: `cli-${adapterType}`,
+      });
+      apiKey = issued.key;
     }
   }
 
   let joinedChannelId: string | undefined;
-  const rawChannelId = body?.channelId?.trim();
-  const rawChannelName = body?.channelName?.trim().replace(/^#/, '');
-  if (rawChannelId || rawChannelName) {
-    const [ch] = rawChannelId
-      ? await db.select().from(channels).where(eq(channels.id, rawChannelId))
-      : await db.select().from(channels).where(eq(channels.name, rawChannelName!));
-    if (ch) {
-      joinedChannelId = ch.id;
-      const existingMember = await db
-        .select()
-        .from(channelMembers)
-        .where(and(eq(channelMembers.channelId, ch.id), eq(channelMembers.agentId, agentId)));
-      if (existingMember.length > 0) {
-        if (body?.autoReply !== undefined) {
-          await db
-            .update(channelMembers)
-            .set({ autoReply: Boolean(body.autoReply) })
-            .where(eq(channelMembers.id, existingMember[0].id));
-        }
-      } else {
-        await db.insert(channelMembers).values({
-          channelId: ch.id,
-          agentId,
-          autoReply: Boolean(body?.autoReply),
-        });
+  if (targetChannel) {
+    joinedChannelId = targetChannel.id;
+    const existingMember = await db
+      .select()
+      .from(channelMembers)
+      .where(and(eq(channelMembers.channelId, targetChannel.id), eq(channelMembers.agentId, agentId)));
+    if (existingMember.length > 0) {
+      if (body?.autoReply !== undefined) {
+        await db
+          .update(channelMembers)
+          .set({ autoReply: Boolean(body.autoReply) })
+          .where(eq(channelMembers.id, existingMember[0].id));
       }
-      await broadcastChannelMembers(ch.id);
+    } else {
+      await db.insert(channelMembers).values({
+        channelId: targetChannel.id,
+        agentId,
+        autoReply: Boolean(body?.autoReply),
+      });
     }
+    await broadcastChannelMembers(targetChannel.id);
   }
 
   const participants = await listParticipants(authOrgId);
@@ -3703,16 +3794,27 @@ Bun.serve<WsClientData>({
             knownAgents = await dispatcher.listAgents();
           }
 
-          const mentioned = dispatcher.findMentionedAgents(trimmed, knownAgents);
-          const autoReplyMembers = await db
+          const channelMemberRows = await db
             .select()
             .from(channelMembers)
-            .where(
-              and(eq(channelMembers.channelId, channelId), eq(channelMembers.autoReply, true))
-            );
-          const autoReplyBotIds = new Set(
-            autoReplyMembers.map((m) => m.agentId).filter((id): id is string => Boolean(id))
+            .where(eq(channelMembers.channelId, channelId));
+          const channelAgentIds = new Set(
+            channelMemberRows.map((m) => m.agentId).filter((id): id is string => Boolean(id)),
           );
+          const autoReplyBotIds = new Set(
+            channelMemberRows
+              .filter((m) => m.autoReply)
+              .map((m) => m.agentId)
+              .filter((id): id is string => Boolean(id)),
+          );
+
+          // Enforce channel membership for @mention under strict auth (or private DMs)
+          const mentionEligibleAgents =
+            AUTH_REQUIRED || channelRow.kind === 'dm'
+              ? knownAgents.filter((a) => channelAgentIds.has(a.id))
+              : knownAgents;
+
+          const mentioned = dispatcher.findMentionedAgents(trimmed, mentionEligibleAgents);
 
           const targetAgentMap = new Map<string, ResolvedAgent>();
           for (const a of mentioned) targetAgentMap.set(a.id, a);
@@ -3845,8 +3947,8 @@ Bun.serve<WsClientData>({
               promptWithAttachments: `${trimmed}${attachmentNote}`,
               history: historyMessages,
               outboundApi: {
-                endpoint: `http://127.0.0.1:${PORT}/api/bot/messages`,
-                progressEndpoint: `http://127.0.0.1:${PORT}/api/bot/messages/${placeholder.id}/progress`,
+                endpoint: `${(process.env.PUBLIC_URL || `http://127.0.0.1:${PORT}`).replace(/\/+$/, '')}/api/bot/messages`,
+                progressEndpoint: `${(process.env.PUBLIC_URL || `http://127.0.0.1:${PORT}`).replace(/\/+$/, '')}/api/bot/messages/${placeholder.id}/progress`,
                 cliScriptPath: BUZZ_SEND_CLI_PATH,
                 botId: agent.id,
                 channelId,
@@ -3902,7 +4004,7 @@ Bun.serve<WsClientData>({
                   summary,
                 },
               })
-              .where(eq(messages.id, placeholder.id))
+              .where(and(eq(messages.id, placeholder.id), sql`${messages.card}->>'status' = 'running'`))
               .returning();
             if (running) {
               broadcast(

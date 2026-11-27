@@ -19,6 +19,8 @@ export type AgentCapability =
 
 export interface AgentRegistrationInput {
   agentId: string;
+  organizationId?: string | null;
+  ownerUserId?: string | null;
   adapterType?: AgentAdapterType;
   externalId?: string | null;
   defaultName?: string | null;
@@ -44,6 +46,8 @@ export interface AgentRuntimePresence {
 
 export interface ResolvedAgent {
   id: string;
+  organizationId: string | null;
+  ownerUserId: string | null;
   name: string;
   defaultName: string;
   adapterType: AgentAdapterType;

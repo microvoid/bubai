@@ -258,6 +258,8 @@ describe('Agent persistence, Adapter boundary & Bot Gateway protocol', () => {
       },
     });
 
+    const prevAllowLocal = process.env.BUBAI_ALLOW_LOCAL_WEBHOOKS;
+    process.env.BUBAI_ALLOW_LOCAL_WEBHOOKS = 'true';
     try {
       const secret = 'whsec_test_123';
       await dispatcher.upsertAgents([
@@ -281,6 +283,8 @@ describe('Agent persistence, Adapter boundary & Bot Gateway protocol', () => {
       expect(receivedEvent).toBe('turn.requested');
       expect(receivedSig).toBe(signWebhookPayload(secret, receivedBody));
     } finally {
+      if (prevAllowLocal === undefined) delete process.env.BUBAI_ALLOW_LOCAL_WEBHOOKS;
+      else process.env.BUBAI_ALLOW_LOCAL_WEBHOOKS = prevAllowLocal;
       server.stop(true);
     }
   });

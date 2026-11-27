@@ -219,6 +219,8 @@ CREATE TABLE IF NOT EXISTS agent_profiles (
   updated_at timestamptz NOT NULL DEFAULT now()
 );
 
+ALTER TABLE agent_profiles ADD COLUMN IF NOT EXISTS organization_id text;
+ALTER TABLE agent_profiles ADD COLUMN IF NOT EXISTS owner_user_id text;
 ALTER TABLE agent_profiles ADD COLUMN IF NOT EXISTS adapter_type text NOT NULL DEFAULT 'botmux';
 ALTER TABLE agent_profiles ADD COLUMN IF NOT EXISTS external_id text;
 ALTER TABLE agent_profiles ADD COLUMN IF NOT EXISTS default_name text;
@@ -228,6 +230,9 @@ ALTER TABLE agent_profiles ADD COLUMN IF NOT EXISTS capabilities jsonb;
 ALTER TABLE agent_profiles ADD COLUMN IF NOT EXISTS webhook_url text;
 ALTER TABLE agent_profiles ADD COLUMN IF NOT EXISTS webhook_secret text;
 ALTER TABLE agent_profiles ADD COLUMN IF NOT EXISTS last_seen_at timestamptz;
+CREATE UNIQUE INDEX IF NOT EXISTS agent_profiles_org_adapter_ext_uidx
+  ON agent_profiles (COALESCE(organization_id, ''), adapter_type, external_id)
+  WHERE external_id IS NOT NULL;
 
 CREATE TABLE IF NOT EXISTS uploads (
   stored_name text PRIMARY KEY,

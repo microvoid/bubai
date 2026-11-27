@@ -58,6 +58,10 @@ export class AgentDispatcher {
         .limit(1);
 
       const adapterType = input.adapterType ?? (existing?.adapterType as AgentAdapterType | undefined) ?? 'botmux';
+      const organizationId =
+        input.organizationId !== undefined ? input.organizationId : (existing?.organizationId ?? null);
+      const ownerUserId =
+        input.ownerUserId !== undefined ? input.ownerUserId : (existing?.ownerUserId ?? null);
       const externalId = input.externalId !== undefined ? input.externalId : (existing?.externalId ?? agentId);
       const defaultName = input.defaultName?.trim() || existing?.defaultName || agentId;
       const displayName =
@@ -83,6 +87,8 @@ export class AgentDispatcher {
         .insert(agentProfiles)
         .values({
           agentId,
+          organizationId,
+          ownerUserId,
           adapterType,
           externalId,
           defaultName,
@@ -102,6 +108,8 @@ export class AgentDispatcher {
         .onConflictDoUpdate({
           target: agentProfiles.agentId,
           set: {
+            organizationId,
+            ownerUserId,
             adapterType,
             externalId,
             defaultName,
@@ -220,6 +228,8 @@ export class AgentDispatcher {
 
       resolved.push({
         id: row.agentId,
+        organizationId: row.organizationId ?? null,
+        ownerUserId: row.ownerUserId ?? null,
         name,
         defaultName,
         adapterType,

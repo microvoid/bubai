@@ -22,7 +22,7 @@ export interface GatewayCallbacks {
   onAgentsRegistered: (agents: AgentRegistrationInput[]) => Promise<void>;
   onPresenceChanged: () => Promise<void>;
   onAsksChanged: () => Promise<void>;
-  onTurnProgress?: (messageId: string, progress: unknown) => Promise<void>;
+  onTurnProgress?: (botId: string, messageId: string, progress: unknown) => Promise<void>;
   onTurnComplete?: (payload: {
     botId: string;
     messageId: string;
@@ -254,8 +254,9 @@ export class BotGatewayAdapter implements AgentAdapter {
 
     if (type === 'bot.turn.progress' && this.callbacks.onTurnProgress) {
       const messageId = typeof payload.messageId === 'string' ? payload.messageId.trim() : '';
-      if (messageId && payload.progress) {
-        await this.callbacks.onTurnProgress(messageId, payload.progress);
+      const botId = typeof payload.botId === 'string' ? payload.botId.trim() : ws.data.botUserId || '';
+      if (messageId && botId && ws.data.boundAgentIds.has(botId) && payload.progress) {
+        await this.callbacks.onTurnProgress(botId, messageId, payload.progress);
       }
       return;
     }
@@ -275,7 +276,7 @@ export class BotGatewayAdapter implements AgentAdapter {
         payload.adapterMeta && typeof payload.adapterMeta === 'object'
           ? (payload.adapterMeta as Record<string, unknown>)
           : undefined;
-      if (messageId && botId) {
+      if (messageId && botId && ws.data.boundAgentIds.has(botId)) {
         await this.callbacks.onTurnComplete({ botId, messageId, content, status, adapterMeta });
       }
       return;

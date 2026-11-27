@@ -212,6 +212,8 @@ export const botmuxBindings = pgTable(
 
 export const agentProfiles = pgTable('agent_profiles', {
   agentId: text('agent_id').primaryKey(),
+  organizationId: text('organization_id'),
+  ownerUserId: text('owner_user_id'),
   adapterType: text('adapter_type').notNull().default('botmux'),
   externalId: text('external_id'),
   defaultName: text('default_name'),

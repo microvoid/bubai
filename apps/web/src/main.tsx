@@ -10,8 +10,12 @@ import { useKeyboardFocusVisibility } from './design-system/useKeyboardFocusVisi
 import { AuthGate } from './features/auth/AuthGate';
 import App from './App';
 
+import { AccountEmailLanding } from './features/auth/AccountEmailForm';
+
 function RootApp() {
   useKeyboardFocusVisibility();
+  const action = new URLSearchParams(window.location.search).get('account-email');
+  if (action === 'verify' || action === 'reset') return <TooltipProvider><AccountEmailLanding action={action} /></TooltipProvider>;
   return (
     <TooltipProvider>
       <AuthGate>

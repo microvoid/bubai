@@ -1,3 +1,4 @@
+import { registerTestUser } from './account-mailbox';
 import { expect, test } from 'bun:test';
 import fs from 'node:fs';
 import os from 'node:os';
@@ -26,14 +27,16 @@ test('a scoped Bot settles its turn in place and retries cannot overwrite the te
     cwd: dataDir,
     env: {
       ...process.env,
+      CLOUDFLARE_ACCOUNT_ID: '', CLOUDFLARE_EMAIL_API_TOKEN: '', EMAIL_FROM: '',
       DATABASE_URL: '',
       PORT: String(port),
+      BETTER_AUTH_URL: baseUrl,
       BUBAI_AUTH_REQUIRED: 'true',
       BOTMUX_DISABLED: 'true',
       BUZZ_BOT_TOKEN: '',
       NODE_ENV: 'development',
     },
-    stdout: 'ignore',
+    stdout: Bun.file(path.join(dataDir, 'server.out')),
     stderr: Bun.file(path.join(dataDir, 'server.err')),
   });
   let gateway: ReturnType<BubaiClient['connectBotGateway']> | undefined;
@@ -48,11 +51,7 @@ test('a scoped Bot settles its turn in place and retries cannot overwrite the te
       return healthy || undefined;
     }, 'test server');
 
-    const signup = await fetch(`${baseUrl}/api/auth/sign-up/email`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ email: 'turn-complete@example.com', password: 'Password123!', name: 'Owner' }),
-    });
+    const signup = await registerTestUser(baseUrl, 'turn-complete@example.com', 'Owner', 'Password123!', () => fs.readFileSync(path.join(dataDir, 'server.out'), 'utf8'));
     const identity = await signup.json() as { token?: string; user: { id: string } };
     const token = signup.headers.get('set-auth-token') ?? identity.token;
     if (!signup.ok || !token) throw new Error(`Sign-up failed (${signup.status})`);

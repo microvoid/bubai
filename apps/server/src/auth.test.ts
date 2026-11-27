@@ -34,11 +34,13 @@ describe('Phase 1 server auth + DB integration', () => {
     const otps: Array<{ email: string; otp: string; type: string }> = [];
 
     try {
+      const links: Array<{ kind: string; url: URL }> = [];
       const auth = createServerAuth({
         db,
         port: 4123,
         secret: 'test-secret-0123456789abcdef0123456789abcdef',
         emailAndPassword: true,
+        sendAccountLink: async (kind, _email, url) => { links.push({ kind, url: new URL(url) }); },
         sendVerificationOTP: async ({ email, otp, type }) => {
           otps.push({ email, otp, type });
         },
@@ -61,7 +63,7 @@ describe('Phase 1 server auth + DB integration', () => {
       expect(compat?.authenticated).toBe(false);
       expect(compat?.userId).toBe('u-owner');
 
-      // 2. Email + password sign-up returns session cookie & bearer token
+      // 2. Only the verified email link starts the password signup session
       const signUp = await auth.api.signUpEmail({
         body: {
           name: 'Alice',
@@ -70,8 +72,13 @@ describe('Phase 1 server auth + DB integration', () => {
         },
         returnHeaders: true,
       });
-      const cookie = signUp.headers.get('set-cookie');
-      const bearerToken = signUp.headers.get('set-auth-token');
+      expect(signUp.response.token).toBeNull();
+      expect(links.map(link => link.kind)).toEqual(['verify']);
+      const verified = await auth.api.verifyEmail({
+        query: { token: links[0]!.url.searchParams.get('token')! }, returnHeaders: true,
+      });
+      const cookie = verified.headers.get('set-cookie');
+      const bearerToken = verified.headers.get('set-auth-token');
       expect(cookie).toBeTruthy();
       expect(bearerToken).toBeTruthy();
 
@@ -132,6 +139,15 @@ describe('Phase 1 server auth + DB integration', () => {
         body: { email: 'bob@example.com', otp: otps[0]!.otp },
       });
       expect(otpSignIn.user.email).toBe('bob@example.com');
+
+      expect(links).toHaveLength(1);
+      await auth.api.requestPasswordReset({ body: { email: 'alice@example.com', redirectTo: '/' } });
+      expect(links[1]?.kind).toBe('reset');
+      const reset = { body: { token: links[1]!.url.pathname.split('/').pop()!, newPassword: 'replacement-password' } };
+      await auth.api.resetPassword(reset);
+      await expect(auth.api.resetPassword(reset)).rejects.toThrow();
+      const updated = await auth.api.signInEmail({ body: { email: 'alice@example.com', password: reset.body.newPassword } });
+      expect(updated.user.id).toBe(signUp.response.user.id);
 
       // 8. Bot user + bot_ API key verification
       const botUser = await auth.api.createBotUser({

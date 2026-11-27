@@ -1,3 +1,4 @@
+import { registerTestUser } from './account-mailbox';
 import assert from 'node:assert/strict';
 import { spawn, type ChildProcess } from 'node:child_process';
 import fs from 'node:fs';
@@ -28,12 +29,10 @@ async function waitForServerReady(url: string, timeoutMs = 15000): Promise<void>
   throw new Error(`Isolated server did not become ready at ${url}`);
 }
 
+let serverMailPath = '';
+
 async function signUpAndGetSession(email: string, name: string, password = 'e2e-password-123456') {
-  const res = await fetch(`${BASE_URL}/api/auth/sign-up/email`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json', Origin: 'http://localhost:5173' },
-    body: JSON.stringify({ email, name, password }),
-  });
+  const res = await registerTestUser(BASE_URL, email, name, password, () => fs.readFileSync(serverMailPath, 'utf8'));
   assert.equal(res.status, 200, `sign-up failed: ${await res.clone().text()}`);
   const token = res.headers.get('set-auth-token');
   const setCookie = res.headers.get('set-cookie');
@@ -76,11 +75,13 @@ describe('Phase 1 Auth & Tenant Isolation E2E (isolated server with BUBAI_AUTH_R
 
   before(async () => {
     tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'bubai-auth-e2e-'));
-    serverProc = spawn('bun', [SERVER_ENTRY], {
+    serverMailPath = path.join(tempDir, 'account-mail.log');
+    serverProc = spawn('sh', ['-c', 'exec bun "$1" > "$2"', 'test-server', SERVER_ENTRY, serverMailPath], {
       cwd: tempDir,
       env: {
         ...process.env,
         PORT: String(PORT),
+        CLOUDFLARE_ACCOUNT_ID: '', CLOUDFLARE_EMAIL_API_TOKEN: '', EMAIL_FROM: '',
         DATABASE_URL: '',
         BUBAI_AUTH_REQUIRED: 'true',
         BETTER_AUTH_SECRET: AUTH_SECRET,
@@ -88,7 +89,7 @@ describe('Phase 1 Auth & Tenant Isolation E2E (isolated server with BUBAI_AUTH_R
         BUZZ_BOT_TOKEN: BOT_TOKEN,
         BOTMUX_ENDPOINT: 'http://127.0.0.1:19999', // unreachable dummy; server degrades gracefully
       },
-      stdio: ['ignore', 'pipe', 'pipe'],
+      stdio: ['ignore', 'ignore', 'pipe'],
     });
     serverProc.stderr?.on('data', (chunk) => {
       serverStderr += String(chunk);

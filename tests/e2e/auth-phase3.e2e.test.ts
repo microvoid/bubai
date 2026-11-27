@@ -1,3 +1,4 @@
+import { registerTestUser } from './account-mailbox';
 import assert from 'node:assert/strict';
 import { execFile, spawn, type ChildProcess } from 'node:child_process';
 import fs from 'node:fs';
@@ -11,9 +12,9 @@ const execFileAsync = promisify(execFile);
 
 const PORT = 4201;
 const BASE_URL = `http://127.0.0.1:${PORT}`;
-const SERVER_ENTRY = path.resolve(import.meta.dir, '../../apps/server/src/main.ts');
-const CLI_ENTRY = path.resolve(import.meta.dir, '../../apps/cli/src/index.ts');
-const BUZZ_SEND_SCRIPT = path.resolve(import.meta.dir, '../../scripts/buzz-send.mjs');
+const SERVER_ENTRY = path.resolve(import.meta.dirname, '../../apps/server/src/main.ts');
+const CLI_ENTRY = path.resolve(import.meta.dirname, '../../apps/cli/src/index.ts');
+const BUZZ_SEND_SCRIPT = path.resolve(import.meta.dirname, '../../scripts/buzz-send.mjs');
 const AUTH_SECRET = 'e2e-phase3-secret-0123456789abcdef0123456789';
 
 async function waitForServerReady(url: string, timeoutMs = 15000): Promise<void> {
@@ -30,12 +31,10 @@ async function waitForServerReady(url: string, timeoutMs = 15000): Promise<void>
   throw new Error(`Isolated server did not become ready at ${url}`);
 }
 
+let serverMailPath = '';
+
 async function signUpAndCreateOrg(email: string, name: string, orgName: string, orgSlug: string) {
-  const signUpRes = await fetch(`${BASE_URL}/api/auth/sign-up/email`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json', Origin: 'http://localhost:5173' },
-    body: JSON.stringify({ email, name, password: 'e2e-password-123456' }),
-  });
+  const signUpRes = await registerTestUser(BASE_URL, email, name, 'e2e-password-123456', () => fs.readFileSync(serverMailPath, 'utf8'));
   assert.equal(signUpRes.status, 200, `sign-up failed: ${await signUpRes.clone().text()}`);
   const token = signUpRes.headers.get('set-auth-token');
   const setCookie = signUpRes.headers.get('set-cookie');
@@ -73,18 +72,20 @@ describe('Phase 3 E2E: Bot Convergence, Strict Bot API Key, CLI Device Auth, and
   let tempDir = '';
   let cliConfigDir = '';
   let serverProc: ChildProcess | null = null;
-  let serverLogs = '';
+
 
   before(async () => {
     tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'bubai-auth-phase3-'));
     cliConfigDir = path.join(tempDir, 'cli-config');
     // Note: BUZZ_BOT_TOKEN is intentionally EMPTY while BUBAI_AUTH_REQUIRED=true
     // to verify that local-dev bypass is closed and bot_ API keys are enforced.
-    serverProc = spawn('bun', [SERVER_ENTRY], {
+    serverMailPath = path.join(tempDir, 'account-mail.log');
+    serverProc = spawn('sh', ['-c', 'exec bun "$1" > "$2"', 'test-server', SERVER_ENTRY, serverMailPath], {
       cwd: tempDir,
       env: {
         ...process.env,
         PORT: String(PORT),
+        CLOUDFLARE_ACCOUNT_ID: '', CLOUDFLARE_EMAIL_API_TOKEN: '', EMAIL_FROM: '',
         DATABASE_URL: '',
         BUBAI_AUTH_REQUIRED: 'true',
         BETTER_AUTH_SECRET: AUTH_SECRET,
@@ -92,13 +93,7 @@ describe('Phase 3 E2E: Bot Convergence, Strict Bot API Key, CLI Device Auth, and
         BUZZ_BOT_TOKEN: '',
         BOTMUX_ENDPOINT: 'http://127.0.0.1:19998',
       },
-      stdio: ['ignore', 'pipe', 'pipe'],
-    });
-    serverProc.stdout?.on('data', (chunk) => {
-      serverLogs += String(chunk);
-    });
-    serverProc.stderr?.on('data', (chunk) => {
-      serverLogs += String(chunk);
+      stdio: ['ignore', 'ignore', 'pipe'],
     });
     await waitForServerReady(BASE_URL);
   });
@@ -369,7 +364,7 @@ describe('Phase 3 E2E: Bot Convergence, Strict Bot API Key, CLI Device Auth, and
     const otpEmail = 'mobile-otp@example.com';
     await mobileSendEmailOtp(BASE_URL, otpEmail);
     const otpRegex = new RegExp(`email=${otpEmail.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\s+otp=(\\d{6})`);
-    const otpMatch = serverLogs.match(otpRegex);
+    const otpMatch = fs.readFileSync(serverMailPath, 'utf8').match(otpRegex);
     assert.ok(otpMatch?.[1], `Expected OTP in server logs for ${otpEmail}`);
 
     const otpSession = await mobileSignInWithEmailOtp(BASE_URL, otpEmail, otpMatch[1]);

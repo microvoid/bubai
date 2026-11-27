@@ -1,3 +1,4 @@
+import { accountLink } from './account-mailbox';
 import assert from 'node:assert/strict';
 import { spawn, type ChildProcess } from 'node:child_process';
 import fs, { existsSync } from 'node:fs';
@@ -193,6 +194,7 @@ describe('Phase 2 Web Auth UI & Buzz Alignment E2E (real headless Chrome)', () =
         env: {
           ...process.env,
           PORT: String(SERVER_PORT),
+          CLOUDFLARE_ACCOUNT_ID: '', CLOUDFLARE_EMAIL_API_TOKEN: '', EMAIL_FROM: '',
           DATABASE_URL: '',
           BUBAI_AUTH_REQUIRED: 'true',
           BETTER_AUTH_SECRET: 'e2e-phase2-secret-0123456789abcdef0123456789',
@@ -302,6 +304,11 @@ describe('Phase 2 Web Auth UI & Buzz Alignment E2E (real headless Chrome)', () =
     await cdp.setInputValue('[data-auth-input="password"]', 'dev-password-123456');
     await cdp.screenshot('02-auth-password-signup.png');
     await cdp.click('[data-auth-action="submit-password"]');
+
+    const link = await accountLink(() => fs.readFileSync(serverLogPath, 'utf8'), 'alice@example.com', 'verify');
+    await cdp.send('Page.navigate', { url: link });
+    await cdp.waitFor(() => cdp!.eval<boolean>(`document.body.innerText.includes('邮箱已验证')`), 'Verified email');
+    await cdp.click('[data-account-enter]');
 
     // 3. First-time user with 0 orgs -> OnboardingSetup screen
     await cdp.waitFor(
@@ -647,7 +654,19 @@ describe('Phase 2 Web Auth UI & Buzz Alignment E2E (real headless Chrome)', () =
     );
     await cdp.click('[data-auth-action="toggle-password-mode"]');
     await cdp.setInputValue('[data-auth-input="email"]', 'alice@example.com');
-    await cdp.setInputValue('[data-auth-input="password"]', 'dev-password-123456');
+    await cdp.click('[data-auth-action="forgot-password"]');
+    await cdp.click('[data-account-submit]');
+    const resetLink = await accountLink(() => fs.readFileSync(serverLogPath, 'utf8'), 'alice@example.com', 'reset');
+    await cdp.send('Page.navigate', { url: resetLink });
+    await cdp.waitFor(() => cdp!.eval<boolean>(`Boolean(document.querySelector('input[autocomplete="new-password"]'))`), 'Password reset form');
+    await cdp.setInputValue('input[autocomplete="new-password"]', 'updated-password-123456');
+    await cdp.click('[data-account-submit]');
+    await cdp.waitFor(() => cdp!.eval<boolean>(`document.body.innerText.includes('密码已更新')`), 'Password updated');
+    await cdp.click('[data-account-back]');
+    await cdp.waitFor(() => cdp!.eval<boolean>(`Boolean(document.querySelector('[data-auth-action="toggle-password-mode"]'))`), 'Login after password reset');
+    await cdp.click('[data-auth-action="toggle-password-mode"]');
+    await cdp.setInputValue('[data-auth-input="email"]', 'alice@example.com');
+    await cdp.setInputValue('[data-auth-input="password"]', 'updated-password-123456');
     await cdp.click('[data-auth-action="submit-password"]');
     await cdp.waitFor(
       () => cdp!.eval<boolean>(`Boolean(document.querySelector('[data-profile-trigger]'))`),

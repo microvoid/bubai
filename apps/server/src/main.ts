@@ -57,6 +57,7 @@ import { createUploadStorage } from './storage';
 import {
   buildSessionHeaders,
   createServerAuth,
+  passwordAuthEnabled,
   resolveDisplayName,
   resolveRequestIdentity,
   resolveTrustedOrigins,
@@ -1288,7 +1289,7 @@ app.get('/api/instance', async (c) => {
     name: process.env.BUBAI_INSTANCE_NAME || 'Bubai',
     version: '0.1.0',
     authRequired: AUTH_REQUIRED,
-    emailAndPasswordEnabled: process.env.NODE_ENV !== 'production',
+    emailAndPasswordEnabled: passwordAuthEnabled(),
     publicUrl: process.env.PUBLIC_URL || undefined,
     botmux: {
       connected: botmuxStatus.connected,

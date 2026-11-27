@@ -2,6 +2,7 @@ import { useEffect, useState, type FormEvent } from 'react';
 import { Button } from '../../design-system/ui/Button';
 import { Input } from '../../design-system/ui/Input';
 import { authClient } from './auth-client';
+import { AccountEmailForm, accountCallback } from './AccountEmailForm';
 import styles from './IdentitySetup.module.css';
 
 export interface AuthFormProps {
@@ -27,6 +28,7 @@ export function AuthForm({
     onModeChange?.(next);
   };
   const [passwordSubmode, setPasswordSubmode] = useState<'signin' | 'signup'>('signin');
+  const [mailAction, setMailAction] = useState<'verify' | 'reset' | null>(null);
   const [otpStep, setOtpStep] = useState<'email' | 'verify'>('email');
   const [email, setEmail] = useState(lockedEmail || initialEmail);
   const [name, setName] = useState('');
@@ -119,9 +121,15 @@ export function AuthForm({
           name: displayName,
           email: trimmedEmail,
           password,
+          callbackURL: accountCallback('verify'),
         });
         if (res.error) {
           setError(res.error.message || '注册失败');
+          return;
+        }
+        if (!res.data?.token) {
+          setPassword('');
+          setMailAction('verify');
           return;
         }
       } else {
@@ -130,6 +138,13 @@ export function AuthForm({
           password,
         });
         if (res.error) {
+          if (res.error.code === 'EMAIL_NOT_VERIFIED') {
+            const sent = await authClient.sendVerificationEmail({ email: trimmedEmail, callbackURL: accountCallback('verify') });
+            if (sent.error) throw new Error(sent.error.message || '发送验证邮件失败');
+            setPassword('');
+            setMailAction('verify');
+            return;
+          }
           setError(res.error.message || '邮箱或密码错误');
           return;
         }
@@ -142,6 +157,9 @@ export function AuthForm({
     }
   };
 
+  if (mailAction) return <AccountEmailForm action={mailAction} initialEmail={email}
+    notice={mailAction === 'verify' ? '请打开邮件中的链接，完成邮箱验证。' : undefined}
+    onBack={() => { setMailAction(null); setPasswordSubmode('signin'); setError(null); }} />;
   if (mode === 'password') {
     return (
       <form className={styles.form} onSubmit={(e) => void handlePasswordSubmit(e)} data-auth-step="password">
@@ -215,6 +233,7 @@ export function AuthForm({
           />
         </label>
 
+        {passwordSubmode === 'signin' && <button type="button" data-auth-action="forgot-password" className={styles.linkButton} onClick={() => setMailAction('reset')}>忘记密码？</button>}
         {error && (
           <p className={styles.errorText} role="alert" data-auth-error="">
             {error}
@@ -227,7 +246,7 @@ export function AuthForm({
           disabled={busy}
           data-auth-action="submit-password"
         >
-          {busy ? '提交中…' : passwordSubmode === 'signup' && !lockedEmail ? '注册并进入' : '登录'}
+          {busy ? '提交中…' : passwordSubmode === 'signup' && !lockedEmail ? '注册并验证邮箱' : '登录'}
         </Button>
 
         <div className={styles.rowActions}>
@@ -296,9 +315,7 @@ export function AuthForm({
             autoFocus
             data-auth-input="otp"
           />
-          {emailAndPasswordEnabled && (
-            <span className={styles.fieldHint}>开发态提示：验证码已打印在服务端控制台</span>
-          )}
+          <span className={styles.fieldHint}>验证码 5 分钟内有效。</span>
         </label>
 
         {error && (
@@ -374,7 +391,7 @@ export function AuthForm({
 
       {emailAndPasswordEnabled && (
         <>
-          <div className={styles.divider}>开发模式</div>
+          <div className={styles.divider}>或</div>
           <Button
             type="button"
             variant="outline"

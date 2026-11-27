@@ -143,7 +143,7 @@ export async function mobileSignUpWithPassword(
   email: string,
   password: string,
   name: string,
-): Promise<MobileAuthSession> {
+): Promise<MobileAuthSession | null> {
   const { data, headers } = await authRequest<{
     token?: string;
     user: { id: string; name?: string | null; email: string; image?: string | null };
@@ -153,7 +153,7 @@ export async function mobileSignUpWithPassword(
   });
   const token = headers.get('set-auth-token') || data.token || '';
   if (!token) {
-    throw new Error('Server did not return a Bearer session token');
+    return null;
   }
   return {
     token,

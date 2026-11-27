@@ -50,12 +50,16 @@ export interface AuthOptions extends BetterAuthOptions {
 
 export type Auth = ReturnType<typeof betterAuth<AuthOptions>>;
 
+export const OTP_TTL_SECONDS = 300;
+export const ACCOUNT_LINK_TTL_SECONDS = 3600;
+
 export interface CreateAuthOptions {
   database: DrizzleDatabase;
   secret: string;
   baseURL: string;
   trustedOrigins?: string[];
   emailAndPassword?: boolean;
+  sendAccountLink?: (kind: 'verify' | 'reset', email: string, url: string) => Promise<void>;
   sendVerificationOTP?: EmailOTPOptions['sendVerificationOTP'];
 }
 
@@ -88,17 +92,33 @@ export function createAuth({
   baseURL,
   trustedOrigins = [],
   emailAndPassword = process.env.NODE_ENV !== 'production',
+  sendAccountLink,
   sendVerificationOTP = consoleVerificationOTP,
 }: CreateAuthOptions): Auth {
   const options: AuthOptions = {
     database: drizzleAdapter(database, { provider: 'pg', schema }),
     secret,
     baseURL,
-    emailAndPassword: { enabled: emailAndPassword },
+    emailAndPassword: {
+      enabled: emailAndPassword,
+      requireEmailVerification: Boolean(sendAccountLink),
+      ...(emailAndPassword && sendAccountLink && {
+        resetPasswordTokenExpiresIn: ACCOUNT_LINK_TTL_SECONDS,
+        sendResetPassword: ({ user, url }) => sendAccountLink('reset', user.email, url),
+      }),
+    },
+    ...(emailAndPassword && sendAccountLink && {
+      emailVerification: {
+        sendOnSignUp: true,
+        autoSignInAfterVerification: true,
+        expiresIn: ACCOUNT_LINK_TTL_SECONDS,
+        sendVerificationEmail: ({ user, url }) => sendAccountLink('verify', user.email, url),
+      },
+    }),
     trustedOrigins: [...new Set([...trustedOrigins, 'bubai://'])],
     plugins: [
       bearer(),
-      emailOTP({ sendVerificationOTP }),
+      emailOTP({ sendVerificationOTP, expiresIn: OTP_TTL_SECONDS }),
       expo(),
       organization<TeamOptions>({ teams: { enabled: true } }),
       admin({}),

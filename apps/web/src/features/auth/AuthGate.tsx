@@ -249,7 +249,7 @@ export function AuthGate({ children }: { children: ReactNode }) {
                   : inviteId
                     ? '请先登录，随后即可接受 Community 邀请'
                     : authFormMode === 'password'
-                      ? '开发模式：使用邮箱和密码登录或注册账号'
+                      ? '使用邮箱和密码登录或注册账号'
                       : '输入邮箱获取 6 位一次性验证码，快速进入工作空间'}
               </p>
             </>

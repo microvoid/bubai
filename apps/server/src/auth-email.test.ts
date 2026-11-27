@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, spyOn } from 'bun:test';
+import { linkEmail } from './account-email';
 import { envVerificationOTP } from './auth';
 
 const emailSettings = ['CLOUDFLARE_ACCOUNT_ID', 'CLOUDFLARE_EMAIL_API_TOKEN', 'EMAIL_FROM'] as const;
@@ -56,9 +57,10 @@ describe('Cloudflare verification email', () => {
     expect(headers.get('authorization')).toBe('Bearer test-email-token');
     expect(headers.get('content-type')).toBe('application/json');
     expect(JSON.parse(String(options?.body))).toMatchObject({
-      from: 'login@example.com',
+      from: { address: 'login@example.com', name: 'BubAI' },
       to: [verification.email],
-      subject: expect.any(String),
+      subject: expect.stringContaining(verification.otp),
+      html: expect.stringContaining(verification.otp),
       text: expect.stringContaining(verification.otp),
     });
   });
@@ -117,4 +119,18 @@ describe('Cloudflare verification email', () => {
     expect(fetchSpy).not.toHaveBeenCalled();
     expect(consoleSpy).toHaveBeenCalledWith(expect.stringContaining(`otp=${verification.otp}`));
   });
+});
+
+describe('account link email', () => {
+  it.each([['verify', '验证邮箱并继续'], ['reset', '设置新密码']] as const)(
+    'includes the %s link in the HTML button and plain text',
+    (kind, label) => {
+      const url = 'https://bubai.example/account?token=test&callbackURL=%2F';
+      const message = linkEmail(kind, url);
+      expect(message.html).toContain(`href="${url.replaceAll('&', '&amp;')}"`);
+      expect(message.html).toContain(label);
+      expect(message.text).toContain(url);
+      expect(message.text).toContain('60 分钟');
+    },
+  );
 });

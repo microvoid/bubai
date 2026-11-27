@@ -1,3 +1,4 @@
+import { registerTestUser } from './account-mailbox';
 import { afterAll, beforeAll, describe, expect, test } from 'bun:test';
 import { spawn, type ChildProcess } from 'node:child_process';
 import fs from 'node:fs';
@@ -56,15 +57,13 @@ async function runCli(args: string[], env: Record<string, string>) {
   }
 }
 
+let serverMailPath = '';
+
 async function signUpAndGetToken(serverUrl: string, email: string, name: string): Promise<{
   token: string;
   userId: string;
 }> {
-  const res = await fetch(`${serverUrl}/api/auth/sign-up/email`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ email, password: 'Password123!', name }),
-  });
+  const res = await registerTestUser(serverUrl, email, name, 'Password123!', () => fs.readFileSync(serverMailPath, 'utf8'));
   const body = (await res.json()) as {
     token?: string;
     user?: { id: string };
@@ -183,18 +182,21 @@ describe('E2E: Security boundaries, strict auth bridge & idempotency regressions
     fakeBotmuxUrl = `http://127.0.0.1:${fakeBotmux.port}`;
 
     // Real BubAI server with STRICT AUTH enabled and BOTMUX_DISABLED=true
-    serverProc = spawn('bun', ['run', SERVER_ENTRY], {
+    serverMailPath = path.join(tmpDataDir, 'account-mail.log');
+    serverProc = spawn('sh', ['-c', 'exec bun "$1" > "$2"', 'test-server', SERVER_ENTRY, serverMailPath], {
       cwd: tmpDataDir,
       env: {
         ...process.env,
+        CLOUDFLARE_ACCOUNT_ID: '', CLOUDFLARE_EMAIL_API_TOKEN: '', EMAIL_FROM: '',
         DATABASE_URL: '',
         PORT: String(serverPort),
+        BETTER_AUTH_URL: serverUrl,
         BOTMUX_DISABLED: 'true',
         BUBAI_AUTH_REQUIRED: 'true',
         BUZZ_BOT_TOKEN: '',
         NODE_ENV: 'development',
       },
-      stdio: ['ignore', 'pipe', 'pipe'],
+      stdio: ['ignore', 'ignore', 'pipe'],
     });
 
     await waitForHttp(`${serverUrl}/health`, 20_000);

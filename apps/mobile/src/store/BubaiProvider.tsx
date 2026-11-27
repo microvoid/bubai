@@ -333,6 +333,7 @@ export function BubaiProvider({ children }: { children: React.ReactNode }) {
     async (email: string, password: string, name: string) => {
       if (!serverUrl) throw new Error('Not connected to server');
       const session = await mobileSignUpWithPassword(serverUrl, email, password, name);
+      if (!session) return; // Email verification is pending.
       await completeMobileLogin(session.token);
     },
     [completeMobileLogin, serverUrl],

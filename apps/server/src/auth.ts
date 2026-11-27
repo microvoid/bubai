@@ -1,11 +1,18 @@
 import {
   botCredentials,
-  consoleVerificationOTP,
   createAuth,
   resolveDisplayName,
   type Auth,
 } from '@bubai/auth';
 import type { ChatDb } from '@buzz-botmux/db';
+
+import { codeEmail, linkEmail } from './account-email';
+
+export function passwordAuthEnabled() {
+  return process.env.BUBAI_EMAIL_PASSWORD_ENABLED === undefined
+    ? process.env.NODE_ENV !== 'production'
+    : process.env.BUBAI_EMAIL_PASSWORD_ENABLED === 'true';
+}
 
 const DEFAULT_DEV_SECRET = 'bubai-dev-better-auth-secret-change-in-production-0123456789';
 
@@ -19,15 +26,20 @@ interface CloudflareEmailResponse {
   };
 }
 
-export const envVerificationOTP: NonNullable<
-  Parameters<typeof createAuth>[0]['sendVerificationOTP']
-> = async ({ email, otp, type }, request) => {
+export const envVerificationOTP: NonNullable<Parameters<typeof createAuth>[0]['sendVerificationOTP']> =
+  async ({ email, otp, type }) => sendMail(email, codeEmail(otp, type), () => `[bubai-auth][otp] type=${type} email=${email} otp=${otp}`);
+
+const envAccountLink: NonNullable<Parameters<typeof createAuth>[0]['sendAccountLink']> =
+  async (kind, email, url) => sendMail(email, linkEmail(kind, url), () => `[bubai-auth][${kind}] email=${email} url=${url}`);
+
+async function sendMail(email: string, message: ReturnType<typeof codeEmail>, developmentMessage: () => string) {
   const accountId = process.env.CLOUDFLARE_ACCOUNT_ID?.trim();
   const apiToken = process.env.CLOUDFLARE_EMAIL_API_TOKEN?.trim();
   const from = process.env.EMAIL_FROM?.trim();
 
   if (!accountId && !apiToken && !from && process.env.NODE_ENV !== 'production') {
-    return consoleVerificationOTP({ email, otp, type }, request);
+    console.info(developmentMessage());
+    return;
   }
   if (!accountId || !apiToken || !from) {
     throw new Error('Configure CLOUDFLARE_ACCOUNT_ID, CLOUDFLARE_EMAIL_API_TOKEN, and EMAIL_FROM to send verification emails');
@@ -42,10 +54,9 @@ export const envVerificationOTP: NonNullable<
         'Content-Type': 'application/json',
       },
       body: JSON.stringify({
-        from,
+        from: { address: from, name: 'BubAI' },
         to: [email],
-        subject: `Your Bubai verification code: ${otp}`,
-        text: `Your Bubai verification code is ${otp}. It expires in 5 minutes.`,
+        ...message,
       }),
       signal: AbortSignal.timeout(10_000),
     },
@@ -57,7 +68,7 @@ export const envVerificationOTP: NonNullable<
   if (response?.success !== true || !(response.result?.delivered?.length || response.result?.queued?.length)) {
     throw new Error('Cloudflare Email Sending did not accept the verification email');
   }
-};
+}
 
 export interface ResolvedAuthSession {
   userId: string;
@@ -90,6 +101,7 @@ export interface CreateServerAuthOptions {
   secret?: string;
   trustedOrigins?: string[];
   emailAndPassword?: boolean;
+  sendAccountLink?: Parameters<typeof createAuth>[0]['sendAccountLink'];
   sendVerificationOTP?: Parameters<typeof createAuth>[0]['sendVerificationOTP'];
 }
 
@@ -132,7 +144,8 @@ export function createServerAuth({
   baseURL,
   secret,
   trustedOrigins,
-  emailAndPassword,
+  emailAndPassword = passwordAuthEnabled(),
+  sendAccountLink = envAccountLink,
   sendVerificationOTP,
 }: CreateServerAuthOptions): Auth {
   const resolvedBaseURL = (
@@ -155,7 +168,8 @@ export function createServerAuth({
     secret: resolvedSecret,
     baseURL: resolvedBaseURL,
     trustedOrigins: origins,
-    ...(emailAndPassword !== undefined ? { emailAndPassword } : {}),
+    emailAndPassword,
+    sendAccountLink,
     sendVerificationOTP: sendVerificationOTP ?? envVerificationOTP,
   });
 }

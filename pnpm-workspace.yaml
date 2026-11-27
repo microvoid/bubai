@@ -5,3 +5,9 @@ packages:
 allowBuilds:
   esbuild: true
   "@tailwindcss/oxide": true
+
+packageExtensions:
+  expo-router@5.0.7:
+    # Router calls React hooks without declaring React as a peer.
+    peerDependencies:
+      react: "*"

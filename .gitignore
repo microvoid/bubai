@@ -20,6 +20,7 @@ pnpm-debug.log*
 .env.*.local
 .data
 references/
+tests/e2e/artifacts/
 
 # OS
 .DS_Store

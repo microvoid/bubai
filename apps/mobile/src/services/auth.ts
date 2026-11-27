@@ -24,6 +24,10 @@ function cleanBaseUrl(serverUrl: string): string {
   return serverUrl.trim().replace(/\/+$/, '');
 }
 
+class AuthHttpError extends Error {
+  constructor(readonly status: number, message: string) { super(message); }
+}
+
 async function authRequest<T>(
   serverUrl: string,
   path: string,
@@ -65,7 +69,7 @@ async function authRequest<T>(
               `HTTP ${res.status}`,
           )
         : `HTTP ${res.status}`;
-    throw new Error(msg);
+    throw new AuthHttpError(res.status, msg);
   }
 
   return { data: parsed as T, headers: res.headers };
@@ -175,14 +179,16 @@ export async function mobileGetSession(
       method: 'GET',
       token,
     });
-    if (!data?.user?.id) return null;
+    if (data === null) return null;
+    if (!data.user?.id) throw new Error('Invalid session response');
     return {
       token,
       user: normalizeUser(data.user),
       activeOrganizationId: data.session?.activeOrganizationId ?? null,
     };
-  } catch {
-    return null;
+  } catch (error) {
+    if (error instanceof AuthHttpError && error.status === 401) return null;
+    throw error;
   }
 }
 
@@ -204,7 +210,8 @@ export async function mobileListOrganizations(
     '/api/auth/organization/list',
     { method: 'GET', token },
   );
-  return Array.isArray(data) ? data : [];
+  if (!Array.isArray(data)) throw new Error('Invalid organization list');
+  return data;
 }
 
 export async function mobileCreateOrganization(

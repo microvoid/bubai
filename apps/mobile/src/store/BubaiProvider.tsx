@@ -41,6 +41,10 @@ import {
 const SERVER_URL_KEY = 'bubai.server.url';
 const USER_ID_KEY = 'bubai.user.id';
 const AUTH_TOKEN_KEY = 'bubai.auth.token';
+function tokenKey(url: string) {
+  const encoded = Array.from(normalizeServerUrl(url), c => c.codePointAt(0)!.toString(16)).join('.');
+  return `${AUTH_TOKEN_KEY}.${encoded}`;
+}
 const DEFAULT_SERVER_URL =
   process.env.EXPO_PUBLIC_SERVER_URL ||
   (Platform.OS === 'android' ? 'http://10.0.2.2:4000' : 'http://127.0.0.1:4000');
@@ -102,20 +106,26 @@ export function BubaiProvider({ children }: { children: React.ReactNode }) {
   const wsHandleRef = useRef<ReturnType<BubaiClient['connectWebSocket']> | null>(null);
   const wsListenersRef = useRef(new Set<(event: ServerWsEvent) => void>());
 
+  const authRevision = useRef(0);
+  const [sessionError, setSessionError] = useState<string | null>(null);
   const hydrateSessionAndOrgs = useCallback(async (url: string, token: string) => {
+    const revision = ++authRevision.current;
+    setSessionError(null);
     const session = await mobileGetSession(url, token);
+    if (revision !== authRevision.current) return null;
     if (!session) {
       setAuthToken(null);
       setAuthUser(null);
       setOrganizations([]);
       setActiveOrgId(null);
-      await SecureStore.deleteItemAsync(AUTH_TOKEN_KEY).catch(() => {});
+      await SecureStore.deleteItemAsync(tokenKey(url)).catch(() => {});
       return null;
     }
     setAuthToken(token);
     setAuthUser(session.user);
     setCurrentUserIdState(session.user.id);
-    let orgs = await mobileListOrganizations(url, token).catch(() => []);
+    let orgs = await mobileListOrganizations(url, token);
+    if (revision !== authRevision.current) return null;
     let resolvedOrgId = session.activeOrganizationId;
     if (orgs.length === 0) {
       const created = await mobileCreateOrganization(url, token, `${session.user.name}'s Community`).catch(
@@ -127,6 +137,7 @@ export function BubaiProvider({ children }: { children: React.ReactNode }) {
       await mobileSetActiveOrganization(url, token, orgs[0].id).catch(() => {});
       resolvedOrgId = orgs[0].id;
     }
+    if (revision !== authRevision.current) return null;
     setOrganizations(orgs);
     setActiveOrgId(resolvedOrgId);
     return session;
@@ -136,8 +147,7 @@ export function BubaiProvider({ children }: { children: React.ReactNode }) {
     void Promise.all([
       SecureStore.getItemAsync(SERVER_URL_KEY).catch(() => null),
       SecureStore.getItemAsync(USER_ID_KEY).catch(() => null),
-      SecureStore.getItemAsync(AUTH_TOKEN_KEY).catch(() => null),
-    ]).then(async ([savedUrl, savedUser, savedToken]) => {
+    ]).then(async ([savedUrl, savedUser]) => {
       let resolvedUrl = DEFAULT_SERVER_URL;
       if (savedUrl) {
         try {
@@ -148,11 +158,12 @@ export function BubaiProvider({ children }: { children: React.ReactNode }) {
       }
       setServerUrl(resolvedUrl);
       if (savedUser) setCurrentUserIdState(savedUser);
+      const savedToken = await SecureStore.getItemAsync(tokenKey(resolvedUrl));
       if (savedToken) {
-        await hydrateSessionAndOrgs(resolvedUrl, savedToken);
+        setAuthToken(savedToken);
+        await hydrateSessionAndOrgs(resolvedUrl, savedToken).catch(error => setSessionError(String(error)));
       }
-      setHydrated(true);
-    });
+    }).catch(error => setSessionError(String(error))).finally(() => setHydrated(true));
   }, [hydrateSessionAndOrgs]);
 
   const currentUserId = authUser?.id || currentUserIdState;
@@ -272,18 +283,26 @@ export function BubaiProvider({ children }: { children: React.ReactNode }) {
     const probeClient = new BubaiClient({ baseUrl: normalized });
     const info = await probeClient.getInstance();
     await SecureStore.setItemAsync(SERVER_URL_KEY, normalized).catch(() => {});
+    ++authRevision.current;
+    const token = await SecureStore.getItemAsync(tokenKey(normalized));
+    setAuthToken(token);
+    setAuthUser(null);
+    setOrganizations([]);
+    setActiveOrgId(null);
+    setSessionError(null);
     setInstance(info);
     setServerUrl(normalized);
-    if (authToken) {
-      await hydrateSessionAndOrgs(normalized, authToken);
+    if (token) {
+      await hydrateSessionAndOrgs(normalized, token);
     }
     return info;
-  }, [authToken, hydrateSessionAndOrgs]);
+  }, [hydrateSessionAndOrgs]);
 
   const disconnectServer = useCallback(async () => {
+    ++authRevision.current;
     await Promise.all([
       SecureStore.deleteItemAsync(SERVER_URL_KEY).catch(() => {}),
-      SecureStore.deleteItemAsync(AUTH_TOKEN_KEY).catch(() => {}),
+      serverUrl && SecureStore.deleteItemAsync(tokenKey(serverUrl)).catch(() => {}),
     ]);
     setServerUrl(null);
     setAuthToken(null);
@@ -291,7 +310,7 @@ export function BubaiProvider({ children }: { children: React.ReactNode }) {
     setOrganizations([]);
     setActiveOrgId(null);
     setInstance(null);
-  }, []);
+  }, [serverUrl]);
 
   const sendEmailOtp = useCallback(
     async (email: string) => {
@@ -304,7 +323,7 @@ export function BubaiProvider({ children }: { children: React.ReactNode }) {
   const completeMobileLogin = useCallback(
     async (token: string) => {
       if (!serverUrl) throw new Error('Not connected to server');
-      await SecureStore.setItemAsync(AUTH_TOKEN_KEY, token).catch(() => {});
+      await SecureStore.setItemAsync(tokenKey(serverUrl), token).catch(() => {});
       await hydrateSessionAndOrgs(serverUrl, token);
       await queryClient.invalidateQueries({ queryKey: ['bootstrap'] });
     },
@@ -353,7 +372,8 @@ export function BubaiProvider({ children }: { children: React.ReactNode }) {
     if (serverUrl && authToken) {
       await mobileSignOut(serverUrl, authToken);
     }
-    await SecureStore.deleteItemAsync(AUTH_TOKEN_KEY).catch(() => {});
+    ++authRevision.current;
+    if (serverUrl) await SecureStore.deleteItemAsync(tokenKey(serverUrl)).catch(() => {});
     setAuthToken(null);
     setAuthUser(null);
     setOrganizations([]);
@@ -454,7 +474,7 @@ export function BubaiProvider({ children }: { children: React.ReactNode }) {
       asks: data?.asks ?? [],
       botmuxConnected: Boolean(data?.botmuxStatus?.authenticated ?? instance?.botmux?.authenticated),
       isLoading: bootstrapQuery.isLoading,
-      error: bootstrapQuery.error instanceof Error ? bootstrapQuery.error.message : null,
+      error: sessionError ?? (bootstrapQuery.error instanceof Error ? bootstrapQuery.error.message : null),
       connectToServer,
       disconnectServer,
       sendEmailOtp,
@@ -476,6 +496,7 @@ export function BubaiProvider({ children }: { children: React.ReactNode }) {
       authRequired,
       authToken,
       authUser,
+      sessionError,
       bootstrapQuery.error,
       bootstrapQuery.isLoading,
       clearChannelUnread,

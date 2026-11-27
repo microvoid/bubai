@@ -4,18 +4,27 @@ on:
   push:
     tags:
       - 'cli-v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing CLI release tag to publish
+        required: true
+        type: string
 
 permissions: {}
 
 jobs:
   package:
-    if: github.repository == 'microvoid/bubai'
+    if: github.repository == 'microvoid/bubai' && (github.event_name == 'push' || github.ref == 'refs/heads/main')
     runs-on: ubuntu-latest
     permissions:
       contents: read
+    env:
+      RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
+          ref: refs/tags/${{ env.RELEASE_TAG }}
           fetch-depth: 0
           persist-credentials: false
       - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
@@ -30,19 +39,20 @@ jobs:
           }
           node <<'NODE'
           const pkg = require('./apps/cli/package.json');
-          const tag = process.env.GITHUB_REF_NAME;
+          const tag = process.env.RELEASE_TAG;
           if (pkg.name !== '@bubx/cli' || pkg.private || tag !== `cli-v${pkg.version}`) {
             console.error(`Expected tag cli-v${pkg.version} for the public @bubx/cli package, got ${tag}`);
             process.exitCode = 1;
           }
           NODE
-      - uses: pnpm/action-setup@73e46992e05b19abd31f2f3c20e0e7370d762115 # v6
+      - name: Install pnpm
+        run: npm install --global "$(node -p 'require("./package.json").packageManager')"
       - run: pnpm --filter '@bubx/cli...' install --frozen-lockfile
       - run: pnpm --filter @bubx/cli typecheck
       - name: Pack and check the CLI
         working-directory: apps/cli
         run: |
-          version=${GITHUB_REF_NAME#cli-v}
+          version=${RELEASE_TAG#cli-v}
           npm pack --pack-destination "$RUNNER_TEMP"
           mv "$RUNNER_TEMP/bubx-cli-$version.tgz" "$RUNNER_TEMP/bubai-cli.tgz"
           tar -xzf "$RUNNER_TEMP/bubai-cli.tgz" -C "$RUNNER_TEMP" package/dist/main.js

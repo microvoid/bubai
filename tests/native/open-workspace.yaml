@@ -1,0 +1,32 @@
+appId: com.bubai.app.dev
+---
+- launchApp
+- runFlow:
+    when:
+      visible: "以后|Not Now"
+    commands:
+      - tapOn: "以后|Not Now"
+- extendedWaitUntil:
+    visible: "Live|Sign in to Bubai|Connect to Bubai"
+    timeout: 30000
+- runFlow:
+    when:
+      visible: Live
+    commands:
+      - tapOn: Live
+- runFlow:
+    when:
+      visible:
+        id: change-server
+    commands:
+      - tapOn:
+          id: change-server
+- tapOn:
+    id: server-url
+- eraseText
+- inputText: "${OPEN_SERVER}"
+- pressKey: Enter
+- extendedWaitUntil:
+    visible:
+      id: channel-row-general
+    timeout: 30000

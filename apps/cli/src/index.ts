@@ -2,6 +2,7 @@
 import { BubaiClient } from '@buzz-botmux/chat-client';
 import { version } from '../package.json';
 import { loadCliConfig, saveCliConfig } from './config';
+import { daemonRequest, runDaemon, startDaemon } from './daemon';
 import { startBotmuxBridge } from './bridge-botmux';
 import { listCommunities, resolveAndActivateCommunity } from './community';
 
@@ -61,6 +62,8 @@ Usage:
   bub community list [--server <url>] [--token <token>] [--json]
   bub community use <name|slug|id> [--server <url>] [--token <token>] [--json]
   bub config set --server <url> [--token <token>]
+  bub start [same options as bridge botmux]
+  bub stop
   bub status [--server <url>] [--token <token>] [--json]
   bub agent create --name <name> [--id <id>] [--external-id <ext>] [--community <name|slug|id>] [--channel <name|id>] [--auto-reply] [--issue-key]
   bub agent list [--server <url>]
@@ -251,6 +254,16 @@ async function main() {
     return;
   }
 
+  if (cmd === 'start') {
+    await startDaemon(process.argv.slice(3));
+    return;
+  }
+  if (cmd === 'stop') {
+    const bridge = await daemonRequest(true);
+    console.log(bridge ? 'Bridge stopped.' : 'Bridge is already stopped.');
+    return;
+  }
+
   const { serverUrl, token } = resolveConnection(flags);
 
   if (cmd === 'login') {
@@ -299,9 +312,11 @@ async function main() {
   const sdk = new BubaiClient({ baseUrl: serverUrl, token });
 
   if (cmd === 'status') {
+    const bridge = await daemonRequest();
+    if (!flags.json) console.log(`Local bridge: ${bridge?.state ?? 'stopped'}`);
     const [instance, { agents }] = await Promise.all([sdk.getInstance(), sdk.listAgents()]);
     if (flags.json) {
-      console.log(JSON.stringify({ ok: true, serverUrl, instance, agents }, null, 2));
+      console.log(JSON.stringify({ ok: true, serverUrl, instance, agents, bridge }, null, 2));
     } else {
       const activeAgents = agents.filter((agent) => !agent.archived);
       const online = activeAgents.filter((agent) => agent.status === 'online').length;
@@ -384,7 +399,7 @@ async function main() {
     return;
   }
 
-  if (cmd === 'bridge' && sub === 'botmux') {
+  if ((cmd === 'bridge' && sub === 'botmux') || cmd === '_bridge-daemon') {
     const botmuxEndpoint =
       getStringFlag(flags, 'botmux') || process.env.BOTMUX_ENDPOINT || 'http://127.0.0.1:7891';
     const botmuxToken = getStringFlag(flags, 'botmux-token') || process.env.BOTMUX_TOKEN;
@@ -398,7 +413,7 @@ async function main() {
     const pollMsRaw = getStringFlag(flags, 'poll-ms');
     const pollMs = pollMsRaw ? Number(pollMsRaw) : undefined;
 
-    const bridge = await startBotmuxBridge({
+    const options = {
       serverUrl,
       token,
       botToken,
@@ -409,7 +424,9 @@ async function main() {
       community,
       autoReply: flags['auto-reply'] !== undefined ? Boolean(flags['auto-reply']) : undefined,
       pollMs,
-    });
+    };
+    if (cmd === '_bridge-daemon') return runDaemon(options);
+    const bridge = await startBotmuxBridge(options);
 
     const shutdown = () => {
       bridge.stop();
@@ -426,6 +443,7 @@ async function main() {
 }
 
 main().catch((err) => {
+  if (process.connected && process.send) process.send(err instanceof Error ? err.message : String(err));
   console.error(err instanceof Error ? err.message : String(err));
   process.exit(1);
 });

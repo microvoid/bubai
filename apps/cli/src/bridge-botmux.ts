@@ -34,6 +34,7 @@ export interface BotmuxBridgeOptions {
   autoReply?: boolean;
   pollMs?: number;
   turnTimeoutMs?: number;
+  onDisconnect?: (agentIds: string[]) => void;
   onReady?: (info: { agentIds: string[]; connectionId: string }) => void;
 }
 
@@ -457,6 +458,9 @@ export async function startBotmuxBridge(options: BotmuxBridgeOptions): Promise<{
     const groupSdk = new BubaiClient({ baseUrl: options.serverUrl, token: group.token });
     const gw = groupSdk.connectBotGateway({
       agents: group.agents,
+      onStateChange: state => {
+        if (state === 'closed' || state === 'reconnecting') options.onDisconnect?.(group.agents.map(agent => agent.id));
+      },
       onWelcome: (info) => {
         console.log(
           JSON.stringify({

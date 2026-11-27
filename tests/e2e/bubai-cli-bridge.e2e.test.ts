@@ -326,6 +326,32 @@ describe('E2E: BubaiCLI + Unified SDK + AgentUser + Botmux Bridge', () => {
     if (tmpConfigDir) fs.rmSync(tmpConfigDir, { recursive: true, force: true });
   });
 
+  test('start keeps the bridge online after CLI exit and stop releases it', async () => {
+    const env = {
+      BUBAI_CONFIG_DIR: tmpConfigDir,
+      BUBAI_URL: serverUrl,
+      BUBAI_TOKEN: 'e2e-cli-secret-token',
+      BOTMUX_ENDPOINT: fakeBotmuxUrl,
+      BOTMUX_TOKEN: 'fake-e2e-botmux-token',
+    };
+    const start = ['start', '--bots', BOT_ID];
+    try {
+      const invalid = await runCli(['start', '--bots', 'missing-bot'], env);
+      expect(invalid.code).toBe(1);
+      expect(invalid.stderr).toContain('Botmux bot IDs not found');
+      const results = await Promise.all([runCli(start, env), runCli(start, env)]);
+      for (const result of results) expect(result.code).toBe(0);
+      const status = JSON.parse((await runCli(['status', '--json'], env)).stdout);
+      expect(status.bridge.state).toBe('online');
+      expect(status.bridge.online).toBe(1);
+      const repeat = await runCli(start, env);
+      expect(repeat.stdout).toContain(String(status.bridge.pid));
+    } finally {
+      expect((await runCli(['stop'], env)).code).toBe(0);
+    }
+    expect(JSON.parse((await runCli(['status', '--json'], env)).stdout).bridge).toBeNull();
+  }, 30_000);
+
   test('1. CLI provisions AgentUser idempotently and joins a Channel', async () => {
     const sdk = new BubaiClient({ baseUrl: serverUrl });
     const { channel } = await sdk.createChannel({

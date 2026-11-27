@@ -85,6 +85,12 @@ export const channels = pgTable(
   },
 );
 
+export const pushDevices = pgTable('push_devices', {
+  token: text('token').primaryKey(),
+  userId: text('user_id').notNull(),
+  platform: text('platform').notNull(),
+});
+
 export const channelReads = pgTable(
   'channel_reads',
   {

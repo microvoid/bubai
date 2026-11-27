@@ -21,6 +21,7 @@ import {
   botmuxBindings,
   agentProfiles,
   sidebarGroups,
+  pushDevices,
   uploads,
   eq,
   asc,
@@ -1669,6 +1670,30 @@ app.get('/healthz', (c) =>
 );
 
 /** File / Image Attachment Upload & Serving (S3 when configured, local disk fallback) */
+app.post('/api/push/register', async c => {
+  const userId = c.get('authUserId');
+  if (!userId) return c.json({ error: 'Sign in to register notifications' }, 401);
+  const body = await c.req.json<{ token?: string; platform?: string }>().catch(() => null);
+  if (!body || typeof body.token !== 'string' || !body.token.trim() || body.token.length > 4096 ||
+      (body.platform !== 'ios' && body.platform !== 'android')) {
+    return c.json({ error: 'Invalid device registration' }, 400);
+  }
+  const { token, platform } = body;
+  await db.insert(pushDevices).values({ token, userId, platform }).onConflictDoUpdate({
+    target: pushDevices.token, set: { userId, platform },
+  });
+  return c.json({ ok: true });
+});
+
+app.delete('/api/push/register', async c => {
+  const userId = c.get('authUserId');
+  if (!userId) return c.json({ error: 'Sign in to manage notifications' }, 401);
+  const body = await c.req.json<{ token?: string }>().catch(() => null);
+  if (!body || typeof body.token !== 'string') return c.json({ error: 'Missing token' }, 400);
+  await db.delete(pushDevices).where(and(eq(pushDevices.token, body.token), eq(pushDevices.userId, userId)));
+  return c.json({ ok: true });
+});
+
 app.post('/api/uploads', async (c) => {
   const form = await c.req.formData();
   const file = form.get('file');

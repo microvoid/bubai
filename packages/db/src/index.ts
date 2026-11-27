@@ -105,6 +105,11 @@ CREATE INDEX IF NOT EXISTS channels_organization_idx ON channels (organization_i
 CREATE UNIQUE INDEX IF NOT EXISTS channels_org_name_uidx ON channels (COALESCE(organization_id, ''), name);
 CREATE UNIQUE INDEX IF NOT EXISTS channels_org_dm_key_uidx ON channels (COALESCE(organization_id, ''), dm_key) WHERE dm_key IS NOT NULL;
 
+CREATE TABLE IF NOT EXISTS push_devices (
+  token text PRIMARY KEY,
+  user_id text NOT NULL,
+  platform text NOT NULL
+);
 CREATE TABLE IF NOT EXISTS channel_reads (
   channel_id uuid NOT NULL REFERENCES channels(id) ON DELETE CASCADE,
   user_id text NOT NULL REFERENCES "user"(id) ON DELETE CASCADE,

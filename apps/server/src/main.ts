@@ -11,7 +11,6 @@ import { cors } from 'hono/cors';
 import type { ServerWebSocket } from 'bun';
 import {
   openChatDatabase,
-  users,
   channels,
   channelReads,
   threadReads,
@@ -22,6 +21,7 @@ import {
   botmuxBindings,
   agentProfiles,
   sidebarGroups,
+  uploads,
   eq,
   asc,
   desc,
@@ -57,6 +57,7 @@ import { createUploadStorage } from './storage';
 import {
   buildSessionHeaders,
   createServerAuth,
+  resolveDisplayName,
   resolveRequestIdentity,
   resolveTrustedOrigins,
   verifyBotRequest,
@@ -68,7 +69,9 @@ import { WebhookAgentAdapter } from './adapters/webhook-adapter';
 import type { AgentRegistrationInput, ResolvedAgent } from './adapters/types';
 
 const PORT = Number(process.env.PORT || 4000);
-const AUTH_REQUIRED = process.env.BUBAI_AUTH_REQUIRED === 'true';
+const AUTH_REQUIRED = process.env.BUBAI_AUTH_REQUIRED
+  ? process.env.BUBAI_AUTH_REQUIRED === 'true'
+  : process.env.NODE_ENV === 'production';
 const BOTMUX_DISABLED = process.env.BOTMUX_DISABLED === 'true';
 const BOTMUX_ENDPOINT = process.env.BOTMUX_ENDPOINT || 'http://127.0.0.1:7891';
 const BOTMUX_TOKEN = process.env.BOTMUX_TOKEN;
@@ -144,10 +147,10 @@ const gatewayAdapter = new BotGatewayAdapter({
     await dispatcher.upsertAgents(agents);
   },
   onPresenceChanged: async () => {
-    broadcast({ type: 'presence.updated', payload: { participants: await listParticipants() } });
+    await broadcastPresenceUpdated();
   },
   onAsksChanged: async () => {
-    broadcast({ type: 'asks.updated', payload: { asks: await dispatcher.getPendingAsks() } });
+    await broadcastAsksUpdated();
   },
   onTurnProgress: async (messageId, progress) => {
     const [row] = await db
@@ -193,10 +196,14 @@ const gatewayAdapter = new BotGatewayAdapter({
       .returning();
     if (settled) {
       const reactions = (await getReactionsForMessages([settled.id])).get(settled.id) || [];
-      broadcast({
-        type: 'message.updated',
-        payload: { ...formatMessageRow(settled, 0, reactions), justCompleted: true },
-      });
+      const orgId = await getChannelOrgId(settled.channelId);
+      broadcast(
+        {
+          type: 'message.updated',
+          payload: { ...formatMessageRow(settled, 0, reactions), justCompleted: true },
+        },
+        orgId,
+      );
     }
   },
 });
@@ -226,25 +233,189 @@ const clients = new Set<ServerWebSocket<WsClientData>>();
 function broadcast(event: { type: string; payload: unknown }, targetOrgId?: string | null) {
   const payload = JSON.stringify(event);
   for (const ws of clients) {
-    if (targetOrgId && ws.data.organizationId && ws.data.organizationId !== targetOrgId) {
+    if (targetOrgId) {
+      if (ws.data.organizationId !== targetOrgId) continue;
+    } else if (AUTH_REQUIRED && ws.data.organizationId) {
       continue;
     }
     ws.send(payload);
   }
 }
 
+async function getChannelOrgId(channelId: string): Promise<string | null> {
+  const [row] = await db
+    .select({ organizationId: channels.organizationId })
+    .from(channels)
+    .where(eq(channels.id, channelId))
+    .limit(1);
+  return row?.organizationId ?? null;
+}
+
+async function listOrgMemberIds(organizationId: string): Promise<Set<string>> {
+  const rows = await db
+    .select({ userId: authSchema.member.userId })
+    .from(authSchema.member)
+    .where(eq(authSchema.member.organizationId, organizationId));
+  return new Set(rows.map((r) => r.userId));
+}
+
+async function isAgentInOrg(agentId: string, organizationId?: string | null): Promise<boolean> {
+  if (!organizationId) return true;
+  const rows = await db
+    .select({ id: authSchema.member.id })
+    .from(authSchema.member)
+    .where(
+      and(
+        eq(authSchema.member.organizationId, organizationId),
+        eq(authSchema.member.userId, agentId),
+      ),
+    )
+    .limit(1);
+  return rows.length > 0;
+}
+
+async function listOrgSessionIds(organizationId: string): Promise<Set<string>> {
+  const [bindingRows, msgRows] = await Promise.all([
+    db
+      .select({ sessionId: botmuxBindings.sessionId, channelId: botmuxBindings.channelId })
+      .from(botmuxBindings)
+      .innerJoin(channels, eq(botmuxBindings.channelId, channels.id))
+      .where(eq(channels.organizationId, organizationId)),
+    db
+      .select({ sessionId: messages.botmuxSessionId })
+      .from(messages)
+      .innerJoin(channels, eq(messages.channelId, channels.id))
+      .where(and(eq(channels.organizationId, organizationId), isNotNull(messages.botmuxSessionId))),
+  ]);
+  const ids = new Set<string>();
+  for (const r of bindingRows) ids.add(r.sessionId);
+  for (const r of msgRows) {
+    if (r.sessionId) ids.add(r.sessionId);
+  }
+  return ids;
+}
+
+async function listSessionsForOrg(
+  organizationId?: string | null,
+  preloaded?: BotmuxSession[],
+): Promise<BotmuxSession[]> {
+  const all = preloaded ?? (await dispatcher.getSessions());
+  if (!organizationId) return all;
+  const [memberIds, orgSessionIds] = await Promise.all([
+    listOrgMemberIds(organizationId),
+    listOrgSessionIds(organizationId),
+  ]);
+  return all.filter(
+    (s) => orgSessionIds.has(s.sessionId) || (s.larkAppId ? memberIds.has(s.larkAppId) : false),
+  );
+}
+
+async function listAsksForOrg(
+  organizationId?: string | null,
+  preloaded?: Awaited<ReturnType<typeof dispatcher.getPendingAsks>>,
+) {
+  const all = preloaded ?? (await dispatcher.getPendingAsks());
+  if (!organizationId) return all;
+  const [memberIds, orgSessionIds] = await Promise.all([
+    listOrgMemberIds(organizationId),
+    listOrgSessionIds(organizationId),
+  ]);
+  return all.filter((a) => {
+    const rec = a as unknown as Record<string, unknown>;
+    const botId = typeof rec.larkAppId === 'string' ? rec.larkAppId : typeof rec.botId === 'string' ? rec.botId : null;
+    const sid = typeof rec.sessionId === 'string' ? rec.sessionId : null;
+    return (sid && orgSessionIds.has(sid)) || (botId && memberIds.has(botId));
+  });
+}
+
+async function sessionBelongsToOrg(sessionId: string, organizationId?: string | null): Promise<boolean> {
+  if (!organizationId) return true;
+  const [orgSessionIds, memberIds, allSessions] = await Promise.all([
+    listOrgSessionIds(organizationId),
+    listOrgMemberIds(organizationId),
+    dispatcher.getSessions(),
+  ]);
+  if (orgSessionIds.has(sessionId)) return true;
+  const live = allSessions.find((s) => s.sessionId === sessionId);
+  return Boolean(live?.larkAppId && memberIds.has(live.larkAppId));
+}
+
+function getConnectedOrgScopes(): Set<string | null> {
+  const scopes = new Set<string | null>();
+  for (const ws of clients) {
+    scopes.add(ws.data.organizationId ?? null);
+  }
+  return scopes;
+}
+
+async function broadcastPresenceUpdated(targetOrgId?: string | null) {
+  if (targetOrgId !== undefined) {
+    const participants = await listParticipants(targetOrgId);
+    broadcast({ type: 'presence.updated', payload: { participants } }, targetOrgId);
+    return;
+  }
+  const scopes = getConnectedOrgScopes();
+  for (const orgId of scopes) {
+    const participants = await listParticipants(orgId);
+    const payload = JSON.stringify({ type: 'presence.updated', payload: { participants } });
+    for (const ws of clients) {
+      if ((ws.data.organizationId ?? null) === orgId) {
+        ws.send(payload);
+      }
+    }
+  }
+}
+
+async function broadcastSessionsUpdated(preloaded?: BotmuxSession[]) {
+  const scopes = getConnectedOrgScopes();
+  if (scopes.size === 0) return;
+  const all = preloaded ?? (await dispatcher.getSessions());
+  for (const orgId of scopes) {
+    const sessions = await listSessionsForOrg(orgId, all);
+    const payload = JSON.stringify({ type: 'sessions.updated', payload: { sessions } });
+    for (const ws of clients) {
+      if ((ws.data.organizationId ?? null) === orgId) {
+        ws.send(payload);
+      }
+    }
+  }
+}
+
+async function broadcastAsksUpdated(preloaded?: Awaited<ReturnType<typeof dispatcher.getPendingAsks>>) {
+  const scopes = getConnectedOrgScopes();
+  if (scopes.size === 0) return;
+  const all = preloaded ?? (await dispatcher.getPendingAsks());
+  for (const orgId of scopes) {
+    const asks = await listAsksForOrg(orgId, all);
+    const payload = JSON.stringify({ type: 'asks.updated', payload: { asks } });
+    for (const ws of clients) {
+      if ((ws.data.organizationId ?? null) === orgId) {
+        ws.send(payload);
+      }
+    }
+  }
+}
+
 async function syncBotmuxAndSeedDefaults() {
   const { owner } = await dispatcher.syncBotmuxAgents();
+  if (AUTH_REQUIRED) return;
 
   const ownerName = owner?.ok && owner.name ? owner.name : 'Owner';
   const ownerAvatar = owner?.ok ? owner.avatarUrl ?? null : null;
 
   await db
-    .insert(users)
-    .values({ id: 'u-owner', name: ownerName, avatarUrl: ownerAvatar })
+    .insert(authSchema.user)
+    .values({
+      id: 'u-owner',
+      name: ownerName,
+      email: 'owner@local.bubai',
+      emailVerified: true,
+      image: ownerAvatar,
+      kind: 'HUMAN',
+    })
     .onConflictDoUpdate({
-      target: users.id,
-      set: { name: ownerName, avatarUrl: ownerAvatar },
+      target: authSchema.user.id,
+      set: { name: ownerName, image: ownerAvatar, updatedAt: new Date() },
     });
 
   const existingChannels = await db.select().from(channels);
@@ -270,34 +441,37 @@ async function syncBotmuxAndSeedDefaults() {
 }
 
 async function listParticipants(organizationId?: string | null) {
-  const [dbUsers, resolvedAgents, orgMemberRows] = await Promise.all([
-    db.select().from(users).orderBy(asc(users.createdAt)),
+  const [dbUsers, resolvedAgents, allowedMemberIds] = await Promise.all([
+    db
+      .select()
+      .from(authSchema.user)
+      .where(eq(authSchema.user.kind, 'HUMAN'))
+      .orderBy(asc(authSchema.user.createdAt)),
     dispatcher.listAgents(),
-    organizationId
-      ? db
-          .select({ userId: authSchema.member.userId })
-          .from(authSchema.member)
-          .where(eq(authSchema.member.organizationId, organizationId))
-      : Promise.resolve(null),
+    organizationId ? listOrgMemberIds(organizationId) : Promise.resolve(null),
   ]);
-  const allowedMemberIds = orgMemberRows ? new Set(orgMemberRows.map((m) => m.userId)) : null;
   const filteredUsers = allowedMemberIds
     ? dbUsers.filter((u) => allowedMemberIds.has(u.id))
     : dbUsers;
+  const filteredAgents = allowedMemberIds
+    ? resolvedAgents.filter((a) => allowedMemberIds.has(a.id))
+    : resolvedAgents;
+
   const onlineUserIds = new Set<string>();
   for (const ws of clients) {
+    if (organizationId && ws.data.organizationId !== organizationId) continue;
     if (ws.data.userId) onlineUserIds.add(ws.data.userId);
   }
 
   const humans = filteredUsers.map((u) => ({
     id: u.id,
-    name: u.name,
+    name: resolveDisplayName(u.name, u.email),
     role: 'human' as const,
-    avatarUrl: u.avatarUrl || undefined,
+    avatarUrl: u.image || undefined,
     status: onlineUserIds.has(u.id) ? ('online' as const) : ('offline' as const),
   }));
 
-  const agents = resolvedAgents.map((a) => ({
+  const agents = filteredAgents.map((a) => ({
     id: a.id,
     name: a.name,
     role: 'agent' as const,
@@ -314,21 +488,30 @@ async function listParticipants(organizationId?: string | null) {
   return [...humans, ...agents];
 }
 
-async function buildAgentDetail(agentId: string, viewerUserId?: string) {
+async function buildAgentDetail(
+  agentId: string,
+  viewerUserId?: string,
+  organizationId?: string | null,
+) {
+  if (organizationId && !(await isAgentInOrg(agentId, organizationId))) {
+    return null;
+  }
   const [resolvedAgent, memberRows, bindingRows, allChannels, allSessions, allAsks] =
     await Promise.all([
       dispatcher.getAgent(agentId),
       db.select().from(channelMembers).where(eq(channelMembers.agentId, agentId)),
       db.select().from(botmuxBindings).where(eq(botmuxBindings.botId, agentId)),
       db.select().from(channels).orderBy(asc(channels.createdAt)),
-      dispatcher.getSessions(),
-      dispatcher.getPendingAsks(),
+      listSessionsForOrg(organizationId),
+      listAsksForOrg(organizationId),
     ]);
 
   if (!resolvedAgent) return null;
 
-  const visibleChannels = allChannels.filter((ch) =>
-    viewerUserId ? channelVisibleTo(ch, viewerUserId) : ch.kind !== 'dm'
+  const visibleChannels = allChannels.filter(
+    (ch) =>
+      channelBelongsToOrg(ch, organizationId) &&
+      (viewerUserId ? channelVisibleTo(ch, viewerUserId) : ch.kind !== 'dm'),
   );
   const visibleChannelMap = new Map(visibleChannels.map((c) => [c.id, c]));
   const visibleChannelIds = visibleChannels.map((c) => c.id);
@@ -511,9 +694,14 @@ async function listChannelsWithUnread(userId: string, organizationId?: string | 
     db.select().from(channelReads).where(eq(channelReads.userId, userId)),
     db.select().from(threadReads).where(eq(threadReads.userId, userId)),
     db.select().from(channelMembers),
-    db.select({ id: users.id, name: users.name }).from(users).where(eq(users.id, userId)),
+    db
+      .select({ id: authSchema.user.id, name: authSchema.user.name, email: authSchema.user.email })
+      .from(authSchema.user)
+      .where(eq(authSchema.user.id, userId)),
   ]);
-  const currentUserName = userRows[0]?.name;
+  const currentUserName = userRows[0]
+    ? resolveDisplayName(userRows[0].name, userRows[0].email)
+    : undefined;
   const readMap = new Map(readRows.map((r) => [r.channelId, r]));
   const threadReadMap = new Map(threadReadRows.map((r) => [r.rootMessageId, r.lastReadAt]));
   const memberIdsByChannel = new Map<string, Set<string>>();
@@ -857,7 +1045,8 @@ async function applyMessageProgress(
 
   if (updated) {
     const reactions = (await getReactionsForMessages([updated.id])).get(updated.id) || [];
-    broadcast({ type: 'message.updated', payload: formatMessageRow(updated, 0, reactions) });
+    const orgId = await getChannelOrgId(updated.channelId);
+    broadcast({ type: 'message.updated', payload: formatMessageRow(updated, 0, reactions) }, orgId);
     return updated;
   }
   return null;
@@ -975,7 +1164,8 @@ async function reconcileBotmuxTurn(
     .returning();
   if (updated) {
     const reactions = (await getReactionsForMessages([updated.id])).get(updated.id) || [];
-    broadcast({ type: 'message.updated', payload: formatMessageRow(updated, 0, reactions) });
+    const orgId = await getChannelOrgId(updated.channelId);
+    broadcast({ type: 'message.updated', payload: formatMessageRow(updated, 0, reactions) }, orgId);
     return true;
   }
 }
@@ -996,7 +1186,7 @@ async function pollBotmuxTurns() {
     if (result.status === 'rejected') console.error('[Server] Botmux reply writeback failed:', result.reason);
   }
   if (results.some((result) => result.status === 'fulfilled' && result.value)) {
-    broadcast({ type: 'sessions.updated', payload: { sessions: await (sessions ?? botmuxAdapter.getSessions()) } });
+    await broadcastSessionsUpdated(await (sessions ?? botmuxAdapter.getSessions()));
   }
 }
 
@@ -1066,7 +1256,6 @@ app.use('/api/*', async (c, next) => {
 
   const identity = await resolveRequestIdentity({
     auth,
-    db,
     headers: c.req.raw.headers,
     authRequired: AUTH_REQUIRED,
   });
@@ -1157,8 +1346,8 @@ app.get('/api/bootstrap', async (c) => {
   const [channelList, participants, sessions, asks, botmuxStatus, groupRows] = await Promise.all([
     listChannelsWithUnread(userId, organizationId),
     listParticipants(organizationId),
-    dispatcher.getSessions(),
-    dispatcher.getPendingAsks(),
+    listSessionsForOrg(organizationId),
+    listAsksForOrg(organizationId),
     dispatcher.checkBotmuxHealth(),
     db
       .select()
@@ -1235,7 +1424,9 @@ app.get('/api/activity', async (c) => {
     db.select().from(channels).orderBy(asc(channels.createdAt)),
     db.select().from(channelReads).where(eq(channelReads.userId, userId)),
     db.select().from(threadReads).where(eq(threadReads.userId, userId)),
-    db.select({ id: users.id, name: users.name }).from(users),
+    db
+      .select({ id: authSchema.user.id, name: authSchema.user.name, email: authSchema.user.email })
+      .from(authSchema.user),
     db
       .select({
         id: agentProfiles.agentId,
@@ -1245,7 +1436,7 @@ app.get('/api/activity', async (c) => {
       .from(agentProfiles),
   ]);
 
-  const userNameMap = new Map(userRows.map((u) => [u.id, u.name]));
+  const userNameMap = new Map(userRows.map((u) => [u.id, resolveDisplayName(u.name, u.email)]));
   const botNameMap = new Map<string, string>();
   for (const p of profileRows) {
     botNameMap.set(p.id, p.displayName?.trim() || p.defaultName?.trim() || p.id);
@@ -1459,7 +1650,8 @@ app.post('/api/channels/:channelId/pins', async (c) => {
     .onConflictDoNothing();
 
   const pins = await listPinnedMessages(channelId);
-  broadcast({ type: 'pins.updated', payload: { channelId, pins } });
+  const orgId = await getChannelOrgId(channelId);
+  broadcast({ type: 'pins.updated', payload: { channelId, pins } }, orgId);
   return c.json({ pins });
 });
 
@@ -1471,7 +1663,8 @@ app.delete('/api/channels/:channelId/pins/:messageId', async (c) => {
     .where(and(eq(messagePins.channelId, channelId), eq(messagePins.messageId, messageId)));
 
   const pins = await listPinnedMessages(channelId);
-  broadcast({ type: 'pins.updated', payload: { channelId, pins } });
+  const orgId = await getChannelOrgId(channelId);
+  broadcast({ type: 'pins.updated', payload: { channelId, pins } }, orgId);
   return c.json({ pins });
 });
 
@@ -1494,6 +1687,16 @@ app.post('/api/uploads', async (c) => {
   const bytes = await file.arrayBuffer();
   const { url } = await uploadStorage.put(storedName, bytes, mimeType);
 
+  await db
+    .insert(uploads)
+    .values({
+      storedName,
+      organizationId: c.get('authOrgId'),
+      uploadedByUserId: c.get('authUserId'),
+      mimeType,
+    })
+    .onConflictDoNothing();
+
   const attachment: MessageAttachment = {
     id,
     name: file.name,
@@ -1506,6 +1709,22 @@ app.post('/api/uploads', async (c) => {
 
 app.get('/api/uploads/:filename', async (c) => {
   const filename = path.basename(c.req.param('filename'));
+  const authOrgId = c.get('authOrgId');
+  const authUserId = c.get('authUserId');
+  if (authOrgId) {
+    const [meta] = await db
+      .select()
+      .from(uploads)
+      .where(eq(uploads.storedName, filename))
+      .limit(1);
+    if (
+      meta?.organizationId &&
+      meta.organizationId !== authOrgId &&
+      meta.uploadedByUserId !== authUserId
+    ) {
+      return c.json({ error: 'Forbidden' }, 403);
+    }
+  }
   const res = await uploadStorage.get(filename);
   if (!res) {
     return c.json({ error: 'File not found' }, 404);
@@ -1873,7 +2092,7 @@ app.patch('/api/channels/:channelId/archive', async (c) => {
     createdByUserId: updated.createdByUserId || undefined,
     createdAt: updated.createdAt.getTime(),
   };
-  broadcast({ type: 'channel.updated', payload: dto });
+  broadcast({ type: 'channel.updated', payload: dto }, updated.organizationId);
   return c.json({ channel: dto });
 });
 
@@ -1891,7 +2110,7 @@ app.delete('/api/channels/:channelId', async (c) => {
   }
 
   await db.delete(channels).where(eq(channels.id, channelId));
-  broadcast({ type: 'channel.deleted', payload: { id: channelId } });
+  broadcast({ type: 'channel.deleted', payload: { id: channelId } }, existing.organizationId);
   return c.json({ ok: true, id: channelId });
 });
 
@@ -1986,7 +2205,7 @@ app.post('/api/channels', async (c) => {
     unreadCount: 0,
     createdAt: created.createdAt.getTime(),
   };
-  broadcast({ type: 'channel.created', payload: dto });
+  broadcast({ type: 'channel.created', payload: dto }, created.organizationId);
   return c.json({ channel: dto }, 201);
 });
 
@@ -2051,7 +2270,7 @@ app.patch('/api/channels/:channelId/settings', async (c) => {
     dmKey: updated.dmKey || undefined,
     createdAt: updated.createdAt.getTime(),
   };
-  broadcast({ type: 'channel.updated', payload: dto });
+  broadcast({ type: 'channel.updated', payload: dto }, updated.organizationId);
   return c.json({ channel: dto });
 });
 
@@ -2176,7 +2395,7 @@ app.post('/api/bot/messages', async (c) => {
     if (settled) {
       const reactions = (await getReactionsForMessages([settled.id])).get(settled.id) || [];
       const dto = { ...formatMessageRow(settled, 0, reactions), justCompleted: true };
-      broadcast({ type: 'message.updated', payload: dto });
+      broadcast({ type: 'message.updated', payload: dto }, channelRow.organizationId);
       return c.json({ message: dto, settledPlaceholder: true }, 200);
     }
   }
@@ -2196,7 +2415,7 @@ app.post('/api/bot/messages', async (c) => {
     .returning();
 
   const dto = formatMessageRow(saved);
-  broadcast({ type: 'message.created', payload: dto });
+  broadcast({ type: 'message.created', payload: dto }, channelRow.organizationId);
   return c.json({ message: dto }, 201);
 });
 
@@ -2306,7 +2525,8 @@ app.patch('/api/bot/messages/:messageId', async (c) => {
     ...formatMessageRow(updated, 0, reactions),
     ...(isTerminal ? { justCompleted: true } : {}),
   };
-  broadcast({ type: 'message.updated', payload: dto });
+  const orgId = await getChannelOrgId(updated.channelId);
+  broadcast({ type: 'message.updated', payload: dto }, orgId);
   return c.json({ ok: true, message: dto });
 });
 
@@ -2345,8 +2565,7 @@ app.post('/api/bot/agents/register', async (c) => {
       adapterType: a.adapterType ?? (a.webhookUrl ? 'webhook' : 'gateway'),
     })),
   );
-  const participants = await listParticipants();
-  broadcast({ type: 'presence.updated', payload: { participants } });
+  await broadcastPresenceUpdated();
   return c.json({ ok: true, registered: filtered.map((a) => a.agentId) });
 });
 
@@ -2372,7 +2591,7 @@ app.post('/api/bot/heartbeat', async (c) => {
     capabilities: body?.capabilities,
     ttlMs: body?.ttlMs,
   });
-  broadcast({ type: 'presence.updated', payload: { participants: await listParticipants() } });
+  await broadcastPresenceUpdated();
   return c.json({ ok: true, agentId, status: body?.status ?? 'online' });
 });
 
@@ -2523,7 +2742,7 @@ app.post('/api/dms', async (c) => {
     unreadCount: 0,
     createdAt: created.createdAt.getTime(),
   };
-  broadcast({ type: 'channel.created', payload: dto });
+  broadcast({ type: 'channel.created', payload: dto }, created.organizationId);
   return c.json({ channel: dto }, 201);
 });
 
@@ -2551,12 +2770,18 @@ async function listChannelMembers(channelId: string) {
 }
 
 async function broadcastChannelMembers(channelId: string) {
-  const roster = await listChannelMembers(channelId);
+  const [roster, orgId] = await Promise.all([
+    listChannelMembers(channelId),
+    getChannelOrgId(channelId),
+  ]);
   if (!roster) return;
-  broadcast({
-    type: 'channel.members.updated',
-    payload: { channelId, members: roster.members, ownerId: roster.ownerId },
-  });
+  broadcast(
+    {
+      type: 'channel.members.updated',
+      payload: { channelId, members: roster.members, ownerId: roster.ownerId },
+    },
+    orgId,
+  );
 }
 
 app.get('/api/channels/:channelId/members', async (c) => {
@@ -2645,62 +2870,6 @@ app.delete('/api/channels/:channelId/members', async (c) => {
   return c.json({ ok: true });
 });
 
-app.post('/api/humans', async (c) => {
-  if (AUTH_REQUIRED) {
-    return c.json({ error: 'Legacy human creation is disabled when auth is required' }, 403);
-  }
-  const body = await c.req.json<{ name?: string }>();
-  const name = body.name?.trim();
-  if (!name) return c.json({ error: 'Name required' }, 400);
-
-  const id = `u-${Date.now().toString(36)}`;
-  const [created] = await db.insert(users).values({ id, name }).returning();
-  broadcast({ type: 'presence.updated', payload: { participants: await listParticipants() } });
-  return c.json(
-    { human: { id: created.id, name: created.name, role: 'human', status: 'online' } },
-    201
-  );
-});
-
-app.patch('/api/humans/:userId', async (c) => {
-  const userId = c.req.param('userId');
-  const authedUserId = c.get('authUserId');
-  if ((AUTH_REQUIRED || authedUserId) && authedUserId !== userId) {
-    return c.json({ error: 'Forbidden' }, 403);
-  }
-  const body = await c.req.json<{ name?: string; avatarUrl?: string | null }>();
-  const [existing] = await db.select().from(users).where(eq(users.id, userId));
-  if (!existing) return c.json({ error: 'User not found' }, 404);
-
-  const updates: Partial<typeof users.$inferInsert> = {};
-  if (body.name !== undefined) {
-    const trimmed = body.name.trim();
-    if (!trimmed) return c.json({ error: 'Name required' }, 400);
-    updates.name = trimmed;
-  }
-  if (body.avatarUrl !== undefined) {
-    const trimmed = typeof body.avatarUrl === 'string' ? body.avatarUrl.trim() : '';
-    updates.avatarUrl = trimmed || null;
-  }
-
-  let updated = existing;
-  if (Object.keys(updates).length > 0) {
-    const [row] = await db.update(users).set(updates).where(eq(users.id, userId)).returning();
-    if (row) updated = row;
-  }
-
-  broadcast({ type: 'presence.updated', payload: { participants: await listParticipants() } });
-  return c.json({
-    human: {
-      id: updated.id,
-      name: updated.name,
-      avatarUrl: updated.avatarUrl || undefined,
-      role: 'human' as const,
-      status: 'online' as const,
-    },
-  });
-});
-
 app.get('/api/messages/:messageId', async (c) => {
   const messageId = c.req.param('messageId');
   const userId = getRequestUserId(c, c.req.query('userId'));
@@ -2719,6 +2888,10 @@ app.get('/api/messages/:messageId', async (c) => {
 
 app.get('/api/sessions/:sessionId/write-link', async (c) => {
   const sessionId = c.req.param('sessionId');
+  const authOrgId = c.get('authOrgId');
+  if (authOrgId && !(await sessionBelongsToOrg(sessionId, authOrgId))) {
+    return c.json({ error: 'Session not found' }, 404);
+  }
   const upstreamUrl = await botmuxAdapter.getSessionWriteLink(sessionId);
   if (!upstreamUrl) {
     return c.json({ sessionId, url: null });
@@ -2752,25 +2925,48 @@ app.all('/api/terminal-proxy/:sessionId/*', async (c) => {
 app.post('/api/sessions/:sessionId/:op', async (c) => {
   const sessionId = c.req.param('sessionId');
   const op = c.req.param('op');
+  const authOrgId = c.get('authOrgId');
+  if (authOrgId && !(await sessionBelongsToOrg(sessionId, authOrgId))) {
+    return c.json({ error: 'Session not found' }, 404);
+  }
   if (op !== 'restart' && op !== 'close' && op !== 'resume') {
     return c.json({ error: 'Unsupported session op' }, 400);
   }
   const result = await botmuxAdapter.sessionAction(sessionId, op);
   const sessions = await dispatcher.getSessions();
-  broadcast({ type: 'sessions.updated', payload: { sessions } });
+  await broadcastSessionsUpdated(sessions);
   return c.json(result.body as Record<string, unknown>, result.status as 200);
 });
 
 app.get('/api/sessions/:sessionId/history', async (c) => {
   const sessionId = c.req.param('sessionId');
+  const authOrgId = c.get('authOrgId');
+  if (authOrgId && !(await sessionBelongsToOrg(sessionId, authOrgId))) {
+    return c.json({ error: 'Session not found' }, 404);
+  }
   const [result, localRows] = await Promise.all([
     botmuxAdapter.getSessionHistory(sessionId),
-    db
-      .select()
-      .from(messages)
-      .where(and(eq(messages.botmuxSessionId, sessionId), isNull(messages.deletedAt)))
-      .orderBy(asc(messages.createdAt))
-      .limit(100),
+    authOrgId
+      ? db
+          .select({ message: messages })
+          .from(messages)
+          .innerJoin(channels, eq(messages.channelId, channels.id))
+          .where(
+            and(
+              eq(messages.botmuxSessionId, sessionId),
+              eq(channels.organizationId, authOrgId),
+              isNull(messages.deletedAt),
+            ),
+          )
+          .orderBy(asc(messages.createdAt))
+          .limit(100)
+          .then((rows) => rows.map((r) => r.message))
+      : db
+          .select()
+          .from(messages)
+          .where(and(eq(messages.botmuxSessionId, sessionId), isNull(messages.deletedAt)))
+          .orderBy(asc(messages.createdAt))
+          .limit(100),
   ]);
 
   const localMessages = localRows.map((m) => ({
@@ -2820,20 +3016,40 @@ app.get('/api/sessions/:sessionId/history', async (c) => {
 });
 
 app.get('/api/asks/pending', async (c) => {
-  const asks = await dispatcher.getPendingAsks();
+  const asks = await listAsksForOrg(c.get('authOrgId'));
   return c.json({ asks });
 });
 
 app.post('/api/asks/answer', async (c) => {
+  const authOrgId = c.get('authOrgId');
   const body = await c.req.json<DashboardAskAnswerRequest>();
+  if (authOrgId) {
+    const allowedAsks = await listAsksForOrg(authOrgId);
+    const askId = (body as unknown as Record<string, unknown>)?.askId;
+    const matched = allowedAsks.some((a) => {
+      const rec = a as unknown as Record<string, unknown>;
+      return rec.id === askId || rec.askId === askId;
+    });
+    if (!matched) {
+      return c.json({ error: 'Ask not found' }, 404);
+    }
+  }
   const result = await dispatcher.answerAsk(body);
   const asks = await dispatcher.getPendingAsks();
-  broadcast({ type: 'asks.updated', payload: { asks } });
+  await broadcastAsksUpdated(asks);
   return c.json(result.body as Record<string, unknown>, result.status as 200);
 });
 
 app.get('/api/agents', async (c) => {
-  const agents = (await dispatcher.listAgents()).map((a) => ({
+  const authOrgId = c.get('authOrgId');
+  const [allAgents, allowedMemberIds] = await Promise.all([
+    dispatcher.listAgents(),
+    authOrgId ? listOrgMemberIds(authOrgId) : Promise.resolve(null),
+  ]);
+  const visible = allowedMemberIds
+    ? allAgents.filter((a) => allowedMemberIds.has(a.id))
+    : allAgents;
+  const agents = visible.map((a) => ({
     id: a.id,
     name: a.name,
     role: 'agent' as const,
@@ -2990,8 +3206,8 @@ app.post('/api/agents/provision', async (c) => {
     }
   }
 
-  const participants = await listParticipants();
-  broadcast({ type: 'presence.updated', payload: { participants } });
+  const participants = await listParticipants(authOrgId);
+  await broadcastPresenceUpdated(authOrgId);
   const agent = participants.find((p) => p.id === agentId && p.role === 'agent');
   return c.json(
     {
@@ -3016,7 +3232,8 @@ app.post('/api/agents/provision', async (c) => {
 app.get('/api/agents/:agentId', async (c) => {
   const agentId = c.req.param('agentId');
   const userId = getRequestUserId(c, c.req.query('userId'));
-  const detail = await buildAgentDetail(agentId, userId);
+  const authOrgId = c.get('authOrgId');
+  const detail = await buildAgentDetail(agentId, userId, authOrgId);
   if (!detail) return c.json({ error: 'Agent not found' }, 404);
   return c.json({ agent: detail });
 });
@@ -3024,6 +3241,10 @@ app.get('/api/agents/:agentId', async (c) => {
 app.patch('/api/agents/:agentId', async (c) => {
   const agentId = c.req.param('agentId');
   const userId = getRequestUserId(c, c.req.query('userId'));
+  const authOrgId = c.get('authOrgId');
+  if (authOrgId && !(await isAgentInOrg(agentId, authOrgId))) {
+    return c.json({ error: 'Agent not found' }, 404);
+  }
   const body = await c.req.json<{
     displayName?: string | null;
     description?: string | null;
@@ -3073,8 +3294,20 @@ app.patch('/api/agents/:agentId', async (c) => {
       },
     });
 
-  broadcast({ type: 'presence.updated', payload: { participants: await listParticipants() } });
-  const detail = await buildAgentDetail(agentId, userId);
+  // Keep Better Auth bot user display name / avatar aligned if a bot user row exists
+  if (body.displayName !== undefined || body.avatarUrl !== undefined) {
+    await db
+      .update(authSchema.user)
+      .set({
+        ...(nextDisplayName ? { name: nextDisplayName } : {}),
+        ...(body.avatarUrl !== undefined ? { image: nextAvatarUrl } : {}),
+        updatedAt: new Date(),
+      })
+      .where(and(eq(authSchema.user.id, agentId), eq(authSchema.user.kind, 'BOT')));
+  }
+
+  await broadcastPresenceUpdated(authOrgId);
+  const detail = await buildAgentDetail(agentId, userId, authOrgId);
   return c.json({ agent: detail });
 });
 
@@ -3082,12 +3315,8 @@ await syncBotmuxAndSeedDefaults();
 
 botmuxAdapter.subscribeEvents((eventName, data) => {
   if (eventName === 'sessions' || eventName === 'session' || eventName === 'message') {
-    void dispatcher.getSessions().then((sessions) => {
-      broadcast({ type: 'sessions.updated', payload: { sessions } });
-    });
-    void dispatcher.getPendingAsks().then((asks) => {
-      broadcast({ type: 'asks.updated', payload: { asks } });
-    });
+    void dispatcher.getSessions().then((sessions) => broadcastSessionsUpdated(sessions));
+    void dispatcher.getPendingAsks().then((asks) => broadcastAsksUpdated(asks));
     void runBotmuxTurnPoll();
   }
   broadcast({ type: 'botmux.event', payload: { eventName, data } });
@@ -3127,7 +3356,6 @@ Bun.serve<WsClientData>({
       const wsHeaders = buildSessionHeaders(req.headers, url.searchParams.get('token'));
       const identity = await resolveRequestIdentity({
         auth,
-        db,
         headers: wsHeaders,
         authRequired: AUTH_REQUIRED,
       });
@@ -3155,12 +3383,19 @@ Bun.serve<WsClientData>({
       const wsHeaders = buildSessionHeaders(req.headers, url.searchParams.get('token'));
       const identity = await resolveRequestIdentity({
         auth,
-        db,
         headers: wsHeaders,
         authRequired: AUTH_REQUIRED,
       });
       if (!identity) {
         return new Response('Unauthorized', { status: 401 });
+      }
+      const proxySid = url.pathname.split('/')[3];
+      if (
+        identity.organizationId &&
+        proxySid &&
+        !(await sessionBelongsToOrg(decodeURIComponent(proxySid), identity.organizationId))
+      ) {
+        return new Response('Forbidden', { status: 403 });
       }
       const upstreamHttp = resolveTerminalUpstreamUrl(url.pathname, url.search, BOTMUX_ENDPOINT);
       if (upstreamHttp) {
@@ -3309,10 +3544,16 @@ Bun.serve<WsClientData>({
           const { channelId, userId: payloadUserId } = event.payload || {};
           const userId = ws.data.authenticated ? ws.data.userId : payloadUserId;
           if (channelId && userId) {
-            broadcast({
-              type: 'typing.updated',
-              payload: { channelId, userId, typing: true },
-            });
+            const orgId = await getChannelOrgId(channelId);
+            if (!ws.data.organizationId || orgId === ws.data.organizationId) {
+              broadcast(
+                {
+                  type: 'typing.updated',
+                  payload: { channelId, userId, typing: true },
+                },
+                orgId,
+              );
+            }
           }
           return;
         }
@@ -3426,21 +3667,24 @@ Bun.serve<WsClientData>({
               .update(channelReads)
               .set({ hidden: false })
               .where(eq(channelReads.channelId, channelId));
-            broadcast({
-              type: 'channel.updated',
-              payload: {
-                id: channelRow.id,
-                name: channelRow.name,
-                topic: channelRow.topic,
-                kind: 'dm' as const,
-                replyMode: parseReplyMode(channelRow.replyMode, DEFAULT_REPLY_MODE),
-                archived: false,
-                createdByUserId: channelRow.createdByUserId || undefined,
-                dmKey: channelRow.dmKey || undefined,
-                unreadCount: 1,
-                createdAt: channelRow.createdAt.getTime(),
+            broadcast(
+              {
+                type: 'channel.updated',
+                payload: {
+                  id: channelRow.id,
+                  name: channelRow.name,
+                  topic: channelRow.topic,
+                  kind: 'dm' as const,
+                  replyMode: parseReplyMode(channelRow.replyMode, DEFAULT_REPLY_MODE),
+                  archived: false,
+                  createdByUserId: channelRow.createdByUserId || undefined,
+                  dmKey: channelRow.dmKey || undefined,
+                  unreadCount: 1,
+                  createdAt: channelRow.createdAt.getTime(),
+                },
               },
-            });
+              channelRow.organizationId,
+            );
           }
 
           if (!threadId) {
@@ -3478,7 +3722,10 @@ Bun.serve<WsClientData>({
 
           if (targetAgentMap.size === 0) return;
 
-          const [senderUser] = await db.select().from(users).where(eq(users.id, senderId));
+          const [senderUser] = await db
+            .select({ id: authSchema.user.id, name: authSchema.user.name, email: authSchema.user.email })
+            .from(authSchema.user)
+            .where(eq(authSchema.user.id, senderId));
 
           const attachmentNote = hasFiles
             ? `\n\n[附件]\n${attachments!.map((a) => `- ${a.name} (${a.mimeType}, http://localhost:${PORT}${a.url})`).join('\n')}`
@@ -3510,10 +3757,14 @@ Bun.serve<WsClientData>({
                   .from(messages)
                   .where(and(eq(messages.id, threadId), isNull(messages.deletedAt)))
               : Promise.resolve([]),
-            db.select().from(users),
+            db
+              .select({ id: authSchema.user.id, name: authSchema.user.name, email: authSchema.user.email })
+              .from(authSchema.user),
           ]);
 
-          const userNameMap = new Map(allUsers.map((u) => [u.id, u.name]));
+          const userNameMap = new Map(
+            allUsers.map((u) => [u.id, resolveDisplayName(u.name, u.email)]),
+          );
           const botNameMap = new Map(knownAgents.map((a) => [a.id, a.name]));
 
           const rawHistoryRows = [
@@ -3567,7 +3818,10 @@ Bun.serve<WsClientData>({
                 },
               })
               .returning();
-            broadcast({ type: 'message.created', payload: formatMessageRow(placeholder) });
+            broadcast(
+              { type: 'message.created', payload: formatMessageRow(placeholder) },
+              channelRow.organizationId,
+            );
 
             const dispatched = await dispatcher.dispatchTurn({
               agent,
@@ -3584,7 +3838,7 @@ Bun.serve<WsClientData>({
               triggerMessage: {
                 id: saved.id,
                 senderId,
-                senderName: senderUser?.name || senderId,
+                senderName: senderUser ? resolveDisplayName(senderUser.name, senderUser.email) : senderId,
                 content: trimmed,
                 attachments: attachments ?? [],
               },
@@ -3619,7 +3873,12 @@ Bun.serve<WsClientData>({
                 })
                 .where(eq(messages.id, placeholder.id))
                 .returning();
-              if (failed) broadcast({ type: 'message.updated', payload: formatMessageRow(failed) });
+              if (failed) {
+                broadcast(
+                  { type: 'message.updated', payload: formatMessageRow(failed) },
+                  channelRow.organizationId,
+                );
+              }
               continue;
             }
 
@@ -3645,12 +3904,15 @@ Bun.serve<WsClientData>({
               })
               .where(eq(messages.id, placeholder.id))
               .returning();
-            if (running) broadcast({ type: 'message.updated', payload: formatMessageRow(running) });
+            if (running) {
+              broadcast(
+                { type: 'message.updated', payload: formatMessageRow(running) },
+                channelRow.organizationId,
+              );
+            }
 
             if (dispatched.adapterType === 'botmux') {
-              void dispatcher.getSessions().then((sessions) => {
-                broadcast({ type: 'sessions.updated', payload: { sessions } });
-              });
+              void dispatcher.getSessions().then((sessions) => broadcastSessionsUpdated(sessions));
             }
           }
         }
@@ -3674,10 +3936,7 @@ Bun.serve<WsClientData>({
         return;
       }
       clients.delete(ws);
-      broadcast({
-        type: 'presence.updated',
-        payload: { participants: await listParticipants() },
-      });
+      await broadcastPresenceUpdated(ws.data.organizationId ?? null);
     },
   },
 });

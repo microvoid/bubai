@@ -59,6 +59,23 @@ export interface CreateAuthOptions {
   sendVerificationOTP?: EmailOTPOptions['sendVerificationOTP'];
 }
 
+/** Canonical display-name fallback when Better Auth `user.name` is empty (e.g. first-time Email OTP). */
+export function resolveDisplayName(
+  name?: string | null,
+  email?: string | null,
+  fallback = 'User',
+): string {
+  const trimmedName = name?.trim();
+  if (trimmedName) return trimmedName;
+  const trimmedEmail = email?.trim();
+  if (trimmedEmail) {
+    const localPart = trimmedEmail.split('@')[0]?.trim();
+    if (localPart) return localPart;
+    return trimmedEmail;
+  }
+  return fallback;
+}
+
 /** Logs OTP codes to the console; replace with a real email sender in production. */
 export const consoleVerificationOTP: EmailOTPOptions['sendVerificationOTP'] =
   async ({ email, otp, type }) => {

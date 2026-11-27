@@ -65,11 +65,20 @@ function buildPgPoolConfig(databaseUrl: string): PoolConfig {
 }
 
 const DDL = `
-CREATE TABLE IF NOT EXISTS users (
+CREATE TABLE IF NOT EXISTS "user" (
   id text PRIMARY KEY,
   name text NOT NULL,
-  avatar_url text,
-  created_at timestamptz NOT NULL DEFAULT now()
+  email text NOT NULL UNIQUE,
+  email_verified boolean NOT NULL DEFAULT false,
+  image text,
+  created_at timestamp NOT NULL DEFAULT now(),
+  updated_at timestamp NOT NULL DEFAULT now(),
+  role text,
+  banned boolean DEFAULT false,
+  ban_reason text,
+  ban_expires timestamp,
+  kind text NOT NULL DEFAULT 'HUMAN',
+  bot_created_by_user_id text
 );
 
 CREATE TABLE IF NOT EXISTS channels (
@@ -82,7 +91,7 @@ CREATE TABLE IF NOT EXISTS channels (
   archived boolean NOT NULL DEFAULT false,
   dm_key text,
   organization_id text,
-  created_by_user_id text REFERENCES users(id) ON DELETE SET NULL,
+  created_by_user_id text REFERENCES "user"(id) ON DELETE SET NULL,
   created_at timestamptz NOT NULL DEFAULT now()
 );
 
@@ -98,7 +107,7 @@ CREATE UNIQUE INDEX IF NOT EXISTS channels_org_dm_key_uidx ON channels (COALESCE
 
 CREATE TABLE IF NOT EXISTS channel_reads (
   channel_id uuid NOT NULL REFERENCES channels(id) ON DELETE CASCADE,
-  user_id text NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  user_id text NOT NULL REFERENCES "user"(id) ON DELETE CASCADE,
   last_read_at timestamptz NOT NULL DEFAULT now(),
   muted boolean NOT NULL DEFAULT false,
   hidden boolean NOT NULL DEFAULT false,
@@ -115,7 +124,7 @@ ALTER TABLE channel_reads ADD COLUMN IF NOT EXISTS group_id text;
 
 CREATE TABLE IF NOT EXISTS sidebar_groups (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-  user_id text NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  user_id text NOT NULL REFERENCES "user"(id) ON DELETE CASCADE,
   name text NOT NULL,
   created_at timestamptz NOT NULL DEFAULT now()
 );
@@ -124,7 +133,7 @@ CREATE INDEX IF NOT EXISTS sidebar_groups_user_idx ON sidebar_groups (user_id);
 CREATE TABLE IF NOT EXISTS thread_reads (
   channel_id uuid NOT NULL REFERENCES channels(id) ON DELETE CASCADE,
   root_message_id uuid NOT NULL,
-  user_id text NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  user_id text NOT NULL REFERENCES "user"(id) ON DELETE CASCADE,
   last_read_at timestamptz NOT NULL DEFAULT now(),
   PRIMARY KEY (root_message_id, user_id)
 );
@@ -132,7 +141,7 @@ CREATE TABLE IF NOT EXISTS thread_reads (
 CREATE TABLE IF NOT EXISTS channel_members (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   channel_id uuid NOT NULL REFERENCES channels(id) ON DELETE CASCADE,
-  user_id text REFERENCES users(id) ON DELETE CASCADE,
+  user_id text REFERENCES "user"(id) ON DELETE CASCADE,
   agent_id text,
   auto_reply boolean NOT NULL DEFAULT false,
   created_at timestamptz NOT NULL DEFAULT now(),
@@ -147,7 +156,7 @@ CREATE TABLE IF NOT EXISTS messages (
   channel_id uuid NOT NULL REFERENCES channels(id) ON DELETE CASCADE,
   thread_id uuid,
   reply_to_id uuid,
-  sender_user_id text REFERENCES users(id) ON DELETE SET NULL,
+  sender_user_id text REFERENCES "user"(id) ON DELETE SET NULL,
   sender_agent_id text,
   content text NOT NULL,
   card jsonb,
@@ -219,6 +228,41 @@ ALTER TABLE agent_profiles ADD COLUMN IF NOT EXISTS capabilities jsonb;
 ALTER TABLE agent_profiles ADD COLUMN IF NOT EXISTS webhook_url text;
 ALTER TABLE agent_profiles ADD COLUMN IF NOT EXISTS webhook_secret text;
 ALTER TABLE agent_profiles ADD COLUMN IF NOT EXISTS last_seen_at timestamptz;
+
+CREATE TABLE IF NOT EXISTS uploads (
+  stored_name text PRIMARY KEY,
+  organization_id text,
+  uploaded_by_user_id text REFERENCES "user"(id) ON DELETE SET NULL,
+  mime_type text NOT NULL DEFAULT 'application/octet-stream',
+  created_at timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS uploads_org_idx ON uploads (organization_id);
+
+DO $$
+BEGIN
+  IF to_regclass('public.users') IS NOT NULL THEN
+    INSERT INTO "user" (id, name, email, email_verified, image, kind)
+    SELECT id, name, id || '@legacy.bubai.local', false, avatar_url, 'HUMAN'
+    FROM users
+    ON CONFLICT (id) DO NOTHING;
+
+    ALTER TABLE channels DROP CONSTRAINT IF EXISTS channels_created_by_user_id_fkey;
+    ALTER TABLE channel_reads DROP CONSTRAINT IF EXISTS channel_reads_user_id_fkey;
+    ALTER TABLE sidebar_groups DROP CONSTRAINT IF EXISTS sidebar_groups_user_id_fkey;
+    ALTER TABLE thread_reads DROP CONSTRAINT IF EXISTS thread_reads_user_id_fkey;
+    ALTER TABLE channel_members DROP CONSTRAINT IF EXISTS channel_members_user_id_fkey;
+    ALTER TABLE messages DROP CONSTRAINT IF EXISTS messages_sender_user_id_fkey;
+
+    ALTER TABLE channels ADD CONSTRAINT channels_created_by_user_id_fkey FOREIGN KEY (created_by_user_id) REFERENCES "user"(id) ON DELETE SET NULL;
+    ALTER TABLE channel_reads ADD CONSTRAINT channel_reads_user_id_fkey FOREIGN KEY (user_id) REFERENCES "user"(id) ON DELETE CASCADE;
+    ALTER TABLE sidebar_groups ADD CONSTRAINT sidebar_groups_user_id_fkey FOREIGN KEY (user_id) REFERENCES "user"(id) ON DELETE CASCADE;
+    ALTER TABLE thread_reads ADD CONSTRAINT thread_reads_user_id_fkey FOREIGN KEY (user_id) REFERENCES "user"(id) ON DELETE CASCADE;
+    ALTER TABLE channel_members ADD CONSTRAINT channel_members_user_id_fkey FOREIGN KEY (user_id) REFERENCES "user"(id) ON DELETE CASCADE;
+    ALTER TABLE messages ADD CONSTRAINT messages_sender_user_id_fkey FOREIGN KEY (sender_user_id) REFERENCES "user"(id) ON DELETE SET NULL;
+
+    DROP TABLE users;
+  END IF;
+END $$;
 `;
 
 export interface OpenChatDatabaseOptions {

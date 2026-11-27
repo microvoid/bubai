@@ -2,14 +2,14 @@ import { afterEach, describe, expect, it } from 'bun:test';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { AUTH_DDL, botCredentials } from '@bubai/auth';
-import { channels, eq, openChatDatabase, users } from '@buzz-botmux/db';
+import { AUTH_DDL, authSchema, botCredentials } from '@bubai/auth';
+import { channels, eq, openChatDatabase } from '@buzz-botmux/db';
 import {
   buildSessionHeaders,
   createServerAuth,
   resolveAuthSession,
+  resolveDisplayName,
   resolveRequestIdentity,
-  syncAuthUserToLegacyUsers,
   verifyBotRequest,
 } from './auth';
 
@@ -47,7 +47,6 @@ describe('Phase 1 server auth + DB integration', () => {
       // 1. Unauthenticated identity respects authRequired toggle
       const blocked = await resolveRequestIdentity({
         auth,
-        db,
         headers: new Headers(),
         authRequired: true,
         fallbackUserId: 'spoofed-user',
@@ -56,7 +55,6 @@ describe('Phase 1 server auth + DB integration', () => {
 
       const compat = await resolveRequestIdentity({
         auth,
-        db,
         headers: new Headers(),
         authRequired: false,
       });
@@ -89,10 +87,9 @@ describe('Phase 1 server auth + DB integration', () => {
         body: { organizationId: org!.id },
       });
 
-      // 4. resolveRequestIdentity uses session userId (ignoring spoofed fallback), syncs legacy `users`, and exposes orgId
+      // 4. resolveRequestIdentity uses session userId (ignoring spoofed fallback) and exposes orgId
       const cookieIdentity = await resolveRequestIdentity({
         auth,
-        db,
         headers: new Headers({ cookie: cookie! }),
         authRequired: true,
         fallbackUserId: 'u-spoofed',
@@ -101,11 +98,11 @@ describe('Phase 1 server auth + DB integration', () => {
       expect(cookieIdentity?.userId).toBe(signUp.response.user.id);
       expect(cookieIdentity?.organizationId).toBe(org!.id);
 
-      const [syncedUser] = await db
+      const [authUserRow] = await db
         .select()
-        .from(users)
-        .where(eq(users.id, signUp.response.user.id));
-      expect(syncedUser?.name).toBe('Alice');
+        .from(authSchema.user)
+        .where(eq(authSchema.user.id, signUp.response.user.id));
+      expect(authUserRow?.name).toBe('Alice');
 
       // 5. Bearer token via Authorization header AND WS ?token= query param
       const wsHeaders = buildSessionHeaders(new Headers(), bearerToken);
@@ -166,27 +163,10 @@ describe('Phase 1 server auth + DB integration', () => {
       );
       expect(legacyBot).toEqual({ ok: true, method: 'static-token' });
 
-      // 9. syncAuthUserToLegacyUsers deduplicates unchanged writes in memory
-      const secondSyncWrote = await syncAuthUserToLegacyUsers(db, {
-        id: signUp.response.user.id,
-        name: 'Alice',
-        email: 'alice@example.com',
-        image: null,
-      });
-      expect(secondSyncWrote).toBe(false);
-
-      const renamedSyncWrote = await syncAuthUserToLegacyUsers(db, {
-        id: signUp.response.user.id,
-        name: 'Alice Renamed',
-        email: 'alice@example.com',
-        image: null,
-      });
-      expect(renamedSyncWrote).toBe(true);
-      const [renamedUser] = await db
-        .select()
-        .from(users)
-        .where(eq(users.id, signUp.response.user.id));
-      expect(renamedUser?.name).toBe('Alice Renamed');
+      // 9. resolveDisplayName handles empty names cleanly
+      expect(resolveDisplayName('  ', 'bob@example.com')).toBe('bob');
+      expect(resolveDisplayName('Alice', 'alice@example.com')).toBe('Alice');
+      expect(resolveDisplayName('', '')).toBe('User');
 
       // 10. Production secret guard throws when BETTER_AUTH_SECRET is missing
       const prevNodeEnv = process.env.NODE_ENV;

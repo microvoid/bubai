@@ -254,7 +254,7 @@ describe('Phase 1 Auth & Tenant Isolation E2E (isolated server with BUBAI_AUTH_R
     );
     assert.equal(bobLeaked, undefined, 'Bob (Org B) must NOT receive Org A message.created');
 
-    // Omission 5: Legacy /api/humans mutations restricted when AUTH_REQUIRED=true
+    // Legacy /api/humans routes have been removed completely
     const createHumanRes = await fetch(`${BASE_URL}/api/humans`, {
       method: 'POST',
       headers: {
@@ -265,8 +265,8 @@ describe('Phase 1 Auth & Tenant Isolation E2E (isolated server with BUBAI_AUTH_R
     });
     assert.equal(
       createHumanRes.status,
-      403,
-      `POST /api/humans should be forbidden when AUTH_REQUIRED=true, got ${createHumanRes.status}`,
+      404,
+      `POST /api/humans should be removed (404), got ${createHumanRes.status}`,
     );
 
     const patchOtherRes = await fetch(`${BASE_URL}/api/humans/${bob.user.id}`, {
@@ -279,8 +279,8 @@ describe('Phase 1 Auth & Tenant Isolation E2E (isolated server with BUBAI_AUTH_R
     });
     assert.equal(
       patchOtherRes.status,
-      403,
-      `PATCH /api/humans/:otherId should be forbidden, got ${patchOtherRes.status}`,
+      404,
+      `PATCH /api/humans/:otherId should be removed (404), got ${patchOtherRes.status}`,
     );
 
     // Silence unused var warning
@@ -514,6 +514,144 @@ describe('Phase 1 Auth & Tenant Isolation E2E (isolated server with BUBAI_AUTH_R
     });
     assert.equal(authDownload.status, 200);
     assert.equal(await authDownload.text(), 'secret-upload-bytes');
+
+    // Cross-org upload access by Bob (Org B) must be forbidden (403)
+    const bobDownload = await fetch(uploadUrl, {
+      headers: { Authorization: `Bearer ${bob.token}` },
+    });
+    assert.equal(
+      bobDownload.status,
+      403,
+      `Bob (Org B) must NOT download Org A upload, got ${bobDownload.status}`,
+    );
+  });
+
+  it('isolates WS broadcasts (presence/channel/pins) and Agent/Session/Ask APIs across organizations', async () => {
+    const alice = await signUpAndGetSession('alice-ws-iso@example.com', 'Alice WS');
+    const bob = await signUpAndGetSession('bob-ws-iso@example.com', 'Bob WS');
+
+    const orgA = await createAndActivateOrg(alice.token, 'WS Iso Alpha', 'ws-iso-alpha');
+    const orgB = await createAndActivateOrg(bob.token, 'WS Iso Beta', 'ws-iso-beta');
+    assert.ok(orgA.id && orgB.id);
+
+    // Connect Bob to WS in Org B and record every event received
+    const bobEvents: Array<{ type: string; payload?: Record<string, unknown> }> = [];
+    const wsBob = new WebSocket(`${BASE_URL.replace(/^http/, 'ws')}/ws?token=${encodeURIComponent(bob.token)}`);
+    await new Promise<void>((resolve, reject) => {
+      const timer = setTimeout(() => reject(new Error('Bob WS open timeout')), 5000);
+      wsBob.addEventListener('open', () => {
+        clearTimeout(timer);
+        resolve();
+      });
+      wsBob.addEventListener('error', () => {
+        clearTimeout(timer);
+        reject(new Error('Bob WS error'));
+      });
+    });
+    wsBob.addEventListener('message', (ev) => {
+      try {
+        bobEvents.push(JSON.parse(String(ev.data)) as { type: string; payload?: Record<string, unknown> });
+      } catch {
+        // ignore
+      }
+    });
+
+    try {
+      // 1. Alice provisions an agent in Org A
+      const provRes = await fetch(`${BASE_URL}/api/agents/provision`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${alice.token}`,
+        },
+        body: JSON.stringify({
+          agentId: 'bot-ws-iso-alpha',
+          name: 'Alpha Isolated Bot',
+          adapterType: 'gateway',
+        }),
+      });
+      assert.equal(provRes.status, 201);
+
+      // 2. Alice creates a channel in Org A
+      const chRes = await fetch(`${BASE_URL}/api/channels`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${alice.token}`,
+        },
+        body: JSON.stringify({ name: 'alpha-ws-secret-room' }),
+      });
+      assert.equal(chRes.status, 201);
+
+      // Wait briefly for any leaked broadcasts to arrive on Bob's WS
+      await new Promise((r) => setTimeout(r, 350));
+
+      // Bob must NOT receive Org A's channel.created or presence.updated containing Alice / Alpha Bot
+      const leakedChannel = bobEvents.find(
+        (e) => e.type === 'channel.created' && e.payload?.name === 'alpha-ws-secret-room',
+      );
+      assert.equal(leakedChannel, undefined, 'Bob (Org B) received Org A channel.created broadcast');
+
+      const leakedPresence = bobEvents.find((e) => {
+        if (e.type !== 'presence.updated') return false;
+        const participants = (e.payload?.participants as Array<{ id: string }> | undefined) || [];
+        return participants.some((p) => p.id === alice.user.id || p.id === 'bot-ws-iso-alpha');
+      });
+      assert.equal(leakedPresence, undefined, 'Bob (Org B) received Org A presence.updated broadcast');
+
+      // 3. Agent isolation: Alice sees bot-ws-iso-alpha; Bob does NOT
+      const aliceAgentsRes = await fetch(`${BASE_URL}/api/agents`, {
+        headers: { Authorization: `Bearer ${alice.token}` },
+      });
+      assert.equal(aliceAgentsRes.status, 200);
+      const aliceAgents = (await aliceAgentsRes.json()) as { agents: Array<{ id: string }> };
+      assert.ok(aliceAgents.agents.some((a) => a.id === 'bot-ws-iso-alpha'));
+
+      const bobAgentsRes = await fetch(`${BASE_URL}/api/agents`, {
+        headers: { Authorization: `Bearer ${bob.token}` },
+      });
+      assert.equal(bobAgentsRes.status, 200);
+      const bobAgents = (await bobAgentsRes.json()) as { agents: Array<{ id: string }> };
+      assert.equal(
+        bobAgents.agents.some((a) => a.id === 'bot-ws-iso-alpha'),
+        false,
+        'Bob (Org B) must NOT see Org A agent in GET /api/agents',
+      );
+
+      // Bob cannot GET or PATCH Org A's agent
+      const bobGetAgent = await fetch(`${BASE_URL}/api/agents/bot-ws-iso-alpha`, {
+        headers: { Authorization: `Bearer ${bob.token}` },
+      });
+      assert.equal(bobGetAgent.status, 404);
+
+      const bobPatchAgent = await fetch(`${BASE_URL}/api/agents/bot-ws-iso-alpha`, {
+        method: 'PATCH',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${bob.token}`,
+        },
+        body: JSON.stringify({ displayName: 'Hijacked Bot' }),
+      });
+      assert.equal(bobPatchAgent.status, 404);
+
+      // 4. Session & Ask isolation: Bob cannot query non-Org-B session history or answer non-Org-B ask
+      const bobSessionRes = await fetch(`${BASE_URL}/api/sessions/foreign-session-123/history`, {
+        headers: { Authorization: `Bearer ${bob.token}` },
+      });
+      assert.equal(bobSessionRes.status, 404);
+
+      const bobAskRes = await fetch(`${BASE_URL}/api/asks/answer`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${bob.token}`,
+        },
+        body: JSON.stringify({ askId: 'foreign-ask-123', answer: 'yes' }),
+      });
+      assert.equal(bobAskRes.status, 404);
+    } finally {
+      wsBob.close();
+    }
   });
 
   it('validates Better Auth bot_ API key on BOTH /api/bot/messages and /api/bot/messages/:id/progress', async () => {

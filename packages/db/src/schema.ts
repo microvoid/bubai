@@ -67,13 +67,6 @@ export interface MessageAttachment {
   url: string;
 }
 
-export const users = pgTable('users', {
-  id: text('id').primaryKey(),
-  name: text('name').notNull(),
-  avatarUrl: text('avatar_url'),
-  createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
-});
-
 export const channels = pgTable(
   'channels',
   {
@@ -86,9 +79,7 @@ export const channels = pgTable(
     archived: boolean('archived').notNull().default(false),
     dmKey: text('dm_key'),
     organizationId: text('organization_id'),
-    createdByUserId: text('created_by_user_id').references(() => users.id, {
-      onDelete: 'set null',
-    }),
+    createdByUserId: text('created_by_user_id'),
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
   },
 );
@@ -99,9 +90,7 @@ export const channelReads = pgTable(
     channelId: uuid('channel_id')
       .notNull()
       .references(() => channels.id, { onDelete: 'cascade' }),
-    userId: text('user_id')
-      .notNull()
-      .references(() => users.id, { onDelete: 'cascade' }),
+    userId: text('user_id').notNull(),
     lastReadAt: timestamp('last_read_at', { withTimezone: true }).notNull().defaultNow(),
     muted: boolean('muted').notNull().default(false),
     hidden: boolean('hidden').notNull().default(false),
@@ -116,9 +105,7 @@ export const sidebarGroups = pgTable(
   'sidebar_groups',
   {
     id: uuid('id').primaryKey().defaultRandom(),
-    userId: text('user_id')
-      .notNull()
-      .references(() => users.id, { onDelete: 'cascade' }),
+    userId: text('user_id').notNull(),
     name: text('name').notNull(),
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
   },
@@ -132,9 +119,7 @@ export const threadReads = pgTable(
       .notNull()
       .references(() => channels.id, { onDelete: 'cascade' }),
     rootMessageId: uuid('root_message_id').notNull(),
-    userId: text('user_id')
-      .notNull()
-      .references(() => users.id, { onDelete: 'cascade' }),
+    userId: text('user_id').notNull(),
     lastReadAt: timestamp('last_read_at', { withTimezone: true }).notNull().defaultNow(),
   },
   (t) => [primaryKey({ columns: [t.rootMessageId, t.userId] })]
@@ -147,7 +132,7 @@ export const channelMembers = pgTable(
     channelId: uuid('channel_id')
       .notNull()
       .references(() => channels.id, { onDelete: 'cascade' }),
-    userId: text('user_id').references(() => users.id, { onDelete: 'cascade' }),
+    userId: text('user_id'),
     agentId: text('agent_id'),
     autoReply: boolean('auto_reply').notNull().default(false),
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
@@ -170,7 +155,7 @@ export const messages = pgTable(
       .references(() => channels.id, { onDelete: 'cascade' }),
     threadId: uuid('thread_id'),
     replyToId: uuid('reply_to_id'),
-    senderUserId: text('sender_user_id').references(() => users.id, { onDelete: 'set null' }),
+    senderUserId: text('sender_user_id'),
     senderAgentId: text('sender_agent_id'),
     content: text('content').notNull(),
     card: jsonb('card').$type<MessageCardData | null>(),
@@ -244,3 +229,15 @@ export const agentProfiles = pgTable('agent_profiles', {
   createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
   updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
 });
+
+export const uploads = pgTable(
+  'uploads',
+  {
+    storedName: text('stored_name').primaryKey(),
+    organizationId: text('organization_id'),
+    uploadedByUserId: text('uploaded_by_user_id'),
+    mimeType: text('mime_type').notNull().default('application/octet-stream'),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [index().on(t.organizationId)]
+);

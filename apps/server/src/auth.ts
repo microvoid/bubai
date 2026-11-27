@@ -1,7 +1,46 @@
-import { botCredentials, createAuth, type Auth } from '@bubai/auth';
-import { users, type ChatDb } from '@buzz-botmux/db';
+import {
+  botCredentials,
+  consoleVerificationOTP,
+  createAuth,
+  resolveDisplayName,
+  type Auth,
+} from '@bubai/auth';
+import type { ChatDb } from '@buzz-botmux/db';
 
 const DEFAULT_DEV_SECRET = 'bubai-dev-better-auth-secret-change-in-production-0123456789';
+
+export { resolveDisplayName };
+
+/**
+ * Default OTP sender: uses Resend HTTP API when `RESEND_API_KEY` is configured,
+ * otherwise falls back to `consoleVerificationOTP` for local development.
+ */
+export const envVerificationOTP: NonNullable<
+  Parameters<typeof createAuth>[0]['sendVerificationOTP']
+> = async ({ email, otp, type }, request) => {
+  const resendKey = process.env.RESEND_API_KEY?.trim();
+  if (!resendKey) {
+    return consoleVerificationOTP({ email, otp, type }, request);
+  }
+  const from = process.env.EMAIL_FROM?.trim() || 'Bubai <noreply@bubai.local>';
+  const res = await fetch('https://api.resend.com/emails', {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${resendKey}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      from,
+      to: [email],
+      subject: `Your Bubai verification code: ${otp}`,
+      text: `Your Bubai verification code is ${otp}. It expires in 5 minutes.`,
+    }),
+  });
+  if (!res.ok) {
+    const body = await res.text().catch(() => '');
+    throw new Error(`Failed to send OTP email via Resend (${res.status}): ${body}`);
+  }
+};
 
 export interface ResolvedAuthSession {
   userId: string;
@@ -100,51 +139,8 @@ export function createServerAuth({
     baseURL: resolvedBaseURL,
     trustedOrigins: origins,
     ...(emailAndPassword !== undefined ? { emailAndPassword } : {}),
-    ...(sendVerificationOTP ? { sendVerificationOTP } : {}),
+    sendVerificationOTP: sendVerificationOTP ?? envVerificationOTP,
   });
-}
-
-const syncedUsersByDb = new WeakMap<object, Map<string, string>>();
-
-/**
- * Keep the legacy `users` table in sync with Better Auth `user` rows so existing
- * foreign keys (`channel_reads`, `channel_members`, `messages`, `sidebar_groups`,
- * `thread_reads`) continue working seamlessly during Phase 1 migration.
- * Deduplicated in-memory per DB instance so repeated requests with unchanged
- * profile fields do not issue redundant DB writes.
- */
-export async function syncAuthUserToLegacyUsers(
-  db: ChatDb,
-  authUser: ResolvedAuthSession['user'],
-): Promise<boolean> {
-  const effectiveName =
-    authUser.name.trim() || authUser.email.split('@')[0] || authUser.email || 'User';
-  const fingerprint = `${effectiveName}\0${authUser.image ?? ''}`;
-  let cache = syncedUsersByDb.get(db);
-  if (!cache) {
-    cache = new Map<string, string>();
-    syncedUsersByDb.set(db, cache);
-  }
-  if (cache.get(authUser.id) === fingerprint) {
-    return false;
-  }
-
-  await db
-    .insert(users)
-    .values({
-      id: authUser.id,
-      name: effectiveName,
-      avatarUrl: authUser.image ?? null,
-    })
-    .onConflictDoUpdate({
-      target: users.id,
-      set: {
-        name: effectiveName,
-        avatarUrl: authUser.image ?? null,
-      },
-    });
-  cache.set(authUser.id, fingerprint);
-  return true;
 }
 
 /** Build a Headers instance suitable for Better Auth session lookup, optionally accepting a WS ?token= query param. */
@@ -174,7 +170,7 @@ export async function resolveAuthSession(
       organizationId: activeOrgId,
       user: {
         id: result.user.id,
-        name: result.user.name,
+        name: resolveDisplayName(result.user.name, result.user.email),
         email: result.user.email,
         image: result.user.image ?? null,
       },
@@ -186,14 +182,12 @@ export async function resolveAuthSession(
 
 export async function resolveRequestIdentity(params: {
   auth: Auth;
-  db: ChatDb;
   headers: Headers;
   authRequired: boolean;
   fallbackUserId?: string | null;
 }): Promise<RequestIdentity | null> {
   const session = await resolveAuthSession(params.auth, params.headers);
   if (session) {
-    await syncAuthUserToLegacyUsers(params.db, session.user);
     return {
       authenticated: true,
       userId: session.userId,

@@ -550,7 +550,7 @@ describe('E2E: BubaiCLI + Unified SDK + AgentUser + Botmux Bridge', () => {
   });
 
   test('restarts the bridge and fills the original reply without reposting an accepted turn', async () => {
-    await withRecoveryBridge('cli-bridge-recover-accepted', async ({ sdk, channelId, send, relaunch }) => {
+    await withRecoveryBridge('cli-bridge-recover-accepted', async ({ sdk, channelId, homeDir, send, relaunch }) => {
       const prompt = 'finish this running turn while the bridge is offline';
       runningPrompts.add(prompt);
       try {
@@ -564,8 +564,21 @@ describe('E2E: BubaiCLI + Unified SDK + AgentUser + Botmux Bridge', () => {
 
         await stopBridge('SIGINT');
         await waitForBridge(sdk, 'offline');
-        runningPrompts.delete(prompt);
+        const journalDir = path.join(homeDir, 'bridge-turns');
+        const [scope] = fs.readdirSync(journalDir);
+        const [entry] = fs.readdirSync(path.join(journalDir, scope!));
+        const file = path.join(journalDir, scope!, entry!);
+        const saved = JSON.parse(fs.readFileSync(file, 'utf8'));
+        expect(saved.deadline).toBeUndefined();
+        // Simulate an upgraded bridge recovering a still-running, hour-old turn.
+        saved.acceptedAt = saved.createdAt = Date.now() - 60 * 60_000;
+        saved.deadline = saved.createdAt + 30 * 60_000;
+        fs.writeFileSync(file, JSON.stringify(saved));
+        polledTriggerIds.delete(turn.triggerId);
         relaunch();
+        await waitForCondition(async () => polledTriggerIds.has(turn.triggerId), 'resumed polling');
+        await new Promise((resolve) => setTimeout(resolve, 600));
+        runningPrompts.delete(prompt);
 
         const completed = await waitForReply(sdk, channelId, 'completed', placeholder.id);
         expect(completed.content).toBe(`Botmux reply to: ${prompt}`);

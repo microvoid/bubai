@@ -10,7 +10,7 @@ export type TurnFiles = { root: string; inputs: string[]; output: string; artifa
 
 export async function withTurnFiles<T>(
   event: BotTurnRequestedEvent,
-  sdk: BubaiClient,
+  sdk: Pick<BubaiClient, 'downloadTurnAttachment'>,
   signal: AbortSignal,
   run: (files: TurnFiles) => Promise<T>,
 ): Promise<T> {
@@ -90,7 +90,7 @@ export async function readArtifact(files: TurnFiles, artifact: LocalArtifact, li
 
 export async function uploadArtifacts(
   files: TurnFiles,
-  sdk: BubaiClient,
+  sdk: Pick<BubaiClient, 'downloadTurnAttachment'>,
   turnId: string,
   signal: AbortSignal,
 ) {

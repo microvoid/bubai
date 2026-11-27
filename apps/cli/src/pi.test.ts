@@ -110,6 +110,11 @@ test.each([false, true])(
   'packaged bub start auto handles an empty PATH (wrap=%s)',
   async (wrap) => {
     const dir = mkdtempSync(path.join(tmpdir(), 'bub-pi-e2e-'));
+  const entry = path.join(dir, 'bub.mjs');
+  const build = Bun.spawn(['npm','run','build','--','--outfile=' + entry], {
+    cwd:path.resolve(import.meta.dir, '..'),stdout:'ignore',stderr:'inherit',
+  });
+  expect(await build.exited).toBe(0);
     const done = Promise.withResolvers<{ status: string; content: string }>();
     const node = Bun.which('node')!;
     const binary = path.join(dir, 'fixture-cli');
@@ -249,7 +254,7 @@ test.each([false, true])(
     const invoke = async (...args: string[]) => {
       const output = path.join(dir, args[0] + '.stdout');
       const errors = path.join(dir, args[0] + '.stderr');
-      const p = Bun.spawn([node, path.resolve(import.meta.dir, '../dist/main.js'), ...args], {
+      const p = Bun.spawn([node, entry, ...args], {
         env,
         stdout: Bun.file(output),
         stderr: Bun.file(errors),
@@ -338,13 +343,13 @@ test('input limits use streamed size and temporary files are removed on failure'
   let remaining = 65;
   const sdk = {
     downloadTurnAttachment: async () =>
-      new ReadableStream<Uint8Array>({
+      new ReadableStream<typeof block>({
         pull(controller) {
           if (remaining-- > 0) controller.enqueue(block);
           else controller.close();
         },
       }),
-  } as import('@buzz-botmux/chat-client').BubaiClient;
+  };
   const signal = AbortSignal.timeout(5000);
   await expect(withTurnFiles(event, sdk, signal, async () => {})).rejects.toThrow('64 MiB');
   remaining = 1;

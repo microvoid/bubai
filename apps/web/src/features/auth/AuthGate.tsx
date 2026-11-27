@@ -80,7 +80,7 @@ export function AuthGate({ children }: { children: ReactNode }) {
       })
       .catch(() => {
         if (!cancelled) {
-          setInstanceInfo({ name: 'Bubai', authRequired: false, emailAndPasswordEnabled: true });
+          setInstanceInfo({ name: 'Bubai', authRequired: true, emailAndPasswordEnabled: true });
         }
       });
     return () => {

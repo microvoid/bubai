@@ -13,6 +13,7 @@ import {
 
 export {
   buildMentionCandidates,
+  findMentionedNonMemberAgents,
   filterMentionCandidates,
   type BuildMentionCandidatesInput,
   type ChannelMembersState,

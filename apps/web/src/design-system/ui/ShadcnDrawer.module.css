@@ -33,7 +33,7 @@
   justify-content: center;
   padding-inline: 1rem;
   pointer-events: none;
-  overflow: hidden;
+  overflow: clip;
 }
 
 .popup {
@@ -57,7 +57,7 @@
     0 -12px 40px -8px rgba(0, 0, 0, 0.16),
     0 0 0 1px rgba(0, 0, 0, 0.04);
   outline: none;
-  overflow: hidden;
+  overflow: clip;
   touch-action: none;
   transform: translateY(
     calc(var(--drawer-snap-point-offset, 0px) + var(--drawer-swipe-movement-y, 0px))
@@ -133,7 +133,7 @@
   flex: 1;
   min-height: 0;
   width: 100%;
-  overflow: hidden;
+  overflow: clip;
 }
 
 .header {

@@ -2,6 +2,7 @@ import { describe, expect, it } from 'bun:test';
 import {
   buildMentionCandidates,
   filterMentionCandidates,
+  findMentionedNonMemberAgents,
   type MentionSourceParticipant,
 } from '../../apps/web/src/features/conversation/mention-candidates';
 
@@ -211,5 +212,25 @@ describe('buildMentionCandidates + filterMentionCandidates', () => {
     });
     const threadMatches = filterMentionCandidates(threadBuilt, 'human');
     expect(threadMatches.map((c) => c.id)).toEqual(['u-offline', 'u-online']);
+  });
+});
+
+describe('findMentionedNonMemberAgents', () => {
+  it('returns only non-archived agents @-mentioned outside channelMemberIds', () => {
+    const mentioned = findMentionedNonMemberAgents(
+      '@Local Codex 6.2 Sol @Local Gemini 4 Neon @Archived Bot @林小雨 帮忙看看',
+      PARTICIPANTS,
+      new Set(['u-owner', 'agent-gemini']),
+    );
+    expect(mentioned.map((a) => a.id)).toEqual(['agent-codex']);
+  });
+
+  it('ignores email addresses and already-joined agents', () => {
+    const mentioned = findMentionedNonMemberAgents(
+      'contact test@agent-codex.com and @Local Gemini 4 Neon',
+      PARTICIPANTS,
+      new Set(['u-owner', 'agent-gemini']),
+    );
+    expect(mentioned).toEqual([]);
   });
 });

@@ -46,6 +46,7 @@ import {
 } from './features/messages/ProseMirrorComposer';
 import {
   buildMentionCandidates,
+  findMentionedNonMemberAgents,
   type ChannelMembersState,
 } from './features/conversation/MentionCompletions';
 import type { ChatMessage as Message, MessageFocus, Participant } from './features/messages/types';
@@ -259,13 +260,13 @@ function ConversationSurface({
   onOpenMedia: (attachments: readonly UploadedAttachment[], selectedId: string) => void;
   onOpenAgentProfile: (agentId: string) => void;
   onUploadFile: (file: File) => Promise<UploadedAttachment | null>;
-  onSendMessage: (content: string, attachments: UploadedAttachment[], messageId: string) => Promise<void>;
+  onSendMessage: (content: string, attachments: UploadedAttachment[], messageId: string) => Promise<boolean | void>;
   onSendThreadReply: (
     content: string,
     attachments: UploadedAttachment[],
     messageId: string,
     replyToId?: string,
-  ) => Promise<void>;
+  ) => Promise<boolean | void>;
   onTyping?: () => void;
   onUnarchiveChannel?: (channel: Channel) => void;
 }) {
@@ -521,6 +522,14 @@ export default function App() {
   const [runningMessageChannelMap, setRunningMessageChannelMap] = useState<Record<string, string>>({});
   const [deleteMessageTarget, setDeleteMessageTarget] = useState<Message | null>(null);
   const [deleteMessagePending, setDeleteMessagePending] = useState(false);
+  const [mentionInviteDialog, setMentionInviteDialog] = useState<{
+    channelId: string;
+    channelName: string;
+    agents: Participant[];
+    resolve: (decision: 'invite' | 'send-only' | 'cancel') => void;
+  } | null>(null);
+  const [mentionInvitePending, setMentionInvitePending] = useState(false);
+  const [mentionInviteError, setMentionInviteError] = useState<string | null>(null);
   const [desktopNotifications, setDesktopNotifications] = useState<boolean>(() => {
     try {
       return localStorage.getItem(DESKTOP_NOTIFICATIONS_KEY) === 'true';
@@ -540,11 +549,10 @@ export default function App() {
   participantsRef.current = participants;
   const [sessions, setSessions] = useState<BotmuxSession[]>([]);
   const [asks, setAsks] = useState<BotmuxPendingAsk[]>([]);
-  const [botmuxStatus, setBotmuxStatus] = useState<BotmuxStatus | null>(null);
   const [wsConnected, setWsConnected] = useState(false);
 
   const [activeChannelId, setActiveChannelId] = useState<string>('');
-  const [currentUserId, setCurrentUserId] = useState<string>(() => auth.user?.id || 'u-owner');
+  const [currentUserId, setCurrentUserId] = useState<string>(() => auth.user?.id || '');
   const currentUserIdRef = useRef(currentUserId);
   currentUserIdRef.current = currentUserId;
 
@@ -777,7 +785,6 @@ export default function App() {
           setParticipants(data.participants || []);
           setSessions(data.sessions || []);
           setAsks(data.asks || []);
-          setBotmuxStatus(data.botmuxStatus || null);
           if (nextChannels.length > 0) {
             const hashRaw = window.location.hash.replace(/^#/, '');
             const hashParams = new URLSearchParams(hashRaw);
@@ -2109,15 +2116,61 @@ export default function App() {
     });
   };
 
+  useEffect(() => {
+    setMentionInviteDialog((current) => {
+      if (current && current.channelId !== activeChannelId) {
+        current.resolve('cancel');
+        return null;
+      }
+      return current;
+    });
+    setMentionInvitePending(false);
+    setMentionInviteError(null);
+  }, [activeChannelId]);
+
   const handleSendMessage = async (
     content: string,
     attachments: UploadedAttachment[],
     messageId: string,
     threadId?: string,
     replyToId?: string,
-  ) => {
+  ): Promise<boolean | void> => {
     if (!activeChannelId) throw new Error('Select a channel to send this message.');
     if (activeChannel?.archived) throw new Error('This channel is archived.');
+
+    const targetChannelId = activeChannelId;
+    if (activeChannel?.kind === 'channel') {
+      const currentMemberIds = new Set<string>();
+      if (membersLoadedChannelId === targetChannelId) {
+        for (const m of channelMembersList) {
+          if (m.userId) currentMemberIds.add(m.userId);
+          if (m.agentId) currentMemberIds.add(m.agentId);
+        }
+      } else if (activeChannel.memberIds) {
+        for (const id of activeChannel.memberIds) {
+          if (id) currentMemberIds.add(id);
+        }
+      }
+
+      const nonMemberAgents = findMentionedNonMemberAgents(content, participants, currentMemberIds);
+      if (nonMemberAgents.length > 0) {
+        setMentionInviteError(null);
+        setMentionInvitePending(false);
+        const decision = await new Promise<'invite' | 'send-only' | 'cancel'>((resolve) => {
+          setMentionInviteDialog({
+            channelId: targetChannelId,
+            channelName: activeChannel.name,
+            agents: nonMemberAgents,
+            resolve,
+          });
+        });
+
+        if (decision === 'cancel' || channelRef.current !== targetChannelId) {
+          return false;
+        }
+      }
+    }
+
     const ws = await ensureWsOpen();
 
     await new Promise<void>((resolve, reject) => {
@@ -2137,7 +2190,7 @@ export default function App() {
           type: 'message.send',
           payload: {
             messageId,
-            channelId: activeChannelId,
+            channelId: targetChannelId,
             senderId: currentUserId,
             content,
             threadId,
@@ -2156,9 +2209,9 @@ export default function App() {
     attachments: UploadedAttachment[],
     messageId: string,
     replyToId?: string,
-  ) => {
+  ): Promise<boolean | void> => {
     if (!activeThreadRootId) throw new Error('Open the thread to send this reply.');
-    await handleSendMessage(content, attachments, messageId, activeThreadRootId, replyToId);
+    return handleSendMessage(content, attachments, messageId, activeThreadRootId, replyToId);
   };
 
   const handleTogglePin = async (msg: Message) => {
@@ -3392,6 +3445,108 @@ export default function App() {
           onToggleAutoReply={(agentId, autoReply) => changeChannelMember('POST', { agentId, autoReply })}
           onOpenAgentProfile={openAgentProfile}
         />
+      )}
+
+      {/* Non-member Agent @-mention Invite Confirmation Dialog (Buzz/Slack UX) */}
+      {mentionInviteDialog && (
+        <AlertDialog
+          title={`邀请 ${mentionInviteDialog.agents.map((a) => a.name).join('、')} 加入 #${mentionInviteDialog.channelName}？`}
+          description={`${mentionInviteDialog.agents.map((a) => a.name).join('、')} 目前不在 #${mentionInviteDialog.channelName} 中，直接发送不会触发回复。你可以先将其邀请加入频道再发送，或仅作为普通提及发送。`}
+          pending={mentionInvitePending}
+          onClose={() => {
+            if (mentionInvitePending) return;
+            const current = mentionInviteDialog;
+            setMentionInviteDialog(null);
+            setMentionInviteError(null);
+            current.resolve('cancel');
+          }}
+          actions={
+            <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end', flexWrap: 'wrap' }}>
+              <Button
+                variant="quiet"
+                size="sm"
+                disabled={mentionInvitePending}
+                onClick={() => {
+                  const current = mentionInviteDialog;
+                  setMentionInviteDialog(null);
+                  setMentionInviteError(null);
+                  current.resolve('cancel');
+                }}
+              >
+                取消
+              </Button>
+              <Button
+                variant="outline"
+                size="sm"
+                disabled={mentionInvitePending}
+                onClick={() => {
+                  const current = mentionInviteDialog;
+                  setMentionInviteDialog(null);
+                  setMentionInviteError(null);
+                  current.resolve('send-only');
+                }}
+              >
+                仅发送
+              </Button>
+              <Button
+                variant="primary"
+                size="sm"
+                loading={mentionInvitePending}
+                onClick={async () => {
+                  const current = mentionInviteDialog;
+                  setMentionInvitePending(true);
+                  setMentionInviteError(null);
+                  try {
+                    for (const agent of current.agents) {
+                      const response = await apiFetch(
+                        `${SERVER_HTTP}/api/channels/${encodeURIComponent(current.channelId)}/members`,
+                        {
+                          method: 'POST',
+                          headers: { 'Content-Type': 'application/json' },
+                          body: JSON.stringify({ agentId: agent.id }),
+                        },
+                      );
+                      if (!response.ok) {
+                        const errData = (await response.json().catch(() => null)) as { error?: string } | null;
+                        throw new Error(errData?.error || `无法将 ${agent.name} 加入频道`);
+                      }
+                    }
+                    const addedIds = current.agents.map((a) => a.id);
+                    setChannels((prev) =>
+                      prev.map((ch) =>
+                        ch.id === current.channelId
+                          ? {
+                              ...ch,
+                              memberIds: Array.from(new Set([...(ch.memberIds ?? []), ...addedIds])),
+                            }
+                          : ch,
+                      ),
+                    );
+                    if (channelRef.current === current.channelId) {
+                      setMembersRevision((revision) => revision + 1);
+                    }
+                    setMentionInviteDialog(null);
+                    setMentionInvitePending(false);
+                    current.resolve('invite');
+                  } catch (err) {
+                    setMentionInvitePending(false);
+                    setMentionInviteError(
+                      err instanceof Error ? err.message : '邀请失败，请重试',
+                    );
+                  }
+                }}
+              >
+                邀请并发送
+              </Button>
+            </div>
+          }
+        >
+          {mentionInviteError && (
+            <p className="text-body" style={{ color: 'var(--color-danger, #d93025)', margin: '4px 0 0' }}>
+              {mentionInviteError}
+            </p>
+          )}
+        </AlertDialog>
       )}
 
       {/* Channel Lifecycle Confirmation Dialog (Archive / Delete / Leave) */}

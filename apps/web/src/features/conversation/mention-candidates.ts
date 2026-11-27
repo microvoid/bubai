@@ -310,3 +310,24 @@ export function filterMentionCandidates(
 
   return entries.map((entry) => entry.candidate);
 }
+
+/**
+ * Find non-archived agents explicitly @-mentioned in `content` that are not yet
+ * members of the active channel. Used before send to offer an explicit
+ * "Invite & Send" vs "Send without inviting" confirmation (matching Buzz UX).
+ */
+export function findMentionedNonMemberAgents<T extends MentionSourceParticipant>(
+  content: string,
+  participants: readonly T[],
+  channelMemberIds: ReadonlySet<string>,
+): T[] {
+  if (!content || !content.includes('@')) return [];
+  const candidateAgents = participants.filter(
+    (p) => p.role === 'agent' && p.archived !== true && !channelMemberIds.has(p.id),
+  );
+  if (candidateAgents.length === 0) return [];
+  const matchers = buildMentionMatchers(candidateAgents);
+  const mentionedIds = new Set(findMentionedParticipantIds(content, matchers));
+  if (mentionedIds.size === 0) return [];
+  return candidateAgents.filter((a) => mentionedIds.has(a.id));
+}

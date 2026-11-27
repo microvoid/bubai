@@ -506,7 +506,7 @@ export function ProseMirrorComposer({
   disabled?: boolean;
   candidates?: readonly MentionCandidate[];
   draftScope: string;
-  onSend: (text: string, attachments: UploadedAttachment[], messageId: string) => Promise<void>;
+  onSend: (text: string, attachments: UploadedAttachment[], messageId: string) => Promise<boolean | void>;
   onTyping?: () => void;
   onUploadFile?: (file: File) => Promise<UploadedAttachment | null>;
   serverHttp: string;
@@ -718,7 +718,11 @@ export function ProseMirrorComposer({
     setSendError(null);
 
     try {
-      await onSend(text, files, messageId);
+      const sent = await onSend(text, files, messageId);
+      if (sent === false) {
+        lastAttempt.current = null;
+        return;
+      }
       lastAttempt.current = null;
       const remainingAttachments =
         files.length > 0

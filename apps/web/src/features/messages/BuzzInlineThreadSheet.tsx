@@ -55,7 +55,7 @@ export interface BuzzInlineThreadSheetProps {
     attachments: UploadedAttachment[],
     messageId: string,
     replyToId?: string,
-  ) => Promise<void>;
+  ) => Promise<boolean | void>;
   onClose: () => void;
 }
 
@@ -248,8 +248,8 @@ export function BuzzInlineThreadSheet({
         return;
       }
       placedFocus.current = messageFocus.sequence;
-      row?.scrollIntoView({ block: 'center' });
-      if (scrollerRef.current) {
+      if (scrollerRef.current && row) {
+        scrollRowIntoContainer(scrollerRef.current, row);
         lastScrollTopRef.current = scrollerRef.current.scrollTop;
       }
     };
@@ -291,10 +291,10 @@ export function BuzzInlineThreadSheet({
     const row = el?.querySelector<HTMLElement>(
       `[data-message-id="${CSS.escape(targetId)}"]`,
     );
-    if (!row) return;
+    if (!el || !row) return;
     followBottomRef.current = false;
     userScrolledRef.current = true;
-    row.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    scrollRowIntoContainer(el, row, 'smooth');
     clearJumpHighlight();
     requestAnimationFrame(() => {
       setJumpHighlightId(targetId);
@@ -546,7 +546,8 @@ export function BuzzInlineThreadSheet({
                 const targetId = replyTarget?.id;
                 followBottomRef.current = true;
                 userScrolledRef.current = false;
-                await onSendReply(text, attachments, messageId, targetId);
+                const sent = await onSendReply(text, attachments, messageId, targetId);
+                if (sent === false) return false;
                 setReplyTarget((current) => (current?.id === targetId ? null : current));
               }}
               placeholder={
@@ -558,6 +559,23 @@ export function BuzzInlineThreadSheet({
       </DrawerContent>
     </Drawer>
   );
+}
+
+function scrollRowIntoContainer(
+  container: HTMLElement,
+  row: HTMLElement,
+  behavior: ScrollBehavior = 'auto',
+): void {
+  const containerRect = container.getBoundingClientRect();
+  const rowRect = row.getBoundingClientRect();
+  const delta = rowRect.top - containerRect.top - (container.clientHeight - rowRect.height) / 2;
+  const maxScroll = Math.max(0, container.scrollHeight - container.clientHeight);
+  const targetTop = Math.max(0, Math.min(maxScroll, container.scrollTop + delta));
+  if (behavior === 'smooth') {
+    container.scrollTo({ top: targetTop, behavior: 'smooth' });
+  } else {
+    container.scrollTop = targetTop;
+  }
 }
 
 export function replyTargetExcerpt(target: Pick<ChatMessage, 'content' | 'card' | 'attachments'>): string {

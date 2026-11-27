@@ -201,6 +201,7 @@ export interface BuzzMessageRowProps {
   onOpenThread?: (messageId: string) => void;
   replyQuote?: ReactNode;
   replyPreview?: ReactNode;
+  hasRunningReply?: boolean;
   onReply?: () => void;
   onOpenTerminal?: (sessionId: string) => void;
   onOpenMedia?: (attachments: readonly UploadedAttachment[], selectedId: string) => void;
@@ -234,6 +235,7 @@ export function BuzzMessageRow({
   onOpenThread,
   replyQuote,
   replyPreview,
+  hasRunningReply = false,
   onReply,
   onOpenTerminal,
   onOpenMedia,
@@ -625,6 +627,7 @@ export function BuzzMessageRow({
               data-reply-connector=""
               data-thread-unread={(msg.unreadReplyCount ?? 0) > 0 ? 'true' : undefined}
               data-thread-unread-count={(msg.unreadReplyCount ?? 0) > 0 ? msg.unreadReplyCount : undefined}
+              data-thread-running={hasRunningReply ? 'true' : undefined}
               type="button"
               onClick={() => onOpenThread(msg.id)}
             >
@@ -645,6 +648,11 @@ export function BuzzMessageRow({
               <span>
                 {msg.replyCount} {msg.replyCount === 1 ? 'reply' : 'replies'}
               </span>
+              {hasRunningReply && (
+                <span className={styles.threadSummaryRunning} data-thread-running-badge="true">
+                  ✦ 运行中
+                </span>
+              )}
               {(msg.unreadReplyCount ?? 0) > 0 && (
                 <span
                   style={{

@@ -36,6 +36,47 @@ type ReadingPosition = {
 
 const BOTTOM_THRESHOLD_PX = 80;
 
+export interface FormattedReplyPreview {
+  text: string;
+  status?: 'running' | 'failed';
+}
+
+export function formatReplyPreview(reply: ChatMessage): FormattedReplyPreview {
+  const card = reply.card;
+  if (card?.status === 'running') {
+    const activeLabel = card.progress?.activeLabel?.trim();
+    if (activeLabel) {
+      return { text: `思考中 · ${activeLabel}`, status: 'running' };
+    }
+    if (card.phase === 'connecting') {
+      return { text: '连接中…', status: 'running' };
+    }
+    return { text: '思考中…', status: 'running' };
+  }
+
+  const trimmedContent = reply.content.trim().replace(/\s+/g, ' ');
+  if (
+    !trimmedContent &&
+    (card?.status === 'failed' ||
+      card?.status === 'timeout' ||
+      card?.status === 'dispatch_failed' ||
+      card?.status === 'interrupted')
+  ) {
+    const summary = card.summary?.trim();
+    const label = card.status === 'interrupted' ? '已中断' : '执行失败';
+    return {
+      text: summary && !summary.startsWith('botmux:') ? `${label} · ${summary}` : label,
+      status: 'failed',
+    };
+  }
+
+  const text =
+    trimmedContent ||
+    reply.attachments?.map((attachment) => attachment.name).join(', ') ||
+    'Message';
+  return { text };
+}
+
 function positionAt(scroller: HTMLElement): ReadingPosition {
   const bottom =
     scroller.scrollHeight - scroller.clientHeight - scroller.scrollTop <
@@ -601,19 +642,31 @@ function Timeline({
                   onTogglePin={onTogglePin}
                   onToggleReaction={onToggleReaction}
                   onOpenThread={onOpenThread}
+                  hasRunningReply={Boolean(replies?.some((reply) => reply.card?.status === 'running'))}
                   replyPreview={replies?.length ? (
                     <ol className={styles.threadPreviews} aria-label="Recent replies">
                       {replies.map((reply) => {
                         const sender = participantMap.get(reply.senderId)?.name || reply.senderId;
-                        const preview = reply.content.trim().replace(/\s+/g, ' ')
-                          || reply.attachments?.map((attachment) => attachment.name).join(', ')
-                          || reply.card?.title
-                          || 'Message';
+                        const preview = formatReplyPreview(reply);
                         return (
                           <li key={reply.id}>
-                            <Button variant="ghost" size="caption" shape="control" onClick={() => onOpenReply(reply)}>
+                            <Button
+                              variant="ghost"
+                              size="caption"
+                              shape="control"
+                              data-preview-status={preview.status}
+                              onClick={() => onOpenReply(reply)}
+                            >
                               <strong className={styles.threadPreviewSender}>{sender}</strong>
-                              <span className={styles.threadPreviewText}>{preview}</span>
+                              {preview.status === 'running' && (
+                                <span className={styles.threadPreviewPulse} aria-hidden="true" />
+                              )}
+                              <span
+                                className={styles.threadPreviewText}
+                                data-preview-status={preview.status}
+                              >
+                                {preview.text}
+                              </span>
                             </Button>
                           </li>
                         );

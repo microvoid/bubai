@@ -215,12 +215,13 @@ describe('Thread Reply Sheet & Emoji Picker State E2E', () => {
           }
           if (m.type === 'attributes' && m.target instanceof HTMLElement &&
               m.target.hasAttribute('data-details-sheet-surface') &&
-              m.target.hasAttribute('data-ending-style')) {
+              (m.target.hasAttribute('data-ending-style') ||
+                m.target.getAttribute('data-state') === 'closed')) {
             probe.endingStyleSeen = true;
           }
         }
       });
-      mo.observe(document.body, { childList: true, subtree: true, attributes: true, attributeFilter: ['data-ending-style'] });
+      mo.observe(document.body, { childList: true, subtree: true, attributes: true, attributeFilter: ['data-ending-style', 'data-state'] });
       window.__threadProbe = probe;
     })()`);
 
@@ -333,6 +334,39 @@ describe('Thread Reply Sheet & Emoji Picker State E2E', () => {
           sheetUnmounts: window.__threadProbe.sheetUnmounts,
         };
       })()`);
+
+      // 2.5. Verify Non-Modal & Snap Points (double-click handle expands to full snap point with data-expanded)
+      const snapCheck = await session.eval<{
+        isNonModal: boolean;
+        expandedBefore: boolean;
+        hasHandle: boolean;
+      }>(`(() => {
+        const sheet = document.querySelector('[data-details-sheet-surface]');
+        const viewport = sheet?.closest('[data-non-modal]');
+        const handle = sheet?.querySelector('[data-drawer-handle]');
+        return {
+          isNonModal: Boolean(viewport),
+          expandedBefore: Boolean(sheet?.hasAttribute('data-expanded')),
+          hasHandle: Boolean(handle),
+        };
+      })()`);
+      assert.equal(snapCheck.isNonModal, true, 'Drawer viewport should be non-modal (modal={false})');
+      assert.equal(snapCheck.hasHandle, true, 'Drawer should render drag handle');
+      assert.equal(snapCheck.expandedBefore, false, 'Drawer should open at default snap point (not expanded)');
+
+      // Double-click drag handle -> snaps to full height (snapPoint === 1, data-expanded present)
+      await session.eval(`(() => {
+        const handle = document.querySelector('[data-details-sheet-surface] [data-drawer-handle]');
+        handle?.dispatchEvent(new MouseEvent('dblclick', { bubbles: true }));
+      })()`);
+      const expandedAfter = await session.waitFor(async () => {
+        return session.eval<boolean>(
+          `Boolean(document.querySelector('[data-details-sheet-surface][data-expanded]'))`,
+        );
+      }, 3000);
+      assert.equal(expandedAfter, true, 'Drawer should set data-expanded at full snap point');
+      await new Promise((r) => setTimeout(r, 480));
+      await session.screenshot('04-drawer-expanded.png');
 
       // 3. Close thread via close button and verify graceful ending animation
       await session.eval(`(() => {

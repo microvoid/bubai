@@ -938,6 +938,9 @@ html[data-keyboard-navigation] .attachmentImage:focus-visible {
 .composer[data-editing] {
   overflow: hidden;
 }
+.composer[data-error] {
+  border-color: var(--border-danger);
+}
 .composerStatus {
   margin: 0;
   padding-inline: var(--space-2);
@@ -946,6 +949,29 @@ html[data-keyboard-navigation] .attachmentImage:focus-visible {
   line-height: var(--text-caption--line-height);
   letter-spacing: var(--text-caption--letter-spacing);
   font-weight: var(--text-caption--font-weight);
+}
+.composerError {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2);
+  margin-top: var(--space-1h);
+  padding-inline: var(--space-2);
+  color: var(--text-danger);
+  font-size: var(--text-caption);
+  line-height: var(--text-caption--line-height);
+  letter-spacing: var(--text-caption--letter-spacing);
+  font-weight: var(--text-caption--font-weight);
+}
+.composerErrorText {
+  min-width: 0;
+  flex: 1;
+}
+.composerErrorActions {
+  display: flex;
+  align-items: center;
+  gap: var(--space-1);
+  flex-shrink: 0;
 }
 .composerContent {
   display: flex;
@@ -1204,6 +1230,38 @@ html[data-keyboard-navigation] .attachmentImage:focus-visible {
 .threadPreviewText {
   min-inline-size: 0;
   color: var(--text-subtle);
+}
+.threadPreviewText[data-preview-status="running"] {
+  color: var(--accent-standard, var(--text-subtle));
+}
+.threadPreviewText[data-preview-status="failed"] {
+  color: var(--text-danger, #e5484d);
+}
+.threadPreviewPulse {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--accent-standard, #3b82f6);
+  flex-shrink: 0;
+  animation: threadPreviewPulseAnim 1.4s ease-in-out infinite;
+}
+@keyframes threadPreviewPulseAnim {
+  0%, 100% {
+    opacity: 0.35;
+    transform: scale(0.85);
+  }
+  50% {
+    opacity: 1;
+    transform: scale(1.1);
+  }
+}
+.threadSummaryRunning {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  margin-inline-start: 6px;
+  font-weight: 500;
+  color: var(--accent-standard, var(--text-subtle));
 }
 
 .threadHistoryFrame {

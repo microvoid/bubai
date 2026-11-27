@@ -1,21 +1,23 @@
 /**
- * Inline in-conversation thread sheet ported from Buzz's ComposerSheet + ThreadPanel.
- *
- * Opens docked inside the conversation's .composerDock, renders all thread replies
- * in flat chronological order so new messages always append at the bottom, and
- * displays a clickable inline quote bar whenever a reply references a specific
- * earlier message (replyToId) to jump and highlight that message.
+ * Thread reply drawer built with shadcn/ui Base UI Drawer (@base-ui/react/drawer),
+ * supporting Non-Modal interaction (modal={false}) and Snap Points (peek / default / expanded)
+ * while preserving the current thread sheet width and default height.
  */
-import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
-import { DialogBarMaterial } from '../../design-system/ui/DialogBarMaterial';
+import { useEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from 'react';
+import { XIcon } from '../../design-system/icons/index';
+import {
+  Drawer,
+  DrawerClose,
+  DrawerContent,
+  DrawerDescription,
+  DrawerHeader,
+  DrawerTitle,
+  shadcnDrawerStyles,
+  type DrawerSnapPoint,
+} from '../../design-system/ui/ShadcnDrawer';
 import { calendarDay, toUnixSeconds } from '../../shared/datetime';
 import { BuzzMessageRow } from './BuzzMessageRow';
-import { ComposerSheet } from './ComposerSheet';
-import {
-  composerHost,
-  useComposerDock,
-  useComposerScope,
-} from './composer-overlay';
+import { useComposerScope } from './composer-overlay';
 import { continuesMessageGroup } from './message-grouping';
 import styles from './Messages.module.css';
 import {
@@ -57,6 +59,9 @@ export interface BuzzInlineThreadSheetProps {
   onClose: () => void;
 }
 
+const THREAD_SNAP_POINTS: DrawerSnapPoint[] = [0.45, 0.8, 1];
+const DEFAULT_THREAD_SNAP_POINT: DrawerSnapPoint = 0.8;
+
 export function BuzzInlineThreadSheet({
   open,
   root,
@@ -82,16 +87,11 @@ export function BuzzInlineThreadSheet({
   onSendReply,
   onClose,
 }: BuzzInlineThreadSheetProps) {
-  const scope = useComposerScope();
-  // Subscribe to dock mount/unmount so composerHost resolves reactively
-  useComposerDock(scope?.handle);
-  const host = composerHost(scope?.handle);
-  const dock = host?.dock;
-
-  const [mounted, setMounted] = useState(open);
-  if (open && !mounted) setMounted(true);
   const [replyTarget, setReplyTarget] = useState<ChatMessage | null>(null);
+  const [snapPoint, setSnapPoint] = useState<DrawerSnapPoint | null>(DEFAULT_THREAD_SNAP_POINT);
+  const [viewportBounds, setViewportBounds] = useState<{ left: number; width: number } | null>(null);
   const [jumpHighlightId, setJumpHighlightId] = useState<string | null>(null);
+  const composerScope = useComposerScope();
   const jumpHighlightTimerRef = useRef<number | null>(null);
   const scrollerRef = useRef<HTMLElement | null>(null);
   const placedFocus = useRef<number | undefined>(undefined);
@@ -128,9 +128,44 @@ export function BuzzInlineThreadSheet({
     }
   }, []);
 
+  // Align the drawer viewport horizontally with the channel stage so it centers over the
+  // timeline & composer without overlapping the sidebar.
+  useEffect(() => {
+    if (!open) return;
+    const measure = () => {
+      const dock = composerScope?.handle.dock();
+      const stage = dock?.parentElement;
+      if (!stage) {
+        setViewportBounds(null);
+        return;
+      }
+      const rect = stage.getBoundingClientRect();
+      if (rect.width > 0) {
+        setViewportBounds((prev) =>
+          prev && Math.abs(prev.left - rect.left) < 1 && Math.abs(prev.width - rect.width) < 1
+            ? prev
+            : { left: Math.round(rect.left), width: Math.round(rect.width) },
+        );
+      }
+    };
+    measure();
+    const dock = composerScope?.handle.dock();
+    const stage = dock?.parentElement;
+    const ro = typeof ResizeObserver !== 'undefined' && stage ? new ResizeObserver(measure) : null;
+    if (ro && stage) ro.observe(stage);
+    window.addEventListener('resize', measure);
+    return () => {
+      ro?.disconnect();
+      window.removeEventListener('resize', measure);
+    };
+  }, [composerScope, open]);
+
   // Reset reply target & highlight state when switching threads
   useEffect(() => {
     setReplyTarget(null);
+    if (open) {
+      setSnapPoint(DEFAULT_THREAD_SNAP_POINT);
+    }
     clearJumpHighlight();
     prevReplyCount.current = 0;
     initialScrolledRootRef.current = null;
@@ -141,7 +176,7 @@ export function BuzzInlineThreadSheet({
 
   // Default scroll to latest reply when opening a thread without an explicit messageFocus
   useEffect(() => {
-    if (!open || !dock || !root?.id || messageFocus || replies.length === 0) return;
+    if (!open || !root?.id || messageFocus || replies.length === 0) return;
     if (initialScrolledRootRef.current === root.id) return;
 
     let frame = 0;
@@ -170,11 +205,11 @@ export function BuzzInlineThreadSheet({
     return () => {
       cancelAnimationFrame(frame);
     };
-  }, [dock, messageFocus, open, replies.length, root?.id]);
+  }, [messageFocus, open, replies.length, root?.id]);
 
   // Stick-to-bottom observer for in-place reply expansion (e.g. Agent card -> full reply)
   useEffect(() => {
-    if (!open || !dock) return;
+    if (!open) return;
     if (typeof ResizeObserver === 'undefined') return;
     const el = scrollerRef.current;
     const rows = el?.querySelector<HTMLElement>('[data-thread-rows]');
@@ -194,10 +229,10 @@ export function BuzzInlineThreadSheet({
     observer.observe(rows);
     observer.observe(el);
     return () => observer.disconnect();
-  }, [dock, messageFocus, open, root?.id, replies.length]);
+  }, [messageFocus, open, root?.id, replies.length]);
 
   useEffect(() => {
-    if (!open || !dock || !messageFocus || messageFocus.sequence === placedFocus.current ||
+    if (!open || !messageFocus || messageFocus.sequence === placedFocus.current ||
         !replies.some((reply) => reply.id === messageFocus.id)) return;
 
     followBottomRef.current = false;
@@ -220,7 +255,7 @@ export function BuzzInlineThreadSheet({
     };
     frame = requestAnimationFrame(reveal);
     return () => cancelAnimationFrame(frame);
-  }, [dock, messageFocus, open, replies]);
+  }, [messageFocus, open, replies]);
 
   // Keep viewport at the bottom when new replies arrive (including own replies)
   const prevReplyCount = useRef(0);
@@ -244,8 +279,6 @@ export function BuzzInlineThreadSheet({
     }
     prevReplyCount.current = replies.length;
   }, [currentUserId, replies]);
-
-  if ((!open && !mounted) || !host) return null;
 
   const replyCount = replies.length;
   const description =
@@ -366,128 +399,164 @@ export function BuzzInlineThreadSheet({
     ? participantMap.get(replyTarget.senderId)?.name || replyTarget.senderId
     : '';
 
+  const viewportStyle: CSSProperties | undefined = viewportBounds
+    ? { left: viewportBounds.left, width: viewportBounds.width, right: 'auto' }
+    : undefined;
+
   return (
-    <ComposerSheet
+    <Drawer
       open={open}
+      modal={false}
+      disablePointerDismissal
+      swipeDirection="down"
+      snapPoints={THREAD_SNAP_POINTS}
+      snapPoint={snapPoint}
+      onSnapPointChange={setSnapPoint}
       onOpenChange={(next) => {
         if (!next) onClose();
       }}
-      onClosed={() => setMounted(false)}
-      host={host}
-      title="Thread"
-      description={description}
-      closeLabel="Close thread"
-      containsComposer
     >
-      <aside
-        className={`${styles.thread} ${styles.embeddedThread}`}
-        data-reading-surface=""
-        aria-label="Thread"
+      <DrawerContent
+        className={shadcnDrawerStyles.threadPopup}
+        viewportStyle={viewportStyle}
+        data-details-sheet-surface=""
+        initialFocus={false}
+        onHandleDoubleClick={() => {
+          setSnapPoint((current) => (current === 1 ? DEFAULT_THREAD_SNAP_POINT : 1));
+        }}
       >
-        <div className={styles.threadHistoryFrame} data-thread-history-frame="">
-          <section
-            ref={scrollerRef}
-            data-message-scroller=""
-            className={styles.threadHistory}
-            aria-label="Thread messages"
-            tabIndex={0}
-            onWheel={(event) => {
-              if (event.deltaY < 0) userScrolledRef.current = true;
-            }}
-            onPointerDown={(event) => {
-              if (event.target === event.currentTarget) {
-                const rect = event.currentTarget.getBoundingClientRect();
-                if (event.clientX >= rect.left + event.currentTarget.clientWidth) {
+        <DrawerHeader>
+          <div className={shadcnDrawerStyles.headerMeta}>
+            <DrawerTitle>Thread</DrawerTitle>
+            {description ? (
+              <DrawerDescription>{description}</DrawerDescription>
+            ) : (
+              <DrawerDescription className="sr-only">
+                Thread replies
+              </DrawerDescription>
+            )}
+          </div>
+          <div className={shadcnDrawerStyles.headerActions}>
+            <DrawerClose
+              className={shadcnDrawerStyles.closeButton}
+              aria-label="Close thread"
+            >
+              <XIcon size={16} aria-hidden="true" />
+            </DrawerClose>
+          </div>
+        </DrawerHeader>
+
+        <aside
+          className={`${styles.thread} ${styles.embeddedThread}`}
+          data-reading-surface=""
+          aria-label="Thread"
+        >
+          <div className={styles.threadHistoryFrame} data-thread-history-frame="">
+            <section
+              ref={scrollerRef}
+              data-message-scroller=""
+              className={styles.threadHistory}
+              aria-label="Thread messages"
+              tabIndex={0}
+              onWheel={(event) => {
+                if (event.deltaY < 0) userScrolledRef.current = true;
+              }}
+              onPointerDown={(event) => {
+                if (event.target === event.currentTarget) {
+                  const rect = event.currentTarget.getBoundingClientRect();
+                  if (event.clientX >= rect.left + event.currentTarget.clientWidth) {
+                    userScrolledRef.current = true;
+                  }
+                }
+              }}
+              onKeyDown={(event) => {
+                if (event.key === 'ArrowUp' || event.key === 'PageUp' || event.key === 'Home') {
                   userScrolledRef.current = true;
                 }
+              }}
+              onScroll={(event) => {
+                const el = event.currentTarget;
+                if (el.scrollTop < lastScrollTopRef.current - 2) {
+                  userScrolledRef.current = true;
+                }
+                const atBottom = el.scrollHeight - el.clientHeight - el.scrollTop < 80;
+                if (atBottom) {
+                  followBottomRef.current = true;
+                  userScrolledRef.current = false;
+                } else if (followBottomRef.current && !userScrolledRef.current && !messageFocus) {
+                  el.scrollTop = el.scrollHeight;
+                } else {
+                  followBottomRef.current = false;
+                }
+                lastScrollTopRef.current = el.scrollTop;
+              }}
+            >
+              <div data-thread-rows="">
+                {root && (
+                  <BuzzMessageRow
+                    msg={root}
+                    sender={participantMap.get(root.senderId)}
+                    currentUserId={currentUserId}
+                    serverHttp={serverHttp}
+                    layout="thread"
+                    inThread
+                    highlighted={root.id === jumpHighlightId}
+                    isEditing={editingMessageId === root.id}
+                    editingDraft={editingDraft}
+                    onEditingDraftChange={onEditingDraftChange}
+                    onStartEdit={onStartEdit}
+                    onSaveEdit={onSaveEdit}
+                    onCancelEdit={onCancelEdit}
+                    onDelete={onDelete}
+                    onTogglePin={onTogglePin}
+                    onToggleReaction={onToggleReaction}
+                    onReply={() => setReplyTarget(null)}
+                    onOpenTerminal={onOpenTerminal}
+                    onOpenMedia={onOpenMedia}
+                    onOpenAgentProfile={onOpenAgentProfile}
+                    onMentionParticipant={(p) => threadComposerRef.current?.insertMention(p)}
+                  />
+                )}
+
+                <ol className={styles.threadList}>{renderReplies()}</ol>
+
+                <div className={styles.timelineEnd} data-thread-end="" aria-hidden="true" />
+              </div>
+            </section>
+          </div>
+
+          <div className={shadcnDrawerStyles.threadComposerFooter}>
+            <ProseMirrorComposer
+              composerRef={threadComposerRef}
+              candidates={mentionCandidates ?? participants}
+              draftScope={JSON.stringify([currentUserId, root?.id, replyTarget?.id])}
+              serverHttp={serverHttp}
+              onUploadFile={onUploadFile}
+              autoFocus
+              replyContext={
+                replyTarget
+                  ? {
+                      author: targetAuthor,
+                      excerpt: replyTargetExcerpt(replyTarget),
+                      onCancel: () => setReplyTarget(null),
+                    }
+                  : null
               }
-            }}
-            onKeyDown={(event) => {
-              if (event.key === 'ArrowUp' || event.key === 'PageUp' || event.key === 'Home') {
-                userScrolledRef.current = true;
-              }
-            }}
-            onScroll={(event) => {
-              const el = event.currentTarget;
-              if (el.scrollTop < lastScrollTopRef.current - 2) {
-                userScrolledRef.current = true;
-              }
-              const atBottom = el.scrollHeight - el.clientHeight - el.scrollTop < 80;
-              if (atBottom) {
+              onSend={async (text, attachments, messageId) => {
+                const targetId = replyTarget?.id;
                 followBottomRef.current = true;
                 userScrolledRef.current = false;
-              } else if (followBottomRef.current && !userScrolledRef.current && !messageFocus) {
-                el.scrollTop = el.scrollHeight;
-              } else {
-                followBottomRef.current = false;
+                await onSendReply(text, attachments, messageId, targetId);
+                setReplyTarget((current) => (current?.id === targetId ? null : current));
+              }}
+              placeholder={
+                replyTarget ? `Reply to ${targetAuthor}...` : 'Reply in thread...'
               }
-              lastScrollTopRef.current = el.scrollTop;
-            }}
-          >
-            <div data-thread-rows="">
-              {root && (
-                <BuzzMessageRow
-                  msg={root}
-                  sender={participantMap.get(root.senderId)}
-                  currentUserId={currentUserId}
-                  serverHttp={serverHttp}
-                  layout="thread"
-                  inThread
-                  highlighted={root.id === jumpHighlightId}
-                  isEditing={editingMessageId === root.id}
-                  editingDraft={editingDraft}
-                  onEditingDraftChange={onEditingDraftChange}
-                  onStartEdit={onStartEdit}
-                  onSaveEdit={onSaveEdit}
-                  onCancelEdit={onCancelEdit}
-                  onDelete={onDelete}
-                  onTogglePin={onTogglePin}
-                  onToggleReaction={onToggleReaction}
-                  onReply={() => setReplyTarget(null)}
-                  onOpenTerminal={onOpenTerminal}
-                  onOpenMedia={onOpenMedia}
-                  onOpenAgentProfile={onOpenAgentProfile}
-                  onMentionParticipant={(p) => threadComposerRef.current?.insertMention(p)}
-                />
-              )}
-
-              <ol className={styles.threadList}>{renderReplies()}</ol>
-
-              <div className={styles.timelineEnd} data-thread-end="" aria-hidden="true" />
-            </div>
-          </section>
-          <DialogBarMaterial />
-        </div>
-
-        <ProseMirrorComposer
-          composerRef={threadComposerRef}
-          candidates={mentionCandidates ?? participants}
-          draftScope={JSON.stringify([currentUserId, root?.id, replyTarget?.id])}
-          serverHttp={serverHttp}
-          onUploadFile={onUploadFile}
-          autoFocus
-          replyContext={
-            replyTarget
-              ? {
-                  author: targetAuthor,
-                  excerpt: replyTargetExcerpt(replyTarget),
-                  onCancel: () => setReplyTarget(null),
-                }
-              : null
-          }
-          onSend={async (text, attachments, messageId) => {
-            const targetId = replyTarget?.id;
-            followBottomRef.current = true;
-            userScrolledRef.current = false;
-            await onSendReply(text, attachments, messageId, targetId);
-            setReplyTarget((current) => (current?.id === targetId ? null : current));
-          }}
-          placeholder={
-            replyTarget ? `Reply to ${targetAuthor}...` : 'Reply in thread...'
-          }
-        />
-      </aside>
-    </ComposerSheet>
+            />
+          </div>
+        </aside>
+      </DrawerContent>
+    </Drawer>
   );
 }
 

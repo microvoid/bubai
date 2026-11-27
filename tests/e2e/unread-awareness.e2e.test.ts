@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { spawn, type ChildProcess } from 'node:child_process';
 import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
+import { createServer } from 'node:http';
 import path from 'node:path';
 import { after, before, describe, it } from 'node:test';
 
@@ -235,7 +236,7 @@ describe('Channel & Thread Unread Awareness E2E', () => {
         const unread = navItem?.hasAttribute('data-unread') ?? false;
         const badge = row.querySelector('.buzz-count-badge');
         const badgeText = badge ? (badge.textContent || '').trim() : '';
-        if (!unread || badgeText !== '1') return null;
+        if (!unread || badgeText !== '1' || !/^\\(\\d+\\) BubAI$/.test(document.title)) return null;
         return { unread, badgeText, title: document.title };
       })()`);
     }, 6000);
@@ -257,11 +258,13 @@ describe('Channel & Thread Unread Awareness E2E', () => {
       }),
     });
 
-    // Switch into Channel B -> top-level unread clears, but thread unread MUST remain visible!
+    // Switch into Channel B -> top-level unread clears, URL hash updates, and thread unread MUST remain visible!
     await cdp!.eval(`(() => {
       const row = document.querySelector('[data-channel-id="${channelBId}"] .navigation-item');
       row?.click();
     })()`);
+    const hashAfterClick = await cdp!.eval<string>(`window.location.hash`);
+    assert.equal(hashAfterClick, `#channel=${channelBId}`, 'Switching channel should update address bar hash');
 
     const threadSummaryState = await cdp!.waitFor(async () => {
       return cdp!.eval<{
@@ -545,5 +548,164 @@ describe('Channel & Thread Unread Awareness E2E', () => {
     assert.equal(chB?.threadUnreadCount ?? 0, 0);
     assert.equal(chB?.mentionCount ?? 0, 0);
     assert.equal(cdp!.consoleErrors.length, 0, `Unexpected console errors: ${cdp!.consoleErrors.join('; ')}`);
+  });
+
+  it('6. Main timeline thread reply preview shows live running/progress/failed/completed states', async () => {
+    const webhookServer = createServer((_req, res) => {
+      res.writeHead(202, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ ok: true }));
+    });
+    await new Promise<void>((resolve) => webhookServer.listen(0, '127.0.0.1', () => resolve()));
+    const address = webhookServer.address();
+    assert.ok(address && typeof address === 'object');
+    const webhookUrl = `http://127.0.0.1:${address.port}/hook`;
+    const suffix = Date.now().toString(36);
+    const previewBotName = `E2EPreviewBot${suffix}`;
+    let previewBotId = '';
+    let ws: WebSocket | null = null;
+
+    try {
+      const created = await apiJson<{ agent?: { id: string }; agentId?: string }>('/api/agents/provision', {
+        method: 'POST',
+        body: JSON.stringify({
+          name: previewBotName,
+          adapterType: 'webhook',
+          webhookUrl,
+          channelId: channelBId,
+        }),
+      });
+      previewBotId = created.agent?.id || created.agentId || '';
+      assert.ok(previewBotId, 'Expected provisioned preview bot id');
+
+      // Navigate browser to Channel B so channelBRootId is visible in main timeline
+      await cdp!.eval(`window.location.hash = '#channel=${channelBId}';`);
+      await cdp!.waitFor(async () => {
+        return cdp!.eval<boolean>(
+          `Boolean(document.querySelector('[data-message-id="${channelBRootId}"]'))`,
+        );
+      }, 6000);
+
+      // Send a human reply mentioning the webhook bot in channelBRootId thread via WS
+      const wsUrl = API_URL.replace(/^http/, 'ws') + '/ws';
+      ws = new WebSocket(wsUrl);
+      await new Promise<void>((resolve, reject) => {
+        ws!.onopen = () => resolve();
+        ws!.onerror = () => reject(new Error('WS failed to connect'));
+      });
+      ws.send(
+        JSON.stringify({
+          type: 'message.send',
+          payload: {
+            channelId: channelBId,
+            threadId: channelBRootId,
+            senderId: 'u-owner',
+            content: `@${previewBotName} 请检查进度`,
+          },
+        }),
+      );
+
+      // Wait for running placeholder preview & thread summary badge in main timeline
+      const runningState = await cdp!.waitFor(async () => {
+        return cdp!.eval<{
+          previewText: string;
+          hasRunningBadge: boolean;
+          threadRunningAttr: string | null;
+        } | null>(`(() => {
+          const row = document.querySelector('[data-message-id="${channelBRootId}"]');
+          if (!row) return null;
+          const runningTextEl = row.querySelector('span[data-preview-status="running"]');
+          const summaryBtn = row.querySelector('[data-thread-summary]');
+          const badge = row.querySelector('[data-thread-running-badge="true"]');
+          if (!runningTextEl || !summaryBtn || !badge) return null;
+          return {
+            previewText: (runningTextEl.textContent || '').trim(),
+            hasRunningBadge: (badge.textContent || '').includes('运行中'),
+            threadRunningAttr: summaryBtn.getAttribute('data-thread-running'),
+          };
+        })()`);
+      }, 8000);
+
+      assert.match(runningState.previewText, /^(思考中…|连接中…)$/);
+      assert.equal(runningState.previewText.includes(previewBotName), false);
+      assert.equal(runningState.hasRunningBadge, true);
+      assert.equal(runningState.threadRunningAttr, 'true');
+
+      // Find the running placeholder message ID from the thread API
+      const threadData = await apiJson<{
+        replies: Array<{ id: string; senderId: string; card?: { status?: string } }>;
+      }>(`/api/channels/${encodeURIComponent(channelBId)}/threads/${encodeURIComponent(channelBRootId)}`);
+      const placeholder = threadData.replies.find(
+        (r) => r.senderId === previewBotId && r.card?.status === 'running',
+      );
+      assert.ok(placeholder, 'Expected running placeholder reply in thread');
+
+      // Push live progress update -> preview should update in-place to "思考中 · 正在检索代码"
+      await apiJson(`/api/bot/messages/${encodeURIComponent(placeholder.id)}/progress`, {
+        method: 'POST',
+        body: JSON.stringify({
+          activeLabel: '正在检索代码',
+          toolCount: 2,
+          steps: [{ id: 's1', kind: 'search', label: '正在检索代码', status: 'running' }],
+        }),
+      });
+      const progressText = await cdp!.waitFor(async () => {
+        return cdp!.eval<string | null>(`(() => {
+          const row = document.querySelector('[data-message-id="${channelBRootId}"]');
+          const el = row?.querySelector('span[data-preview-status="running"]');
+          const text = (el?.textContent || '').trim();
+          return text.includes('正在检索代码') ? text : null;
+        })()`);
+      }, 6000);
+      assert.equal(progressText, '思考中 · 正在检索代码');
+
+      // Transition to failed -> preview should show red failed status and clear running badge
+      await apiJson(`/api/bot/messages/${encodeURIComponent(placeholder.id)}`, {
+        method: 'PATCH',
+        body: JSON.stringify({ status: 'failed', summary: '超时重试' }),
+      });
+      const failedState = await cdp!.waitFor(async () => {
+        return cdp!.eval<{ text: string; threadRunning: string | null } | null>(`(() => {
+          const row = document.querySelector('[data-message-id="${channelBRootId}"]');
+          const el = row?.querySelector('span[data-preview-status="failed"]');
+          if (!el) return null;
+          const summaryBtn = row?.querySelector('[data-thread-summary]');
+          return {
+            text: (el.textContent || '').trim(),
+            threadRunning: summaryBtn?.getAttribute('data-thread-running') ?? null,
+          };
+        })()`);
+      }, 6000);
+      assert.equal(failedState.text, '执行失败 · 超时重试');
+      assert.equal(failedState.threadRunning, null);
+
+      // Transition to completed with final content -> preview should show final content
+      await apiJson(`/api/bot/messages/${encodeURIComponent(placeholder.id)}`, {
+        method: 'PATCH',
+        body: JSON.stringify({ status: 'completed', content: '已完成排查并修复' }),
+      });
+      const settledOk = await cdp!.waitFor(async () => {
+        return cdp!.eval<boolean>(`(() => {
+          const row = document.querySelector('[data-message-id="${channelBRootId}"]');
+          if (!row) return false;
+          if (row.querySelector('[data-preview-status]')) return false;
+          return (row.textContent || '').includes('已完成排查并修复');
+        })()`);
+      }, 6000);
+      assert.equal(settledOk, true);
+      assert.equal(cdp!.consoleErrors.length, 0, `Unexpected console errors: ${cdp!.consoleErrors.join('; ')}`);
+    } finally {
+      ws?.close();
+      webhookServer.close();
+      if (previewBotId) {
+        await fetch(`${API_URL}/api/agents/${encodeURIComponent(previewBotId)}`, {
+          method: 'DELETE',
+        }).catch(() => {});
+        await fetch(`${API_URL}/api/agents/${encodeURIComponent(previewBotId)}`, {
+          method: 'PATCH',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ archived: true }),
+        }).catch(() => {});
+      }
+    }
   });
 });

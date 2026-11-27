@@ -188,11 +188,23 @@ async function main() {
   if (cmd === 'config' && sub === 'set') {
     const serverUrl = getStringFlag(flags, 'server');
     const token = getStringFlag(flags, 'token');
-    const next = saveCliConfig({
-      ...(serverUrl ? { serverUrl } : {}),
-      ...(token ? { token } : {}),
-    });
-    console.log(JSON.stringify({ ok: true, config: next }));
+    const next = saveCliConfig(
+      {
+        ...(serverUrl ? { serverUrl } : {}),
+        ...(token ? { token } : {}),
+      },
+      undefined,
+      { clearTokenOnServerChange: true },
+    );
+    console.log(
+      JSON.stringify({
+        ok: true,
+        config: {
+          serverUrl: next.serverUrl,
+          tokenSet: Boolean(next.token),
+        },
+      }),
+    );
     return;
   }
 
@@ -287,6 +299,7 @@ async function main() {
     const botmuxEndpoint =
       getStringFlag(flags, 'botmux') || process.env.BOTMUX_ENDPOINT || 'http://127.0.0.1:7891';
     const botmuxToken = getStringFlag(flags, 'botmux-token') || process.env.BOTMUX_TOKEN;
+    const botToken = getStringFlag(flags, 'bot-token');
     const channelRef = getStringFlag(flags, 'channel');
     const pollMsRaw = getStringFlag(flags, 'poll-ms');
     const pollMs = pollMsRaw ? Number(pollMsRaw) : undefined;
@@ -294,6 +307,7 @@ async function main() {
     const bridge = await startBotmuxBridge({
       serverUrl,
       token,
+      botToken,
       botmuxEndpoint,
       botmuxToken,
       channelRef,

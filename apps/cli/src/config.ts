@@ -23,9 +23,25 @@ export function loadCliConfig(overrideDir?: string): BubaiCliConfig {
   }
 }
 
-export function saveCliConfig(patch: Partial<BubaiCliConfig>, overrideDir?: string): BubaiCliConfig {
+export function saveCliConfig(
+  patch: Partial<BubaiCliConfig>,
+  overrideDir?: string,
+  opts?: { clearTokenOnServerChange?: boolean },
+): BubaiCliConfig {
   const file = getConfigPath(overrideDir);
-  const next: BubaiCliConfig = { ...loadCliConfig(overrideDir), ...patch };
+  const current = loadCliConfig(overrideDir);
+  const serverChanged =
+    Boolean(opts?.clearTokenOnServerChange) &&
+    Boolean(patch.serverUrl) &&
+    Boolean(current.serverUrl) &&
+    patch.serverUrl !== current.serverUrl &&
+    patch.token === undefined;
+  const next: BubaiCliConfig = {
+    ...current,
+    ...patch,
+    ...(serverChanged ? { token: undefined } : {}),
+  };
+  if (next.token === undefined) delete next.token;
   fs.mkdirSync(path.dirname(file), { recursive: true });
   fs.writeFileSync(file, JSON.stringify(next, null, 2), 'utf8');
   return next;

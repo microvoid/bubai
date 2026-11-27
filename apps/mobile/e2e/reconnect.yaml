@@ -1,0 +1,25 @@
+appId: com.bubai.app.dev
+---
+- runFlow:
+    file: ../../../tests/native/open-workspace.yaml
+    env:
+      OPEN_SERVER: "${FAULT_SERVER}"
+- tapOn:
+    id: channel-row-native-discussion
+- assertVisible: ".*Native review.*"
+- runScript:
+    file: ../../../tests/native/interrupt.js
+    env:
+      STAGE: channel
+- extendedWaitUntil:
+    visible: ".*${output.missedMessage}.*"
+    timeout: 20000
+- tapOn: "(?s).*repl(y|ies).*Preview from a colleague.*"
+- assertVisible: ".*Preview from a colleague.*"
+- runScript:
+    file: ../../../tests/native/interrupt.js
+    env:
+      STAGE: thread
+- extendedWaitUntil:
+    visible: ".*${output.missedMessage}.*"
+    timeout: 20000

@@ -1,0 +1,44 @@
+appId: com.bubai.app.dev
+---
+- runFlow: ../../../tests/native/open-workspace.yaml
+- tapOn:
+    id: channel-row-native-discussion
+- assertVisible: ".*Native review.*"
+- tapOn: "(?s).*repl(y|ies).*Preview from a colleague.*"
+- assertVisible: ".*Preview from a colleague.*"
+- tapOn:
+    id: message-input
+- eraseText
+- evalScript: ${output.reply = 'Native thread ' + Date.now()}
+- inputText: "${output.reply}"
+- runFlow:
+    when:
+      platform: Android
+    commands:
+      - hideKeyboard
+- tapOn:
+    id: send-message
+- longPressOn: "${output.reply}.*"
+- tapOn:
+    id: message-action-edit
+- tapOn:
+    id: message-input
+- eraseText
+- evalScript: ${output.edit = 'Edited reply ' + Date.now()}
+- inputText: "${output.edit}"
+- runFlow:
+    when:
+      platform: Android
+    commands:
+      - hideKeyboard
+- tapOn:
+    id: send-message
+- longPressOn: "${output.edit}.*"
+- tapOn:
+    id: message-action-delete
+- tapOn: "删除"
+- assertNotVisible: "${output.edit}.*"
+- tapOn: "Add image or attachment"
+- assertVisible: "文件"
+- assertVisible: "照片"
+- tapOn: "取消"

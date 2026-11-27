@@ -1,6 +1,6 @@
 appId: com.bubai.app.dev
 ---
-- launchApp
+- runFlow: ../../../tests/native/open-workspace.yaml
 - extendedWaitUntil:
     visible:
       id: channel-row-general
@@ -11,11 +11,25 @@ appId: com.bubai.app.dev
     id: message-input
 - eraseText
 - inputText: "Native draft regression"
+- runFlow:
+    when:
+      platform: Android
+    commands:
+      - hideKeyboard
 - assertVisible: "Native draft regression"
 - stopApp
 - launchApp
-- tapOn:
-    id: channel-row-general
+- extendedWaitUntil:
+    visible:
+      id: channel-row-general
+    timeout: 60000
+- retry:
+    maxRetries: 2
+    commands:
+      - tapOn:
+          id: channel-row-general
+      - assertVisible:
+          id: message-input
 - assertVisible: "Native draft regression"
 - tapOn:
     id: send-message

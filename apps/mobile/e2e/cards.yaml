@@ -1,0 +1,12 @@
+appId: com.bubai.app.dev
+---
+- runFlow: ../../../tests/native/open-workspace.yaml
+- tapOn:
+    id: channel-row-native-cards
+- assertVisible: ".*派发失败.*"
+- scrollUntilVisible:
+    element: ".*执行失败.*"
+    direction: UP
+- scrollUntilVisible:
+    element: ".*响应超时.*"
+    direction: UP

@@ -1,11 +1,13 @@
 appId: com.bubai.app.dev
 ---
-- launchApp
-- tapOn: "Activity, tab, .*"
+- runFlow: ../../../tests/native/open-workspace.yaml
+- tapOn:
+    id: activity-tab
 - assertVisible: "@Mentions"
 - tapOn: "@Mentions"
 - tapOn: "Threads"
-- tapOn: "Messages, tab, .*"
+- tapOn:
+    id: messages-tab
 - tapOn:
     id: channel-row-general
 - tapOn:
@@ -14,7 +16,6 @@ appId: com.bubai.app.dev
 - inputText: "@Local"
 - assertVisible: ".*@Local Fixture.*"
 - eraseText
-- hideKeyboard
 - tapOn: "频道设置与成员"
 - assertVisible: "保存频道信息"
 - assertVisible: ".*follow_source"

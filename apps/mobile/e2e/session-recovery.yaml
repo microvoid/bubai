@@ -1,0 +1,89 @@
+appId: com.bubai.app.dev
+---
+- runScript:
+    file: ../../../tests/native/session-mode.js
+    env:
+      TARGET: "${AUTH_FAULT_SERVER}"
+      MODE: normal
+- runFlow: ../../../tests/native/open-workspace.yaml
+- tapOn: Live
+- tapOn:
+    id: server-url
+- eraseText
+- inputText: "${AUTH_FAULT_SERVER}"
+- pressKey: Enter
+- runFlow:
+    when:
+      visible: "使用邮箱密码登录"
+    commands:
+      - tapOn: "使用邮箱密码登录"
+      - tapOn:
+          id: auth-email
+      - inputText: "${TEST_EMAIL}"
+      - tapOn:
+          id: auth-password
+      - inputText: "${TEST_PASSWORD}"
+      - pressKey: Enter
+      - tapOn:
+          text: "以后|Not Now"
+          optional: true
+- assertVisible:
+    id: channel-row-general
+- runScript:
+    file: ../../../tests/native/session-mode.js
+    env:
+      TARGET: "${AUTH_FAULT_SERVER}"
+      MODE: session-outage
+- stopApp
+- launchApp
+- assertVisible:
+    id: channel-row-general
+- runScript:
+    file: ../../../tests/native/session-mode.js
+    env:
+      TARGET: "${AUTH_FAULT_SERVER}"
+      MODE: list-outage
+- stopApp
+- launchApp
+- assertVisible:
+    id: channel-row-general
+- runScript:
+    file: ../../../tests/native/check-observations.js
+    env:
+      TARGET: "${AUTH_FAULT_SERVER}"
+- runScript:
+    file: ../../../tests/native/session-mode.js
+    env:
+      TARGET: "${FAULT_SERVER}"
+      MODE: observe
+- runFlow:
+    file: ../../../tests/native/open-workspace.yaml
+    env:
+      OPEN_SERVER: "${FAULT_SERVER}"
+- runScript:
+    file: ../../../tests/native/check-observations.js
+    env:
+      TARGET: "${FAULT_SERVER}"
+- runScript:
+    file: ../../../tests/native/session-mode.js
+    env:
+      TARGET: "${AUTH_FAULT_SERVER}"
+      MODE: normal
+- tapOn: Live
+- tapOn:
+    id: server-url
+- eraseText
+- inputText: "${AUTH_FAULT_SERVER}"
+- pressKey: Enter
+- assertVisible:
+    id: channel-row-general
+- runScript:
+    file: ../../../tests/native/session-mode.js
+    env:
+      TARGET: "${AUTH_FAULT_SERVER}"
+      MODE: expired
+- tapOn:
+    id: channel-row-general
+- assertVisible: "登录已过期"
+- tapOn: "OK|好|确定"
+- assertVisible: "发送验证码"

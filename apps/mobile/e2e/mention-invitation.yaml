@@ -1,0 +1,31 @@
+appId: com.bubai.app.dev
+---
+- runFlow: ../../../tests/native/open-workspace.yaml
+- scrollUntilVisible:
+    element:
+      id: channel-row-native-mentions
+    direction: DOWN
+- tapOn:
+    id: channel-row-native-mentions
+- tapOn:
+    id: message-input
+- eraseText
+- inputText: "@Local"
+- tapOn: ".*频道外.*@Local Fixture.*"
+- tapOn:
+    id: send-message
+- assertVisible: "提到了频道外的 Agent"
+- tapOn: "仅发送"
+- tapOn:
+    id: message-input
+- inputText: "@Local"
+- tapOn: ".*频道外.*@Local Fixture.*"
+- tapOn:
+    id: send-message
+- tapOn: "邀请并发送"
+- tapOn:
+    id: message-input
+- inputText: "@Local"
+- assertVisible: ".*@Local Fixture.*"
+- assertNotVisible: ".*频道外.*@Local Fixture.*"
+- eraseText

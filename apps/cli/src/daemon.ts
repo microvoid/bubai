@@ -10,7 +10,7 @@ import { startRuntime } from './runtime';
 import type { RuntimeMode } from './direct-config';
 import { type BotmuxBridgeOptions } from './bridge-botmux';
 
-type Status = { mode: RuntimeMode; directAgents: string[]; state: 'connecting' | 'online'; pid: number; online: number };
+type Status = { mode: RuntimeMode; piAgents?: string[]; directAgents: string[]; state: 'connecting' | 'online'; pid: number; online: number };
 
 function socketPath() {
   const scope = createHash('sha256').update(path.resolve(getConfigPath())).digest('hex').slice(0, 24);
@@ -53,6 +53,7 @@ export async function runDaemon(options: BotmuxBridgeOptions, mode: RuntimeMode,
       if (!command.includes('\n')) return;
       const status: Status = {
         state: bridge && bridge.agentIds.every(id => online.has(id)) ? 'online' : 'connecting',
+        piAgents: bridge?.piIds.filter(id => online.has(id)) ?? [],
         pid: process.pid, online: online.size, mode, directAgents: bridge?.directIds.filter(id => online.has(id)) ?? [],
       };
       client.end(JSON.stringify(status));

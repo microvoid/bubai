@@ -13,6 +13,7 @@ export async function executeCli(
   session: string | undefined,
   signal: AbortSignal,
   progress: TurnContext['progress'],
+  files?: TurnContext['files'],
 ) {
   signal.throwIfAborted();
   const adapter = { claude, codex }[agent.cliId];
@@ -20,7 +21,11 @@ export async function executeCli(
     import.meta.url.endsWith('.ts') ? new URL('../index.ts', import.meta.url) : import.meta.url,
   );
   const env = { ...process.env };
-  for (const key of ['BUBAI_TOKEN', 'BUBAI_BOT_TOKEN', 'BUZZ_BOT_TOKEN', 'BOTMUX_TOKEN']) delete env[key];
+  for (const key of ['BUBAI_TOKEN', 'BUBAI_BOT_TOKEN', 'BUZZ_BOT_TOKEN', 'BOTMUX_TOKEN', 'BUBAI_LLM_API_KEY']) delete env[key];
+  if (files) {
+    env.BUBAI_OUTPUT_DIR = files.output;
+    env.BUBAI_INPUT_FILES = JSON.stringify(files.inputs);
+  }
   const child = spawn(
     process.execPath,
     [entry, '_direct-worker', agent.cliId, ...adapter.args(agent.permissionMode, session)],

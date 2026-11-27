@@ -26,6 +26,7 @@ export function writeJson(file: string, value: unknown) {
 }
 
 export interface PiModelConfig {
+  auth?: 'byok' | 'bub-login';
   provider: string;
   model: string;
   baseUrl?: string;
@@ -55,7 +56,11 @@ export function resolvePiModel(config = loadCliConfig(), env = process.env): PiM
   const previous = stored?.provider === provider ? stored : undefined;
   const baseUrl = env.BUBAI_LLM_BASE_URL || previous?.baseUrl;
   const sameEndpoint = baseUrl === previous?.baseUrl;
-  const apiKey = env.BUBAI_LLM_API_KEY || (sameEndpoint && previous?.apiKey) || (!baseUrl && keys[provider]);
+  const hosted = previous?.auth === 'bub-login';
+  if (hosted && (!config.serverUrl || !baseUrl || new URL(baseUrl).origin !== new URL(config.serverUrl).origin)) {
+    throw new Error('A hosted model must use the logged-in BubAI server origin');
+  }
+  const apiKey = (hosted && config.token) || env.BUBAI_LLM_API_KEY || (sameEndpoint && previous?.apiKey) || (!baseUrl && keys[provider]);
   if (!apiKey) throw new Error('Set BUBAI_LLM_API_KEY or run bub config set --llm-provider <provider> --llm-model <model> --llm-api-key <key>');
   const model = env.BUBAI_LLM_MODEL || previous?.model || defaults[provider];
   if (!model) throw new Error('Set BUBAI_LLM_MODEL for this provider');

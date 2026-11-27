@@ -10,10 +10,13 @@ export async function startRuntime(
 ) {
   const instances: Awaited<ReturnType<typeof startBotmuxBridge>>[] = [];
   let directIds: string[] = [];
+  let piIds: string[] = [];
   try {
     if (mode === 'pi' || options.includePi) {
       const { startPiBridge } = await import('./bridge-pi');
-      instances.push(await startPiBridge(options, concurrency, options.turnTimeoutMs));
+      const pi = await startPiBridge(options, concurrency, options.turnTimeoutMs);
+      piIds = pi.agentIds;
+      instances.push(pi);
     }
     if (mode === 'botmux' || mode === 'hybrid') instances.push(await startBotmuxBridge(options));
     if (mode === 'direct' || mode === 'hybrid') {
@@ -29,6 +32,7 @@ export async function startRuntime(
     return {
       agentIds: instances.flatMap((instance) => instance.agentIds),
       directIds,
+      piIds,
       stop: () => instances.forEach((instance) => instance.stop()),
     };
   } catch (err) {

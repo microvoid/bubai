@@ -1,3 +1,4 @@
+import { turnAbortSignal } from './bridge-provider';
 import { withTurnFiles, uploadArtifacts, type TurnFiles } from './bridge-attachments';
 import { setTimeout as delay } from 'node:timers/promises';
 import {
@@ -26,6 +27,7 @@ export async function startRuntimeBridge(
   const agents = await provider.discoverAgents();
   if (!agents.length) throw new Error('No local agents configured');
   const activeTurns = new Set<string>();
+  const pendingLocal = new Map<string, Promise<unknown>>();
   const controller = new AbortController();
   const { signal } = controller;
   const wait = (ms: number) => delay(ms, undefined, { signal });
@@ -109,7 +111,7 @@ export async function startRuntimeBridge(
           async progress(snapshot) {
             if (signal.aborted || progressSnapshotEquals(lastProgress, snapshot)) return;
             try {
-              await sdk.sendBotProgress(messageId, snapshot);
+              await sdk.sendBotProgress(messageId, snapshot, AbortSignal.any([turnSignal, AbortSignal.timeout(5000)]));
               lastProgress = snapshot;
             } catch {
               /* Retry on the next snapshot. */
@@ -117,19 +119,25 @@ export async function startRuntimeBridge(
           },
         });
         const event = loaded.event;
-        const turnSignal = AbortSignal.any([signal, AbortSignal.timeout(Math.max(0, turn.deadline - Date.now()))]);
-        const completion = await (event && (turn.stage === 'direct' || turn.stage === 'pi')
-          ? withTurnFiles(event, sdk, turnSignal, async files => {
-              const result = await execute(files);
-              if (result.status === 'completed' && files.artifacts.length) {
-                result.attachments = await uploadArtifacts(files, sdk, messageId, turnSignal);
-              }
-              return result;
-            })
-          : execute()).catch((err: Error) => ({
-            status: turnSignal.reason?.name === 'TimeoutError' ? 'timeout' as const : 'failed' as const,
-            content: err.message,
-          }));
+        const turnSignal = turnAbortSignal(signal, turn.stage === 'dispatch' || turn.stage === 'poll' ? undefined : turn.deadline);
+        const runLocal = () => withTurnFiles(event!, sdk, turnSignal, async files => {
+          const result = await execute(files);
+          if (result.status === 'completed' && files.artifacts.length) {
+            result.attachments = await uploadArtifacts(files, sdk, messageId, turnSignal);
+          }
+          return result;
+        });
+        const key = turn.bindingKey;
+        const local = event && (turn.stage === 'direct' || turn.stage === 'pi');
+        // Preserve arrival order even when an earlier turn has a slow attachment download.
+        const pending = local ? (pendingLocal.get(key) ?? Promise.resolve()).then(runLocal) : execute();
+        const completionPromise = pending.catch((err: Error) => ({
+          status: turnSignal.reason?.name === 'TimeoutError' ? 'timeout' as const : 'failed' as const,
+          content: err.message,
+        }));
+        if (local) pendingLocal.set(key, completionPromise);
+        const completion = await completionPromise;
+        if (pendingLocal.get(key) === completionPromise) pendingLocal.delete(key);
         signal.throwIfAborted();
         turn = { ...turn, stage: 'deliver', completion };
         journal.save(turn);
@@ -172,7 +180,7 @@ export async function startRuntimeBridge(
           }),
         );
         const welcomed = new Set(info.agentIds);
-        for (const turn of journal.list().sort((a, b) => a.deadline - b.deadline)) {
+        for (const turn of journal.list().sort((a, b) => (a.deadline ?? Infinity) - (b.deadline ?? Infinity))) {
           if (welcomed.has(turn.agentId)) trackTurn(turn.messageId, groupSdk, () => ({ turn }));
         }
         options.onReady?.(info);

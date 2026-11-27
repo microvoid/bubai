@@ -26,7 +26,8 @@ export interface BotmuxBridgeOptions extends GatewayOptions {
 
 }
 
-const TURN_TIMEOUT_MS = 30 * 60_000;
+// Older journals omitted createdAt and stored only the original 30-minute deadline.
+const LEGACY_TURN_DURATION_MS = 30 * 60_000;
 const RESULT_NOT_FOUND_GRACE_MS = 10_000;
 const TRANSCRIPT_POLL_MS = 5_000;
 const TIMED_OUT: TurnCompletion = { content: '等待 Botmux 回复超时', status: 'timeout' };
@@ -37,6 +38,10 @@ const BOTMUX_CAPABILITIES = [
   'terminal_attach',
   'session_control',
 ];
+
+function pollStartTime(turn: Extract<PendingTurn, { stage: 'poll' }>): number {
+  return turn.createdAt ?? Math.min(turn.acceptedAt, (turn.deadline ?? Infinity) - LEGACY_TURN_DURATION_MS);
+}
 
 function terminalResult(result: TriggerResponse): TurnCompletion | undefined {
   if (result.state === 'completed') {
@@ -63,7 +68,7 @@ export async function startBotmuxBridge(options: BotmuxBridgeOptions): Promise<{
 }> {
   const botmux = new BotmuxClient(options.botmuxEndpoint, options.botmuxToken);
   const pollMs = options.pollMs ?? 500;
-  const turnTimeoutMs = options.turnTimeoutMs ?? TURN_TIMEOUT_MS;
+  const turnTimeoutMs = options.turnTimeoutMs;
   const sessionBindings = new Map<string, string>();
   const controller = new AbortController();
   const { signal } = controller;
@@ -103,7 +108,7 @@ export async function startBotmuxBridge(options: BotmuxBridgeOptions): Promise<{
       agentId: event.botId,
       bindingKey,
       createdAt,
-      deadline: createdAt + turnTimeoutMs,
+      deadline: turnTimeoutMs === undefined ? undefined : createdAt + turnTimeoutMs,
       request: botmux.buildTurnTrigger({
         botId: externalBotId,
         cliId: bot?.cliId,
@@ -152,13 +157,14 @@ export async function startBotmuxBridge(options: BotmuxBridgeOptions): Promise<{
     turn: Extract<PendingTurn, { stage: 'dispatch' }>,
     firstDispatch: boolean,
   ): Promise<Exclude<PendingTurn, { stage: 'dispatch' }>> {
-    const { messageId, agentId, bindingKey, createdAt, deadline } = turn;
+    const { messageId, agentId, bindingKey, createdAt } = turn;
+    const deadline = turnTimeoutMs === undefined ? undefined : turn.deadline;
     const identity = { messageId, agentId, bindingKey, createdAt, deadline };
     let request = turn.request;
     let replaying = !firstDispatch;
     let retryMs = 250;
 
-    while (Date.now() < deadline) {
+    while (deadline === undefined || Date.now() < deadline) {
       signal.throwIfAborted();
       const replaySupported = !replaying || await checkReplaySupport(request.target.botId);
       if (replaySupported === false) {
@@ -168,7 +174,7 @@ export async function startBotmuxBridge(options: BotmuxBridgeOptions): Promise<{
           completion: { content: '无法确认 Botmux 是否已接单。当前 Botmux 版本不支持安全重试。', status: 'failed' },
         };
       }
-      const reply = replaySupported && Date.now() < deadline
+      const reply = replaySupported && (deadline === undefined || Date.now() < deadline)
         ? await botmux.submitTrigger(request, requestSignal(10_000)).catch(() => undefined)
         : undefined;
       signal.throwIfAborted();
@@ -206,7 +212,7 @@ export async function startBotmuxBridge(options: BotmuxBridgeOptions): Promise<{
         }
       }
 
-      await wait(Math.min(retryMs, Math.max(0, deadline - Date.now())));
+      await wait(Math.min(retryMs, Math.max(0, (deadline ?? Infinity) - Date.now())));
       retryMs = Math.min(retryMs * 2, 5_000);
     }
 
@@ -232,7 +238,7 @@ export async function startBotmuxBridge(options: BotmuxBridgeOptions): Promise<{
       channelId,
       botId: turn.agentId,
       placeholderMessageId: turn.messageId,
-      createdAt: new Date(turn.createdAt ?? Math.min(turn.acceptedAt, turn.deadline - TURN_TIMEOUT_MS)),
+      createdAt: new Date(pollStartTime(turn)),
     });
     if (outcome?.status === 'completed') return outcome;
     if (outcome?.status === 'no_reply' && !session.backgroundTaskCount && !session.busySinceAt) {
@@ -244,13 +250,14 @@ export async function startBotmuxBridge(options: BotmuxBridgeOptions): Promise<{
     turn: Extract<PendingTurn, { stage: 'poll' }>,
     publish: TurnContext['progress'],
   ): Promise<TurnCompletion> {
-    const { messageId, agentId, sessionId, triggerId, acceptedAt, deadline } = turn;
+    const { messageId, agentId, sessionId, triggerId, acceptedAt } = turn;
+    const deadline = turnTimeoutMs === undefined ? undefined : turn.deadline;
     const adapterMeta = { adapter: 'bubai-cli-botmux', sessionId, triggerId };
     const separator = turn.bindingKey.indexOf(':');
     const channelId = turn.bindingKey.slice(0, separator);
     const runtimeBotId = turn.bindingKey.slice(separator + 1);
     const bot = bots.find((entry) => entry.larkAppId === runtimeBotId);
-    const createdAt = new Date(turn.createdAt ?? Math.min(acceptedAt, deadline - TURN_TIMEOUT_MS));
+    const createdAt = new Date(pollStartTime(turn));
     const readsLocalTranscript = separator > 0 && localAntigravityBots.has(runtimeBotId);
     const readsLocalProgress = separator > 0 && isLocalBotmux;
     let nextTranscriptCheck = acceptedAt + RESULT_NOT_FOUND_GRACE_MS;
@@ -292,7 +299,7 @@ export async function startBotmuxBridge(options: BotmuxBridgeOptions): Promise<{
         }
       }
       await syncProgress();
-      const remaining = deadline - Date.now();
+      const remaining = (deadline ?? Infinity) - Date.now();
       if (remaining <= 0) return { ...TIMED_OUT, adapterMeta };
       await wait(Math.min(pollMs, remaining));
     }

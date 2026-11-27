@@ -11,7 +11,7 @@ export type PendingTurn = {
   messageId: string;
   agentId: string;
   bindingKey: string;
-  deadline: number;
+  deadline?: number;
   createdAt?: number;
 } & (
   | { stage: 'dispatch'; request: TriggerRequest }
@@ -29,7 +29,7 @@ function isPendingTurn(value: unknown): value is PendingTurn {
   if (!value || typeof value !== 'object') return false;
   const turn = value as PendingTurn;
   if (typeof turn.messageId !== 'string' || typeof turn.agentId !== 'string' ||
-      typeof turn.bindingKey !== 'string' || !Number.isFinite(turn.deadline) ||
+      typeof turn.bindingKey !== 'string' || (turn.deadline !== undefined && !Number.isFinite(turn.deadline)) ||
       (turn.createdAt !== undefined && !Number.isFinite(turn.createdAt))) return false;
   switch (turn.stage) {
     case 'pi':

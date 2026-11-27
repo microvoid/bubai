@@ -1,3 +1,5 @@
+import { turnAbortSignal } from './bridge-provider';
+import { readdir } from 'node:fs/promises';
 import { normalizeServerUrl } from '@buzz-botmux/chat-client';
 import type { BotTurnRequestedEvent } from '@buzz-botmux/chat-client';
 import { startRuntimeBridge } from './bridge-core';
@@ -14,7 +16,7 @@ function promptFor(event: BotTurnRequestedEvent, resume: boolean, inputs?: strin
     ...(inputs ?? attachments.map((item) => `[附件] ${item.name} (${item.mimeType}) ${item.url}`)),
   ].join('\n');
   if (resume) return message;
-  return [event.systemPrompt, event.history.length ? JSON.stringify(event.history) : '', message]
+  return [event.systemPrompt, 'Write files to return as attachments in $BUBAI_OUTPUT_DIR.', event.history.length ? JSON.stringify(event.history) : '', message]
     .filter(Boolean)
     .join('\n\n');
 }
@@ -23,7 +25,7 @@ export async function startDirectBridge(
   options: GatewayOptions,
   agents: DirectCliAgentConfig[],
   concurrency = 3,
-  timeoutMs = 1_800_000,
+  timeoutMs?: number,
 ) {
   const scope = normalizeServerUrl(options.serverUrl);
   const journal = openTurnJournal(scope, 'direct');
@@ -51,7 +53,7 @@ export async function startDirectBridge(
           messageId: event.replyTarget.messageId,
           agentId: event.botId,
           bindingKey: JSON.stringify([scope, event.botId, event.channel.id, event.threadId || '']),
-          deadline: Date.now() + timeoutMs,
+          deadline: timeoutMs === undefined ? undefined : Date.now() + timeoutMs,
         };
       },
       async executeTurn({ initial, event, progress, files }) {
@@ -63,21 +65,14 @@ export async function startDirectBridge(
           .then(async () => {
             if (available > 0) available--;
             else await new Promise<void>((resolve) => waiters.push(resolve));
-            let timer: ReturnType<typeof setTimeout> | undefined;
             try {
               const agent = agents.find((item) => item.externalId === (event.externalId || event.botId));
               if (!agent) throw new Error('Unknown local agent');
-              const remaining = initial.deadline - Date.now();
-              if (remaining <= 0) throw new DOMException('Turn timed out in queue', 'TimeoutError');
-              const timeout = new AbortController();
-              timer = setTimeout(
-                () => timeout.abort(new DOMException('Local CLI timed out', 'TimeoutError')),
-                remaining,
-              );
-              const signal = AbortSignal.any([controller.signal, timeout.signal]);
+              const signal = turnAbortSignal(controller.signal, initial.deadline);
+              signal.throwIfAborted();
               const session = sessions.get(bindingKey);
               const invoke = (id?: string) =>
-                executeCli(agent, promptFor(event, Boolean(id), files?.inputs), id, signal, progress);
+                executeCli(agent, promptFor(event, Boolean(id), files?.inputs), id, signal, progress, files);
               const reply = await invoke(session).catch((err) => {
                 if (
                   !session ||
@@ -90,9 +85,15 @@ export async function startDirectBridge(
                 return invoke();
               });
               if (reply.sessionId) sessions.set(bindingKey, reply.sessionId);
+              if (files) {
+                const outputs = await readdir(files.output, { withFileTypes: true });
+                if (outputs.length > 16) throw new Error('Too many output artifacts');
+                for (const item of outputs) {
+                  if (item.isFile()) files.artifacts.push({path:item.name});
+                }
+              }
               return reply.content;
             } finally {
-              clearTimeout(timer);
               const next = waiters.shift();
               if (next) next();
               else available++;
@@ -104,7 +105,7 @@ export async function startDirectBridge(
         } catch (err) {
           return {
             status:
-              (err as Error).name === 'TimeoutError' || Date.now() >= initial.deadline ? 'timeout' : 'failed',
+              (err as Error).name === 'TimeoutError' || (initial.deadline !== undefined && Date.now() >= initial.deadline) ? 'timeout' : 'failed',
             content: (err as Error).message,
           };
         } finally {

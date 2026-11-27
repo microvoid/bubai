@@ -3,6 +3,12 @@ import type { BotGatewayAgentDescriptor, BotTurnRequestedEvent, BubaiClient } fr
 import type { AgentProgressSnapshot } from '@buzz-botmux/botmux-client';
 import type { PendingTurn, TurnCompletion } from './bridge-turn-journal';
 
+export function turnAbortSignal(signal: AbortSignal, deadline?: number): AbortSignal {
+  return deadline === undefined ? signal : AbortSignal.any([
+    signal, AbortSignal.timeout(Math.max(0, deadline - Date.now())),
+  ]);
+}
+
 export type LocalAgentDescriptor = BotGatewayAgentDescriptor;
 export type GatewayOptions = {
   serverUrl: string;

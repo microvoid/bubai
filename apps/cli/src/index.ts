@@ -299,10 +299,12 @@ async function main() {
     return;
   }
   if (cmd === 'agent' && sub === 'remove') {
-    const agents = loadCliConfig().localAgents ?? [];
-    const matches = agents.filter(agent => agent.externalId === positionals[2] || agent.name === positionals[2]);
+    const config = loadCliConfig();
+    const agents = config.localAgents ?? [];
+    const piAgents = config.piAgents ?? [];
+    const matches = [...agents, ...piAgents].filter(agent => agent.externalId === positionals[2] || agent.name === positionals[2]);
     if (matches.length !== 1) throw new Error('Specify a unique local agent name or external ID');
-    saveCliConfig({ localAgents: agents.filter(agent => agent !== matches[0]) });
+    saveCliConfig({ localAgents: agents.filter(agent => agent !== matches[0]), piAgents: piAgents.filter(agent => agent !== matches[0]) });
     console.log('Removed local configuration. Restart the bridge to apply.');
     return;
   }
@@ -356,6 +358,7 @@ async function main() {
   if (cmd === 'status') {
     const bridge = await daemonRequest();
     if (!flags.json) console.log(`Local bridge: ${bridge?.state ?? 'stopped'}`);
+    if (bridge?.piAgents?.length && !flags.json) console.log('Pi agents online: ' + bridge.piAgents.join(', '));
     if (bridge?.mode && !flags.json) console.log(`Mode: ${bridge.mode}; direct agents online: ${bridge.directAgents.join(', ') || 'none'}`);
     const [instance, { agents }] = await Promise.all([sdk.getInstance(), sdk.listAgents()]);
     if (flags.json) {
@@ -468,9 +471,9 @@ async function main() {
       autoReply: flags['auto-reply'] !== undefined ? Boolean(flags['auto-reply']) : undefined,
       pollMs,
     };
-    const timeout = Number(flags['turn-timeout-ms'] ?? 1_800_000);
+    const timeout = flags['turn-timeout-ms'] === undefined ? undefined : Number(flags['turn-timeout-ms']);
     const concurrency = Number(flags.concurrency ?? 3);
-    if (!Number.isSafeInteger(concurrency) || concurrency < 1 || !Number.isSafeInteger(timeout) || timeout < 1 || timeout > 2147483647)
+    if (!Number.isSafeInteger(concurrency) || concurrency < 1 || (timeout !== undefined && (!Number.isSafeInteger(timeout) || timeout < 1 || timeout > 2147483647)))
       throw new Error('Expected positive integer concurrency and turn timeout');
     const runtimeOptions = { ...options, turnTimeoutMs: timeout, includePi: Boolean(flags['include-pi']) };
     if (cmd === '_bridge-daemon') {

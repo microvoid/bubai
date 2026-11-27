@@ -1,0 +1,24 @@
+appId: com.bubai.app.dev
+---
+- retry:
+    maxRetries: 3
+    commands:
+      - tapOn: "使用邮箱密码登录"
+      - assertVisible:
+          id: auth-password
+- tapOn:
+    id: auth-email
+- eraseText
+- inputText: "${EMAIL}"
+- tapOn:
+    id: auth-password
+- inputText: "${TEST_PASSWORD}"
+- pressKey: Enter
+- tapOn:
+    text: "以后|Not Now"
+    optional: true
+- extendedWaitUntil:
+    visible:
+      id: channel-row-general
+    timeout: 30000
+- tapOn: "Settings, tab, .*"

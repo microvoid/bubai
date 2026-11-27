@@ -1,3 +1,4 @@
+import { checkSessionResponse } from './sessionExpiry';
 export interface MobileAuthUser {
   id: string;
   name: string;
@@ -50,6 +51,7 @@ async function authRequest<T>(
     ...(opts.body ? { body: JSON.stringify(opts.body) } : {}),
   });
 
+  checkSessionResponse(res.status, cleanBaseUrl(serverUrl), opts.token);
   const text = await res.text();
   let parsed: unknown = null;
   if (text) {

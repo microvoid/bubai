@@ -5,22 +5,16 @@ appId: com.bubai.app.dev
     visible:
       id: channel-row-general
     timeout: 30000
-- openLink: "bubai://device?user_code=ABCD1234"
-- repeat:
-    times: 3
-    while:
-      visible: "打开|Open"
-    commands:
-      - tapOn: "打开|Open"
+- runFlow:
+    file: ../../../tests/native/open-app-link.yaml
+    env:
+      LINK: "bubai://device?user_code=ABCD1234"
 - assertVisible: "输入你正在登录的 CLI 上显示的设备码"
 - assertVisible: "ABCD1234"
 - assertVisible: "登录"
-- openLink: "bubai://invite/fixture-invite"
-- repeat:
-    times: 3
-    while:
-      visible: "打开|Open"
-    commands:
-      - tapOn: "打开|Open"
+- runFlow:
+    file: ../../../tests/native/open-app-link.yaml
+    env:
+      LINK: "bubai://invite/fixture-invite"
 - assertVisible: "社区邀请"
 - assertVisible: "登录后查看邀请"

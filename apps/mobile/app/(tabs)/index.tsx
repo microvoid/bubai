@@ -1,3 +1,4 @@
+import { unreadCount as rowUnread, visibleUnread } from '@/store/unread';
 import type { Participant } from '@buzz-botmux/chat-client';
 import { buzzGrid, buzzRadii, buzzTypography } from '@buzz-botmux/design-tokens';
 import type { Channel } from '@buzz-botmux/chat-client';
@@ -59,7 +60,7 @@ export default function MessagesScreen() {
   const filtered = useMemo(() => {
     switch (filter) {
       case 'unread':
-        return visibleChannels.filter((c) => Boolean(c.unreadCount || c.threadUnreadCount || c.mentionCount || c.markedUnread));
+        return visibleChannels.filter(visibleUnread);
       case 'channels':
         return visibleChannels.filter((c) => c.kind !== 'dm');
       case 'dms':
@@ -78,7 +79,7 @@ export default function MessagesScreen() {
     [filtered],
   );
   const unreadCount = useMemo(
-    () => visibleChannels.filter((c) => Boolean(c.unreadCount || c.threadUnreadCount || c.mentionCount || c.markedUnread)).length,
+    () => visibleChannels.filter(visibleUnread).length,
     [visibleChannels],
   );
 
@@ -270,7 +271,8 @@ export default function MessagesScreen() {
                   )}
                 </View>
                 {Boolean(ch.mentionCount) && <Text style={{ color: colors.primary }}>@{ch.mentionCount}</Text>}
-                <BuzzCountBadge count={ch.unreadCount + (ch.threadUnreadCount ?? 0) || Number(Boolean(ch.markedUnread))} />
+                {ch.muted && <Ionicons accessibilityLabel="已静音" name="volume-mute-outline" size={15} color={colors.onSurfaceVariant} />}
+                <BuzzCountBadge count={rowUnread(ch)} />
               </TouchableOpacity>
             ))}
           </BuzzSectionGroup>;
@@ -317,7 +319,8 @@ export default function MessagesScreen() {
                       {targetAgent ? `Agent · ${targetAgent.cliId || 'cli'}` : 'Direct message'}
                     </Text>
                   </View>
-                  <BuzzCountBadge count={dm.unreadCount} />
+                  {dm.muted && <Ionicons accessibilityLabel="已静音" name="volume-mute-outline" size={15} color={colors.onSurfaceVariant} />}
+                  <BuzzCountBadge count={rowUnread(dm)} />
                 </TouchableOpacity>
               );
             })}

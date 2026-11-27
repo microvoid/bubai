@@ -1,3 +1,5 @@
+import { coalescedRefresh } from './coalescedRefresh';
+import { checkSessionResponse, onSessionExpired } from '@/services/sessionExpiry';
 import { registerDevice, unregisterDevice } from '@/services/pushNotifications';
 import {
   BubaiClient,
@@ -91,6 +93,7 @@ interface BubaiContextValue {
     attachments?: MessageAttachment[];
   }) => Promise<void>;
   subscribeWsEvents: (listener: (event: ServerWsEvent) => void) => () => void;
+  markThreadRead: (channelId: string, rootId: string) => void;
   clearChannelUnread: (channelId: string) => void;
 }
 
@@ -175,14 +178,9 @@ export function BubaiProvider({ children }: { children: React.ReactNode }) {
   const authRequired = Boolean(instance?.authRequired);
   const canQueryWorkspace = hydrated && Boolean(instance) && Boolean(serverUrl) && (!authRequired || Boolean(authToken));
 
-  const client = useMemo(() => {
-    if (!serverUrl) return null;
-    return new BubaiClient({
-      baseUrl: serverUrl, token: authToken || undefined,
-      fetchImpl: async (url, init) => {
-        const res = await fetch(url, init);
+  useEffect(() => onSessionExpired((serverUrl, authToken) => {
         const active = activeCredentials.current;
-        if (res.status === 401 && authToken && selectedUrl.current === serverUrl &&
+        if (selectedUrl.current === serverUrl &&
             active.serverUrl === serverUrl && active.authToken === authToken) {
           activeCredentials.current = { serverUrl, authToken: null };
           ++authRevision.current;
@@ -191,9 +189,18 @@ export function BubaiProvider({ children }: { children: React.ReactNode }) {
           setOrganizations([]);
           setActiveOrgId(null);
           queryClient.clear();
-          await SecureStore.deleteItemAsync(tokenKey(serverUrl));
+          void SecureStore.deleteItemAsync(tokenKey(serverUrl)).catch(() => {});
           Alert.alert('登录已过期', '请重新登录以继续。');
         }
+  }), [queryClient]);
+
+  const client = useMemo(() => {
+    if (!serverUrl) return null;
+    return new BubaiClient({
+      baseUrl: serverUrl, token: authToken || undefined,
+      fetchImpl: async (url, init) => {
+        const res = await fetch(url, init);
+        checkSessionResponse(res.status, serverUrl, authToken);
         return res;
       },
     });
@@ -224,14 +231,27 @@ export function BubaiProvider({ children }: { children: React.ReactNode }) {
     staleTime: 10_000,
   });
 
+  const refreshWorkspaceSoon = useRef<() => void>(() => {});
+  useEffect(() => {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    refreshWorkspaceSoon.current = () => {
+      if (timer) return;
+      timer = setTimeout(() => {
+        timer = undefined;
+        void queryClient.invalidateQueries({queryKey: bootstrapQueryKey});
+        void queryClient.invalidateQueries({queryKey: ['activity', serverUrl, activeOrgId, currentUserId]});
+      }, 350);
+    };
+    return () => { clearTimeout(timer); refreshWorkspaceSoon.current = () => {}; };
+  }, [queryClient, bootstrapQueryKey, serverUrl, activeOrgId, currentUserId]);
+
   // WebSocket live subscription + AppState foreground resume
   useEffect(() => {
     if (!client || !canQueryWorkspace) return;
 
     const handleEvent = (event: ServerWsEvent) => {
       if (event.type === 'message.created' || event.type === 'channel.members.updated') {
-        void queryClient.invalidateQueries({ queryKey: bootstrapQueryKey });
-        void queryClient.invalidateQueries({ queryKey: ['activity'] });
+        refreshWorkspaceSoon.current();
       }
       for (const listener of wsListenersRef.current) {
         try {
@@ -306,7 +326,7 @@ export function BubaiProvider({ children }: { children: React.ReactNode }) {
       handle.close();
       wsHandleRef.current = null;
     };
-  }, [bootstrapQueryKey, canQueryWorkspace, client, currentUserId, queryClient, authToken, authUser, hydrateSessionAndOrgs]);
+  }, [bootstrapQueryKey, canQueryWorkspace, client, currentUserId, queryClient, authToken, authUser, hydrateSessionAndOrgs, serverUrl, activeOrgId]);
 
   const connectToServer = useCallback(async (rawUrl: string): Promise<InstanceInfo & { signedIn: boolean }> => {
     const normalized = normalizeServerUrl(rawUrl);
@@ -405,13 +425,13 @@ export function BubaiProvider({ children }: { children: React.ReactNode }) {
   );
 
   const enableNotifications = useCallback(async () => {
-    if (!serverUrl || !authToken) throw new Error('请先登录');
-    await registerDevice(serverUrl, authToken, tokenKey(serverUrl) + '.push');
-  }, [serverUrl, authToken]);
+    if (!client || !serverUrl || !authToken) throw new Error('请先登录');
+    await registerDevice(client, tokenKey(serverUrl) + '.push');
+  }, [serverUrl, authToken, client]);
 
   const signOut = useCallback(async () => {
-    if (serverUrl && authToken) {
-      await unregisterDevice(serverUrl, authToken, tokenKey(serverUrl) + '.push');
+    if (client && serverUrl && authToken) {
+      await unregisterDevice(client, tokenKey(serverUrl) + '.push');
       await mobileSignOut(serverUrl, authToken);
     }
     ++authRevision.current;
@@ -421,7 +441,7 @@ export function BubaiProvider({ children }: { children: React.ReactNode }) {
     setOrganizations([]);
     setActiveOrgId(null);
     queryClient.clear();
-  }, [authToken, queryClient, serverUrl]);
+  }, [authToken, client, queryClient, serverUrl]);
 
   const refreshBootstrap = useCallback(async () => {
     await queryClient.invalidateQueries({ queryKey: bootstrapQueryKey });
@@ -477,6 +497,21 @@ export function BubaiProvider({ children }: { children: React.ReactNode }) {
     };
   }, []);
 
+  const scheduleRead = useRef<(channelId: string, rootId?: string) => void>(() => {});
+  useEffect(() => {
+    if (!client) return;
+    const reads = coalescedRefresh(async (key: string) => {
+      const [channelId, rootId] = JSON.parse(key) as [string, string | null];
+      return rootId ? client.markThreadRead(channelId, rootId, currentUserId)
+        : client.markChannelRead(channelId, currentUserId);
+    }, () => refreshWorkspaceSoon.current());
+    scheduleRead.current = (channelId, rootId) => reads.schedule(JSON.stringify([channelId, rootId]));
+    return () => { reads.close(); scheduleRead.current = () => {}; };
+  }, [client, currentUserId, activeOrgId]);
+  const markThreadRead = useCallback((channelId: string, rootId: string) => {
+    scheduleRead.current(channelId, rootId);
+  }, []);
+
   const clearChannelUnread = useCallback(
     (channelId: string) => {
       queryClient.setQueryData<BootstrapPayload>(bootstrapQueryKey, (prev) => {
@@ -484,15 +519,13 @@ export function BubaiProvider({ children }: { children: React.ReactNode }) {
         return {
           ...prev,
           channels: prev.channels.map((c) =>
-            c.id === channelId ? { ...c, unreadCount: 0 } : c,
+            c.id === channelId ? { ...c, unreadCount: 0, markedUnread: false } : c,
           ),
         };
       });
-      if (client) {
-        void client.markChannelRead(channelId, currentUserId).then(() => queryClient.invalidateQueries({ queryKey: bootstrapQueryKey })).catch(() => {});
-      }
+      scheduleRead.current(channelId);
     },
-    [bootstrapQueryKey, client, currentUserId, queryClient],
+    [bootstrapQueryKey, queryClient],
   );
 
   const data = bootstrapQuery.data;
@@ -532,6 +565,7 @@ export function BubaiProvider({ children }: { children: React.ReactNode }) {
       sendTyping,
       sendWsMessage,
       subscribeWsEvents,
+      markThreadRead,
       clearChannelUnread,
     }),
     [
@@ -545,6 +579,7 @@ export function BubaiProvider({ children }: { children: React.ReactNode }) {
       sessionError,
       bootstrapQuery.error,
       bootstrapQuery.isLoading,
+      markThreadRead,
       clearChannelUnread,
       client,
       connectToServer,

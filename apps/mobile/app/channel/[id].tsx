@@ -1,7 +1,8 @@
+import { coalescedRefresh } from '@/store/coalescedRefresh';
+import { BuzzButton, BuzzInput } from '@/components/BuzzComponents';
 import { attachmentSource } from '@/services/attachments';
 import { ChannelSettings } from '@/components/ChannelSettings';
-import { useDraft } from '@/store/useDraft';
-import { pickAttachments } from '@/services/pickAttachments';
+import { useMessageActions, useMessageScroll } from '@/store/useMessageActions';
 import type {
   ChannelMemberRow,
   ChatMessage,
@@ -26,8 +27,6 @@ import {
   StyleSheet,
   Switch,
   Text,
-  TextInput,
-  Button,
   View,
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
@@ -49,8 +48,6 @@ function sameGroup(prev: ChatMessage | undefined, curr: ChatMessage): boolean {
 
 export default function ChannelScreen() {
   const { id, messageId } = useLocalSearchParams<{ id: string; messageId?: string }>();
-  const list = useRef<FlatList<ChatMessage>>(null);
-  const jumped = useRef<string | undefined>(undefined);
   const focused = useRef(false);
   const loaded = useRef(false);
   const loadVersion = useRef(0);
@@ -61,13 +58,11 @@ export default function ChannelScreen() {
   const {
     client,
     serverUrl, authToken,
-    activeOrgId,
     currentUserId,
     channels,
     participants,
     asks,
     answerAsk,
-    sendWsMessage,
     wsState,
     subscribeWsEvents,
     clearChannelUnread,
@@ -95,9 +90,8 @@ export default function ChannelScreen() {
   const [nextCursorId, setNextCursorId] = useState<string>();
   const [loadingOlder, setLoadingOlder] = useState(false);
 
-  const [draft, setDraft] = useDraft(serverUrl, activeOrgId, currentUserId, channelId);
-  const [uploading, setUploading] = useState(false);
-  const [editingMessage, setEditingMessage] = useState<ChatMessage | null>(null);
+  const {draft, setDraft, editing: editingMessage, startEdit, cancelEdit, uploading, send: handleSend, attach: handlePickAttachment, react: handleToggleReaction} =
+    useMessageActions(channelId, null, (id, changes) => setMessages(prev => prev.map(m => m.id === id ? {...m, ...changes} : m)));
   const [actionMessage, setActionMessage] = useState<ChatMessage | null>(null);
   const [previewAttachment, setPreviewAttachment] = useState<MessageAttachment | null>(null);
 
@@ -150,23 +144,19 @@ export default function ChannelScreen() {
 
   // Live WS updates for this channel
   useEffect(() => {
-    return subscribeWsEvents((event) => {
+    if (!client) return;
+    const previews = coalescedRefresh((rootId: string) => client.getThreadPreview(channelId, rootId, currentUserId),
+      (id, preview) => setMessages(prev => prev.map(m => m.id === id ? {...m, ...preview} : m)));
+    const unsubscribe = subscribeWsEvents((event) => {
       if ((event.type === 'message.created' || event.type === 'message.updated' || event.type === 'message.deleted') &&
           event.payload.channelId === channelId && event.payload.threadId) {
         const rootId = event.payload.threadId;
-        void client?.getThreadPreview(channelId, rootId).then(preview => {
-          setMessages(prev => prev.map(m => m.id === rootId ? { ...m, ...preview } : m));
-        }).catch(() => {});
+        if (focused.current) previews.schedule(rootId);
       }
       if (event.type === 'message.created') {
         const msg = event.payload;
         if (msg.channelId !== channelId) return;
-        if (msg.threadId) {
-          if (msg.senderId !== currentUserId) {
-            setMessages(prev => prev.map(m => m.id === msg.threadId ? { ...m, unreadReplyCount: (m.unreadReplyCount ?? 0) + 1 } : m));
-          }
-          return;
-        }
+        if (msg.threadId) return;
         setMessages((prev) => (prev.some((m) => m.id === msg.id) ? prev : [...prev, msg]));
         if (focused.current) clearChannelUnread(channelId);
       } else if (event.type === 'channel.members.updated' && event.payload.channelId === channelId) {
@@ -190,6 +180,7 @@ export default function ChannelScreen() {
         setMessages((prev) => prev.map((m) => ({ ...m, pinned: pinSet.has(m.id) })));
       }
     });
+    return () => { unsubscribe(); previews.close(); };
   }, [channelId, clearChannelUnread, subscribeWsEvents, client, currentUserId]);
 
   const loadOlder = async () => {
@@ -207,65 +198,6 @@ export default function ChannelScreen() {
       setNextCursor(res.nextCursor ?? null);
     } finally {
       setLoadingOlder(false);
-    }
-  };
-
-  const handleSend = async () => {
-    const trimmed = draft.trim();
-    if (!trimmed || !channelId) return;
-
-    if (editingMessage && client) {
-      const target = editingMessage;
-      try {
-        const { message } = await client.editMessage(target.id, trimmed);
-        setEditingMessage(null);
-        setDraft(current => current.trim() === trimmed ? '' : current);
-        setMessages((prev) => prev.map((m) => (m.id === message.id ? { ...m, ...message } : m)));
-      } catch (err) {
-        Alert.alert('编辑失败', err instanceof Error ? err.message : '无法保存编辑');
-      }
-      return;
-    }
-
-    try {
-      await sendWsMessage({ channelId, content: trimmed });
-      setDraft(current => current.trim() === trimmed ? '' : current);
-    } catch (error) {
-      Alert.alert('发送失败', error instanceof Error ? error.message : String(error));
-    }
-  };
-
-  const handlePickAttachment = async () => {
-    if (!client || !channelId || uploading) return;
-    try {
-      setUploading(true);
-      const attachments = await pickAttachments(client);
-      if (!attachments.length) return;
-      const caption = draft.trim();
-      await sendWsMessage({
-        channelId,
-        content: caption,
-        attachments,
-      });
-      if (caption) setDraft(current => current.trim() === caption ? '' : current);
-    } catch (err) {
-      Alert.alert('上传失败', err instanceof Error ? err.message : '无法上传附件');
-    } finally {
-      setUploading(false);
-    }
-  };
-
-  const handleToggleReaction = async (messageId: string, emoji: string) => {
-    if (!client) return;
-    try {
-      const res = await client.toggleReaction(messageId, emoji, currentUserId);
-      setMessages((prev) =>
-        prev.map((m) =>
-          m.id === (res.messageId || messageId) ? { ...m, reactions: res.reactions ?? [] } : m,
-        ),
-      );
-    } catch (err) {
-      Alert.alert('表情操作失败', err instanceof Error ? err.message : '无法更新表情');
     }
   };
 
@@ -316,6 +248,7 @@ export default function ChannelScreen() {
 
   // Inverted list data: newest at index 0
   const invertedMessages = useMemo(() => [...messages].reverse(), [messages]);
+  const scroll = useMessageScroll(invertedMessages, messageId);
 
   const title =
     channel?.kind === 'dm'
@@ -426,14 +359,9 @@ export default function ChannelScreen() {
           </View>
         ) : (
           <FlatList
-            ref={list}
+            {...scroll}
             inverted
-            onScrollToIndexFailed={info => list.current?.scrollToOffset({offset: info.averageItemLength * info.index, animated: false})}
-            onContentSizeChange={() => {
-              if (!messageId || jumped.current === messageId) return;
-              const index = invertedMessages.findIndex(message => message.id === messageId);
-              if (index >= 0) { jumped.current = messageId; list.current?.scrollToIndex({index, animated: false}); }
-            }}
+
             data={invertedMessages}
             keyExtractor={(item) => item.id}
             contentContainerStyle={styles.listContent}
@@ -462,7 +390,7 @@ export default function ChannelScreen() {
                 >
                   {channel?.kind === 'dm'
                     ? '私聊模式：直接发消息即可与该 Agent 对话（无需 @）。'
-                    : '输入 @ 召唤 Botmux Agent 开始协作对话。'}
+                    : '输入 @ 提及 Agent 开始协作对话。'}
                 </Text>
               </View>
             }
@@ -521,10 +449,7 @@ export default function ChannelScreen() {
           channel={channel} messages={messages}
           participants={participants}
           editingLabel={editingMessage ? `正在编辑消息…` : null}
-          onCancelEdit={() => {
-            setEditingMessage(null);
-            setDraft('');
-          }}
+          onCancelEdit={cancelEdit}
         />
       </KeyboardAvoidingView>
 
@@ -542,10 +467,7 @@ export default function ChannelScreen() {
           router.push(`/thread/${encodeURIComponent(channelId)}/${encodeURIComponent(msg.id)}`)
         }
         onTogglePin={(msg) => void handleTogglePin(msg)}
-        onEdit={(msg) => {
-          setEditingMessage(msg);
-          setDraft(msg.content);
-        }}
+        onEdit={startEdit}
         onDelete={handleDelete}
       />
 
@@ -600,7 +522,7 @@ export default function ChannelScreen() {
           </View>
           <ScrollView contentContainerStyle={[styles.sheetScroll, { paddingBottom: Math.max(insets.bottom, 20) }]}>
             {channel && <ChannelSettings channel={channel} leave={() => { setMembersOpen(false); router.replace('/(tabs)'); }} />}
-            <TextInput placeholder="搜索成员" value={memberSearch} onChangeText={setMemberSearch} style={{ color: colors.onSurface }} />
+            <BuzzInput placeholder="搜索成员" value={memberSearch} onChangeText={setMemberSearch} style={{ color: colors.onSurface }} />
             {participants.filter(p => !p.archived && p.name.toLowerCase().includes(memberSearch.toLowerCase())).map((agent) => {
               const row = members.find(m => (m.agentId || m.userId) === agent.id);
               const identity = agent.role === 'agent' ? { agentId: agent.id } : { userId: agent.id };
@@ -628,7 +550,7 @@ export default function ChannelScreen() {
                       {agent.role} · {row ? '频道成员' : '频道外'}
                     </Text>
                   </View>
-                  <Button title={row ? '移除' : '添加'} onPress={async () => {
+                  <BuzzButton title={row ? '移除' : '添加'} onPress={async () => {
                     if (!client) return;
                     try {
                       if (row) await client.removeChannelMember(channelId, identity);

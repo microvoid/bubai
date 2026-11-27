@@ -4,13 +4,11 @@ import type { ChatMessage, MessageAttachment, Participant } from '@buzz-botmux/c
 import { buzzGrid, buzzRadii, buzzTypography } from '@buzz-botmux/design-tokens';
 import { Ionicons } from '@expo/vector-icons';
 import * as Haptics from 'expo-haptics';
-import React, { useEffect, useRef } from 'react';
+import React from 'react';
 import {
-  Animated,
   Linking,
   Alert,
   Image,
-  Platform,
   Pressable,
   StyleSheet,
   Text,
@@ -39,45 +37,6 @@ export function formatDayLabel(ts: number): string {
   return `${d.getMonth() + 1}/${d.getDate()}`;
 }
 
-/** Staggered 3-dot bounce matching references/buzz/mobile/lib/features/channels/agent_typing_bubble.dart */
-function AgentTypingDots({ color }: { color: string }) {
-  const dots = [
-    useRef(new Animated.Value(0)).current,
-    useRef(new Animated.Value(0)).current,
-    useRef(new Animated.Value(0)).current,
-  ];
-
-  useEffect(() => {
-    const anims = dots.map((val, idx) =>
-      Animated.loop(
-        Animated.sequence([
-          Animated.delay(idx * 140),
-          Animated.timing(val, { toValue: -4, duration: 260, useNativeDriver: true }),
-          Animated.timing(val, { toValue: 0, duration: 260, useNativeDriver: true }),
-          Animated.delay(240),
-        ]),
-      ),
-    );
-    anims.forEach((a) => a.start());
-    return () => anims.forEach((a) => a.stop());
-  }, []);
-
-  return (
-    <View style={styles.typingDots}>
-      {dots.map((val, i) => (
-        <Animated.View
-          key={i}
-          style={[
-            styles.dot,
-            { backgroundColor: color, transform: [{ translateY: val }] },
-          ]}
-        />
-      ))}
-    </View>
-  );
-}
-
-/** Lightweight rich-text renderer supporting fenced code blocks and inline code. */
 function MessageContent({
   content,
   textColor,
@@ -240,13 +199,6 @@ export function BuzzMessageBubble({
           >
             {isAgent && message.card ? (
               <AgentProgressCard card={message.card} textColor={bubbleFg} />
-            ) : isRunning ? (
-              <View style={styles.runningHeader}>
-                <AgentTypingDots color={bubbleFg} />
-                <Text style={[buzzTypography.micro, { color: bubbleFg, opacity: 0.78 }]}>
-                  {message.card?.title || 'Running'}
-                </Text>
-              </View>
             ) : null}
 
             {!(isAgent && isRunning && message.card?.progress && message.card.progress.steps.length > 0) && (
@@ -430,31 +382,6 @@ const styles = StyleSheet.create({
     paddingHorizontal: 14,
     paddingVertical: 9,
     gap: 6,
-  },
-  runningHeader: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 8,
-  },
-  typingDots: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 4,
-    height: 14,
-  },
-  dot: {
-    width: 6,
-    height: 6,
-    borderRadius: 3,
-  },
-  codeBlock: {
-    padding: 10,
-    borderRadius: 10,
-  },
-  codeText: {
-    fontFamily: Platform.select({ ios: 'Menlo', android: 'monospace', default: 'monospace' }),
-    fontSize: 12,
-    lineHeight: 17,
   },
   terminalChip: {
     flexDirection: 'row',

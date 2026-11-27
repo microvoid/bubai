@@ -1,7 +1,8 @@
+import { BuzzButton } from '@/components/BuzzComponents';
 import { useQuery } from '@tanstack/react-query';
 import { useLocalSearchParams, useRouter } from 'expo-router';
 import React, { useState } from 'react';
-import { Alert, Button, Text } from 'react-native';
+import { Alert, Text } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { mobileGetInvite, mobileInviteDecision } from '@/services/auth';
 import { useBubai } from '@/store/BubaiProvider';
@@ -37,15 +38,15 @@ export default function Invite() {
         {invite.error?.message || invite.data?.organizationName || '社区邀请'}
       </Text>
       {!authToken ? (
-        <Button title="登录后查看邀请" onPress={() => router.push('/connect?resume=1')} />
+        <BuzzButton title="登录后查看邀请" onPress={() => router.push('/connect?resume=1')} />
       ) : (
         <>
-          <Button
+          <BuzzButton
             title="接受邀请"
             disabled={!invite.data || busy}
             onPress={() => void decide(true)}
           />
-          <Button
+          <BuzzButton
             title="拒绝邀请"
             disabled={!invite.data || busy}
             onPress={() => void decide(false)}

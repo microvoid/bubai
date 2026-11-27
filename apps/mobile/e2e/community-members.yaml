@@ -1,0 +1,65 @@
+appId: com.bubai.app.dev
+---
+- runFlow: ../../../tests/native/open-workspace.yaml
+- tapOn: Live
+- tapOn:
+    id: server-url
+- eraseText
+- inputText: "${AUTH_SERVER}"
+- pressKey: Enter
+- runFlow:
+    file: ../../../tests/native/roster-login.yaml
+    env:
+      EMAIL: roster-owner@example.test
+- scrollUntilVisible:
+    element: "社区成员与邀请"
+- tapOn: "社区成员与邀请"
+- scrollUntilVisible:
+    element: "受邀人邮箱"
+- tapOn: "受邀人邮箱"
+- inputText: "roster-guest@example.test"
+- hideKeyboard
+- tapOn: "发送邀请"
+- scrollUntilVisible:
+    element: "撤销邀请 · roster-guest@example.test"
+- runScript: ../../../tests/native/roster-invite.js
+- scrollUntilVisible:
+    element: ".*Sign Out.*"
+    direction: UP
+- tapOn: ".*Sign Out.*"
+- runFlow:
+    file: ../../../tests/native/roster-login.yaml
+    env:
+      EMAIL: roster-guest@example.test
+- openLink: "bubai://invite/${output.inviteId}"
+- tapOn:
+    text: "打开|Open"
+    optional: true
+- assertVisible: "Roster owner"
+- tapOn: "接受邀请"
+- assertVisible:
+    id: channel-row-general
+- tapOn: "Settings, tab, .*"
+- scrollUntilVisible:
+    element: ".*Sign Out.*"
+- tapOn: ".*Sign Out.*"
+- runFlow:
+    file: ../../../tests/native/roster-login.yaml
+    env:
+      EMAIL: roster-owner@example.test
+- scrollUntilVisible:
+    element: "社区成员与邀请"
+- tapOn: "社区成员与邀请"
+- scrollUntilVisible:
+    element: "Roster guest · member"
+- scrollUntilVisible:
+    element: "设为管理员"
+    centerElement: true
+- tapOn: "设为管理员"
+- assertVisible: "Roster guest · admin"
+- scrollUntilVisible:
+    element: "移除成员"
+    centerElement: true
+- tapOn: "移除成员"
+- tapOn: "移除"
+- assertNotVisible: "Roster guest · admin"

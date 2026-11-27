@@ -47,3 +47,14 @@ For an Android emulator, install the development APK and use `adb reverse tcp:PO
 The HTTP and WebSocket regressions also run as part of `bun run test:e2e`. Terminating the fixture process removes its temporary databases.
 
 Push-enabled builds use the EAS project ID in `EXPO_PUBLIC_EAS_PROJECT_ID` and the project's APNs or FCM credentials. The server sends through Expo Push Service. Set `EXPO_ACCESS_TOKEN` when the project requires enhanced push security.
+
+To test foreground and cold-start notification taps on iOS, start the workspace fixture above. Set `SIMULATOR_ID`, `DISCUSSION`, and `ROOT_MESSAGE` to the simulator and the fixture's seeded IDs. Grant the dev app notification permission and run:
+
+```sh
+bun tests/native/notification-fixture.ts
+# In another shell, use the URL printed by the notification fixture.
+maestro --device "$SIMULATOR_ID" test -e OPEN_SERVER="$OPEN_SERVER" \
+  -e NOTIFICATION_SERVER="$NOTIFICATION_SERVER" tests/native/notification-taps.yaml
+```
+
+This delivers notifications through the simulator operating system using `simctl push`. Production delivery also requires provider credentials.

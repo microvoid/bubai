@@ -14,12 +14,30 @@ appId: com.bubai.app.dev
     id: message-input
 - eraseText
 - inputText: "@Local"
+- runFlow:
+    when:
+      platform: Android
+    commands:
+      - hideKeyboard
 - assertVisible: ".*@Local Fixture.*"
+- tapOn:
+    id: message-input
 - eraseText
+- runFlow:
+    when:
+      platform: Android
+    commands:
+      - hideKeyboard
 - tapOn: "频道设置与成员"
 - assertVisible: "保存频道信息"
 - assertVisible: ".*follow_source"
+- scrollUntilVisible:
+    element: "标星"
+    direction: DOWN
 - tapOn: "标星"
 - assertVisible: "取消标星"
 - tapOn: "取消标星"
 - assertVisible: "标星"
+- tapOn: "静音"
+- assertVisible: "取消静音"
+- tapOn: "取消静音"

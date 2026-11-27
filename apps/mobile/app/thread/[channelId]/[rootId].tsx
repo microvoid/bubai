@@ -1,5 +1,4 @@
-import { useDraft } from '@/store/useDraft';
-import { pickAttachments } from '@/services/pickAttachments';
+import { useMessageActions, useMessageScroll } from '@/store/useMessageActions';
 import type { ChatMessage, Participant } from '@buzz-botmux/chat-client';
 import { buzzGrid, buzzTypography } from '@buzz-botmux/design-tokens';
 import { Ionicons } from '@expo/vector-icons';
@@ -32,8 +31,6 @@ export default function ThreadScreen() {
   const channelId = Array.isArray(rawCh) ? rawCh[0] : rawCh || '';
   const rootId = Array.isArray(rawRoot) ? rawRoot[0] : rawRoot || '';
 
-  const list = useRef<FlatList<ChatMessage>>(null);
-  const jumped = useRef<string | undefined>(undefined);
   const router = useRouter();
   const insets = useSafeAreaInsets();
   const { colors } = useBuzzTheme();
@@ -41,12 +38,10 @@ export default function ThreadScreen() {
     channels,
     client,
     serverUrl,
-    activeOrgId,
     authToken,
     currentUserId,
     participants,
-    sendWsMessage,
-    wsState,
+    markThreadRead, wsState,
     subscribeWsEvents,
   } = useBubai();
 
@@ -58,7 +53,11 @@ export default function ThreadScreen() {
   const [root, setRoot] = useState<ChatMessage | null>(null);
   const [replies, setReplies] = useState<ChatMessage[]>([]);
   const [loading, setLoading] = useState(true);
-  const [draft, setDraft] = useDraft(serverUrl, activeOrgId, currentUserId, channelId, rootId);
+  const {draft, setDraft, editing, startEdit, cancelEdit, uploading, send: handleSendReply, attach, react: handleToggleReaction} =
+    useMessageActions(channelId, rootId, (id, changes) => {
+      if (id === rootId) setRoot(prev => prev ? {...prev, ...changes} : prev);
+      setReplies(prev => prev.map(m => m.id === id ? {...m, ...changes} : m));
+    });
   const [actionMessage, setActionMessage] = useState<ChatMessage | null>(null);
 
   const loaded = useRef(false);
@@ -70,11 +69,11 @@ export default function ThreadScreen() {
       loaded.current = true;
       setRoot(data.root);
       setReplies(data.replies ?? []);
-      await client.markThreadRead(channelId, rootId, currentUserId);
+      markThreadRead(channelId, rootId);
     } finally {
       setLoading(false);
     }
-  }, [channelId, client, rootId, currentUserId]);
+  }, [channelId, client, rootId, markThreadRead]);
 
   useEffect(() => {
     if (!loaded.current || wsState === 'open') void loadThread().catch(error => {
@@ -87,7 +86,7 @@ export default function ThreadScreen() {
       if (event.type === 'message.created') {
         const msg = event.payload;
         if (msg.channelId !== channelId || msg.threadId !== rootId) return;
-        void client?.markThreadRead(channelId, rootId, currentUserId).catch(() => {});
+        markThreadRead(channelId, rootId);
         setReplies((prev) => (prev.some((r) => r.id === msg.id) ? prev : [...prev, msg]));
       } else if (event.type === 'message.updated') {
         const msg = event.payload;
@@ -112,58 +111,10 @@ export default function ThreadScreen() {
         );
       }
     });
-  }, [channelId, rootId, subscribeWsEvents, client, currentUserId, router]);
-
-  const [uploading, setUploading] = useState(false);
-  const [editing, setEditing] = useState<ChatMessage | null>(null);
-  const attach = async () => {
-    if (!client || uploading) return;
-    setUploading(true);
-    try {
-      const attachments = await pickAttachments(client);
-      if (!attachments.length) return;
-      await sendWsMessage({ channelId, threadId: rootId, content: draft, attachments });
-      setDraft(value => value === draft ? '' : value);
-    } catch (error) {
-      Alert.alert('附件发送失败', String(error));
-    } finally {
-      setUploading(false);
-    }
-  };
-  const handleSendReply = async () => {
-    const trimmed = draft.trim();
-    if (!trimmed) return;
-    try {
-      if (editing && client) {
-        await client.editMessage(editing.id, trimmed);
-        setEditing(null);
-      } else {
-        await sendWsMessage({ channelId, threadId: rootId, content: trimmed });
-      }
-      setDraft(current => current.trim() === trimmed ? '' : current);
-    } catch (error) {
-      Alert.alert('发送失败', error instanceof Error ? error.message : String(error));
-    }
-  };
-
-  const handleToggleReaction = async (messageId: string, emoji: string) => {
-    if (!client) return;
-    try {
-      const res = await client.toggleReaction(messageId, emoji, currentUserId);
-      const targetId = res.messageId || messageId;
-      const nextReactions = res.reactions ?? [];
-      if (targetId === rootId) {
-        setRoot((prev) => (prev ? { ...prev, reactions: nextReactions } : prev));
-      }
-      setReplies((prev) =>
-        prev.map((r) => (r.id === targetId ? { ...r, reactions: nextReactions } : r)),
-      );
-    } catch (err) {
-      Alert.alert('表情操作失败', err instanceof Error ? err.message : '无法更新表情');
-    }
-  };
+  }, [channelId, rootId, subscribeWsEvents, markThreadRead, router]);
 
   const allItems = useMemo(() => (root ? [root, ...replies] : replies), [replies, root]);
+  const scroll = useMessageScroll(allItems, messageId);
 
   return (
     <View
@@ -194,14 +145,8 @@ export default function ThreadScreen() {
             keyboardShouldPersistTaps="handled"
             keyboardDismissMode="interactive"
             data={allItems}
-            ref={list}
-            onScrollToIndexFailed={info => list.current?.scrollToOffset({ offset: info.averageItemLength * info.index, animated: false })}
-            onContentSizeChange={() => {
-              const index = allItems.findIndex(item => item.id === messageId);
-              if (index >= 0 && messageId !== jumped.current) {
-                jumped.current = messageId; list.current?.scrollToIndex({index, animated: false});
-              }
-            }}
+            {...scroll}
+
             keyExtractor={(item) => item.id}
             contentContainerStyle={{ paddingVertical: 12 }}
             renderItem={({ item, index }) => (
@@ -243,7 +188,7 @@ export default function ThreadScreen() {
           uploading={uploading}
           onPickAttachment={editing ? undefined : attach}
           editingLabel={editing ? '编辑消息' : null}
-          onCancelEdit={() => { setEditing(null); setDraft(''); }}
+          onCancelEdit={cancelEdit}
           placeholder="Reply in thread… (可 @Agent)"
           currentUserId={currentUserId}
           channel={channels.find(c => c.id === channelId)} messages={allItems} threadMessages={replies}
@@ -259,7 +204,7 @@ export default function ThreadScreen() {
             actionMessage.senderId === currentUserId,
         )}
         inThread
-        onEdit={msg => { setEditing(msg); setDraft(msg.content); }}
+        onEdit={startEdit}
         onDelete={msg => Alert.alert('删除消息？', undefined, [
           { text: '取消', style: 'cancel' },
           { text: '删除', style: 'destructive', onPress: () => void client?.deleteMessage(msg.id).catch(error => Alert.alert('删除失败', String(error))) },

@@ -118,6 +118,8 @@ export function BuzzComposer({
             {mentionCandidates.map((p) => (
               <Pressable
                 key={p.id}
+                accessibilityRole="button"
+                accessibilityLabel={(p.inChannel ? '' : '频道外 · ') + '@' + p.name}
                 onPress={() => handlePickMention(p)}
                 style={[
                   styles.mentionChip,

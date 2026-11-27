@@ -1,10 +1,11 @@
+import { BuzzButton, BuzzInput } from '@/components/BuzzComponents';
 import { CommunityMembers } from '@/components/CommunityMembers';
 import { buzzAccentChoices, buzzGrid, buzzRadii, buzzTypography } from '@buzz-botmux/design-tokens';
 import { Ionicons } from '@expo/vector-icons';
 import * as Haptics from 'expo-haptics';
 import { useRouter } from 'expo-router';
 import React, { useState } from 'react';
-import { Button, TextInput, Alert, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
+import { Alert, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { BuzzAvatar } from '@/components/BuzzAvatar';
 import { BuzzSectionGroup } from '@/components/BuzzComponents';
@@ -30,7 +31,6 @@ export default function SettingsScreen() {
     switchOrganization,
     signOut, enableNotifications,
     wsState,
-    botmuxConnected,
   } = useBubai();
 
   const [communityName, setCommunityName] = useState('');
@@ -71,10 +71,10 @@ export default function SettingsScreen() {
             ]}
           >
             <Text style={[buzzTypography.bodySmall, { color: colors.onSurface, flex: 1 }]}>
-              WebSocket / Botmux
+              服务连接
             </Text>
             <Text style={[buzzTypography.caption, { color: colors.onSurfaceVariant }]}>
-              {wsState} · {botmuxConnected ? 'Botmux Live' : 'Botmux Offline'}
+              {wsState}
             </Text>
           </View>
         </BuzzSectionGroup>
@@ -189,8 +189,8 @@ export default function SettingsScreen() {
 
         {authUser && (
           <BuzzSectionGroup title="Community">
-            <TextInput placeholder="新社区名称" value={communityName} onChangeText={setCommunityName} style={{ color: colors.onSurface }} />
-            <Button title="创建社区" disabled={!communityName.trim()} onPress={async () => {
+            <BuzzInput placeholder="新社区名称" value={communityName} onChangeText={setCommunityName} style={{ color: colors.onSurface }} />
+            <BuzzButton title="创建社区" disabled={!communityName.trim()} onPress={async () => {
               if (!authToken || !serverUrl) return;
               try {
                 const org = await mobileCreateOrganization(serverUrl, authToken, communityName);
@@ -200,7 +200,7 @@ export default function SettingsScreen() {
               } catch (error) { Alert.alert('创建失败', String(error)); }
             }} />
             <CommunityMembers />
-            <Button title="CLI 设备授权" onPress={() => router.push('/device')} />
+            <BuzzButton title="CLI 设备授权" onPress={() => router.push('/device')} />
             {organizations.map((org, idx) => {
               const selected = org.id === activeOrgId;
               return (

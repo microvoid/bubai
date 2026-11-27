@@ -71,6 +71,17 @@ try {
     () => readFileSync(strict.logPath, 'utf8'),
   );
   if (!response.ok) throw new Error('Fixture sign-in failed');
+  for (const who of ['owner', 'guest']) {
+    const email = `roster-${who}@example.test`;
+    const account = await registerTestUser(strict.url, email, 'Roster ' + who, 'Demo-password-1234',
+      () => readFileSync(strict.logPath, 'utf8'));
+    const org = await fetch(strict.url + '/api/auth/organization/create', {
+      method: 'POST', headers: { 'Content-Type': 'application/json', Origin: strict.url,
+        Authorization: 'Bearer ' + account.headers.get('set-auth-token') },
+      body: JSON.stringify({ name: 'Roster ' + who, slug: 'roster-' + who }),
+    });
+    if (!org.ok) throw new Error('Could not prepare roster account ' + who);
+  }
   console.log(
     `OPEN_SERVER=${open.url}\nAUTH_SERVER=${strict.url}\nTEST_EMAIL=native-ui@example.test\nTEST_PASSWORD=Demo-password-1234`,
   );

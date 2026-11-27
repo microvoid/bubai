@@ -3,14 +3,19 @@ appId: com.bubai.app.dev
 - runFlow: ../../../tests/native/open-workspace.yaml
 - assertVisible:
     id: channel-row-general
-- openLink: "bubai://channel/${ARCHIVED_CHANNEL}"
-- tapOn:
-    text: "打开|Open"
-    optional: true
+- runFlow:
+    file: ../../../tests/native/open-app-link.yaml
+    env:
+      LINK: "bubai://channel/${ARCHIVED_CHANNEL}"
 - tapOn:
     id: message-input
 - eraseText
 - inputText: "Keep rejected draft"
+- runFlow:
+    when:
+      platform: Android
+    commands:
+      - hideKeyboard
 - tapOn:
     id: send-message
 - assertVisible: "This channel is archived."

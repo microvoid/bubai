@@ -163,7 +163,7 @@ export default function AgentDetailScreen() {
       }
     };
     if (nextArchived) {
-      Alert.alert('Archive this agent?', '归档后会从常规列表折叠，不会删除 Botmux 会话，随时可恢复。', [
+      Alert.alert('Archive this agent?', '归档后会从常规列表折叠，会保留已有会话，随时可恢复。', [
         { text: 'Cancel', style: 'cancel' },
         { text: 'Archive', style: 'destructive', onPress: () => void run() },
       ]);

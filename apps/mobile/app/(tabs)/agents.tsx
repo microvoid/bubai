@@ -145,7 +145,7 @@ export default function AgentsScreen() {
           <View style={styles.empty}>
             <Ionicons name="hardware-chip-outline" size={32} color={colors.onSurfaceVariant} />
             <Text style={[buzzTypography.titleSmall, { color: colors.onSurface }]}>
-              未发现 Botmux Agents
+              暂无 Agent
             </Text>
             <Text style={[buzzTypography.bodySmall, { color: colors.onSurfaceVariant }]}>
               可通过 Gateway、Webhook 或 CLI Bridge 接入 Agent

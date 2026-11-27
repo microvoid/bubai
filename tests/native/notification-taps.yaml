@@ -1,0 +1,21 @@
+appId: com.bubai.app.dev
+---
+- runFlow: open-workspace.yaml
+- runScript:
+    file: send-notification.js
+    env:
+      KIND: channel
+- tapOn:
+    point: 50%,10%
+- assertVisible:
+    id: message-input
+- assertVisible: ".*Native review.*"
+- stopApp
+- runScript:
+    file: send-notification.js
+    env:
+      KIND: thread
+- tapOn:
+    point: 50%,10%
+- assertVisible: ".*Preview from a colleague.*"
+- assertVisible: "Thread.*"

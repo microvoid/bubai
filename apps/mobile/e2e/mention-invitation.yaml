@@ -11,6 +11,11 @@ appId: com.bubai.app.dev
     id: message-input
 - eraseText
 - inputText: "@Local"
+- runFlow:
+    when:
+      platform: Android
+    commands:
+      - hideKeyboard
 - tapOn: ".*频道外.*@Local Fixture.*"
 - tapOn:
     id: send-message
@@ -19,6 +24,11 @@ appId: com.bubai.app.dev
 - tapOn:
     id: message-input
 - inputText: "@Local"
+- runFlow:
+    when:
+      platform: Android
+    commands:
+      - hideKeyboard
 - tapOn: ".*频道外.*@Local Fixture.*"
 - tapOn:
     id: send-message
@@ -26,6 +36,11 @@ appId: com.bubai.app.dev
 - tapOn:
     id: message-input
 - inputText: "@Local"
+- runFlow:
+    when:
+      platform: Android
+    commands:
+      - hideKeyboard
 - assertVisible: ".*@Local Fixture.*"
 - assertNotVisible: ".*频道外.*@Local Fixture.*"
 - eraseText

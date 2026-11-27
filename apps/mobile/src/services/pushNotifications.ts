@@ -2,10 +2,12 @@ import * as Notifications from 'expo-notifications';
 import * as SecureStore from 'expo-secure-store';
 import Constants from 'expo-constants';
 import { Platform } from 'react-native';
-import { BubaiClient } from '@buzz-botmux/chat-client';
+import type { BubaiClient } from '@buzz-botmux/chat-client';
 
-export async function registerDevice(serverUrl: string, token: string, storageKey: string) {
+export async function registerDevice(client: BubaiClient, storageKey: string) {
   if (Platform.OS !== 'android' && Platform.OS !== 'ios') throw new Error('此平台不支持推送');
+  const projectId = Constants.easConfig?.projectId || Constants.expoConfig?.extra?.eas?.projectId;
+  if (!projectId) throw new Error('此构建未设置 EXPO_PUBLIC_EAS_PROJECT_ID，无法启用推送通知。');
   if (Platform.OS === 'android')
     await Notifications.setNotificationChannelAsync('messages', {
       name: 'Messages',
@@ -13,17 +15,14 @@ export async function registerDevice(serverUrl: string, token: string, storageKe
     });
   const permission = await Notifications.requestPermissionsAsync();
   if (!permission.granted) throw new Error('请在系统设置中允许通知');
-  const projectId = Constants.easConfig?.projectId || Constants.expoConfig?.extra?.eas?.projectId;
-  if (!projectId) throw new Error('此构建尚未配置推送项目');
   const device = await Notifications.getExpoPushTokenAsync({ projectId });
-  const client = new BubaiClient({ baseUrl: serverUrl, token });
   await client.registerPush(String(device.data), Platform.OS);
   await SecureStore.setItemAsync(storageKey, String(device.data));
 }
 
-export async function unregisterDevice(serverUrl: string, token: string, storageKey: string) {
+export async function unregisterDevice(client: BubaiClient, storageKey: string) {
   const device = await SecureStore.getItemAsync(storageKey);
   if (!device) return;
-  await new BubaiClient({ baseUrl: serverUrl, token }).unregisterPush(device);
+  await client.unregisterPush(device);
   await SecureStore.deleteItemAsync(storageKey);
 }

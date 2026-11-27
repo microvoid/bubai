@@ -1,6 +1,7 @@
+import { BuzzButton, BuzzInput } from '@/components/BuzzComponents';
 import { useQuery } from '@tanstack/react-query';
 import React, { useState } from 'react';
-import { Alert, Button, Text, TextInput, View } from 'react-native';
+import { Alert, Text, View } from 'react-native';
 import {
   mobileCancelInvitation,
   mobileCommunityRoster,
@@ -38,7 +39,7 @@ export function CommunityMembers() {
   };
   return (
     <View style={{ padding: 8, gap: 4 }}>
-      <Button
+      <BuzzButton
         title={expanded ? '收起社区成员' : '社区成员与邀请'}
         onPress={() => setExpanded(!expanded)}
       />
@@ -52,7 +53,7 @@ export function CommunityMembers() {
               </Text>
               {canManage && currentUserId !== m.userId && m.role !== 'owner' && (
                 <>
-                  <Button
+                  <BuzzButton
                     title={m.role === 'admin' ? '设为成员' : '设为管理员'}
                     disabled={busy}
                     onPress={() =>
@@ -67,7 +68,7 @@ export function CommunityMembers() {
                       )
                     }
                   />
-                  <Button
+                  <BuzzButton
                     title="移除成员"
                     disabled={busy}
                     onPress={() =>
@@ -90,7 +91,7 @@ export function CommunityMembers() {
           ))}
           {canManage && (
             <>
-              <TextInput
+              <BuzzInput
                 placeholder="受邀人邮箱"
                 value={email}
                 onChangeText={setEmail}
@@ -98,7 +99,7 @@ export function CommunityMembers() {
                 keyboardType="email-address"
                 style={{ color: colors.onSurface }}
               />
-              <Button
+              <BuzzButton
                 title="发送邀请"
                 disabled={busy || !email.trim()}
                 onPress={() =>
@@ -111,7 +112,7 @@ export function CommunityMembers() {
               {roster.data?.invitations
                 .filter((i) => i.status === 'pending')
                 .map((i) => (
-                  <Button
+                  <BuzzButton
                     key={i.id}
                     title={'撤销邀请 · ' + i.email}
                     disabled={busy}

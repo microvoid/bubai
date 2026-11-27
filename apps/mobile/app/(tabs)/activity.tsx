@@ -1,4 +1,4 @@
-import { useQuery } from '@tanstack/react-query';
+import { useActivity } from '@/store/useActivity';
 import { buzzGrid, buzzRadii, buzzTypography } from '@buzz-botmux/design-tokens';
 import { Ionicons } from '@expo/vector-icons';
 import * as Haptics from 'expo-haptics';
@@ -13,19 +13,16 @@ import {
   View,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
-import { BuzzBadge, BuzzSectionGroup } from '@/components/BuzzComponents';
+import { BuzzBadge, BuzzFilterPill, BuzzSectionGroup } from '@/components/BuzzComponents';
 import { useBubai } from '@/store/BubaiProvider';
 import { useBuzzTheme } from '@/theme/ThemeProvider';
 
 export default function ActivityScreen() {
   const router = useRouter();
   const { colors } = useBuzzTheme();
-  const { asks, sessions, answerAsk, refreshBootstrap, client, currentUserId, activeOrgId, serverUrl } = useBubai();
+  const { asks, sessions, answerAsk, refreshBootstrap } = useBubai();
   const [filter, setFilter] = useState<'all' | 'mention' | 'thread'>('all');
-  const activity = useQuery({
-    queryKey: ['activity', serverUrl, activeOrgId, currentUserId],
-    enabled: Boolean(client), queryFn: () => client!.getActivity(currentUserId),
-  });
+  const activity = useActivity();
   const [busyAskId, setBusyAskId] = useState<string | null>(null);
   const [refreshing, setRefreshing] = useState(false);
 
@@ -68,9 +65,8 @@ export default function ActivityScreen() {
       >
         <View style={{ flexDirection: 'row', gap: 16 }}>
           {(['all', 'mention', 'thread'] as const).map((kind, index) => (
-            <Pressable key={kind} onPress={() => setFilter(kind)} accessibilityState={{ selected: filter === kind }}>
-              <Text style={{ color: filter === kind ? colors.primary : colors.onSurface }}>{['All', '@Mentions', 'Threads'][index]}</Text>
-            </Pressable>
+            <BuzzFilterPill key={kind} selected={filter === kind} onPress={() => setFilter(kind)}
+              label={['All', '@Mentions', 'Threads'][index]} />
           ))}
         </View>
         {activity.error && <Text style={{ color: colors.error }}>{activity.error.message}</Text>}

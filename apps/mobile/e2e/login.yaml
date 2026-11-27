@@ -15,13 +15,14 @@ appId: com.bubai.app.dev
           id: server-url
       - eraseText
       - inputText: "${AUTH_SERVER}"
-      - tapOn: Connect
+      - pressKey: Enter
 - runFlow:
     when:
       visible:
         id: channel-row-general
     commands:
-      - tapOn: "Settings, tab, .*"
+      - tapOn:
+          id: settings-tab
       - scrollUntilVisible:
           element: ".*Sign Out.*"
           direction: DOWN
@@ -52,6 +53,6 @@ appId: com.bubai.app.dev
     id: server-url
 - eraseText
 - inputText: "${OPEN_SERVER}"
-- tapOn: "Connect"
+- pressKey: Enter
 - assertVisible:
     id: channel-row-general

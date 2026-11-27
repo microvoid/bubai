@@ -1,3 +1,5 @@
+import { useActivity } from '@/store/useActivity';
+import { unreadCount } from '@/store/unread';
 import { Ionicons } from '@expo/vector-icons';
 import * as Haptics from 'expo-haptics';
 import { Tabs } from 'expo-router';
@@ -11,7 +13,9 @@ export default function TabsLayout() {
   const { colors, accent } = useBuzzTheme();
   const { asks, channels } = useBubai();
   const insets = useSafeAreaInsets();
-  const totalUnread = channels.reduce((sum, c) => sum + (c.muted ? 0 : (c.unreadCount || 0) + (c.threadUnreadCount || 0)), 0);
+  const activity = useActivity();
+  const activityCount = asks.length + (activity.data?.items.reduce((sum, item) => sum + item.unreadCount, 0) ?? 0);
+  const totalUnread = channels.reduce((sum, c) => sum + (c.muted ? 0 : unreadCount(c)), 0);
 
   return (
     <Tabs
@@ -75,7 +79,7 @@ export default function TabsLayout() {
         name="activity"
         options={{
           title: 'Activity', tabBarButtonTestID: 'activity-tab',
-          tabBarBadge: asks.length > 0 ? asks.length : undefined,
+          tabBarBadge: activityCount > 0 ? activityCount : undefined,
           tabBarBadgeStyle: {
             backgroundColor: colors.error,
             color: colors.onError,
@@ -94,7 +98,7 @@ export default function TabsLayout() {
       <Tabs.Screen
         name="settings"
         options={{
-          title: 'Settings',
+          title: 'Settings', tabBarButtonTestID: 'settings-tab',
           tabBarIcon: ({ color, focused }) => (
             <Ionicons
               name={focused ? 'settings' : 'settings-outline'}

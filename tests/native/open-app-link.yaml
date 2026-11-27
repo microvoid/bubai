@@ -1,0 +1,18 @@
+appId: com.bubai.app.dev
+---
+- openLink: "${LINK}"
+- runFlow:
+    when:
+      visible: "Open with|打开方式"
+    commands:
+      - tapOn: "Bubai Dev"
+- runFlow:
+    when:
+      visible: "Just once|仅此一次"
+    commands:
+      - tapOn: "Just once|仅此一次"
+- runFlow:
+    when:
+      visible: "打开|Open"
+    commands:
+      - tapOn: "打开|Open"

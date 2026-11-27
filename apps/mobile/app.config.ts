@@ -9,7 +9,9 @@ const nameSuffix = isProd ? '' : isPreview ? ' Preview' : ' Dev';
 const config: ExpoConfig = {
   name: `Bubai${nameSuffix}`,
   slug: 'bubai',
-  extra: { eas: { projectId: process.env.EXPO_PUBLIC_EAS_PROJECT_ID } },
+  ...(process.env.EXPO_PUBLIC_EAS_PROJECT_ID?.trim() && {
+    extra: { eas: { projectId: process.env.EXPO_PUBLIC_EAS_PROJECT_ID.trim() } },
+  }),
   scheme: 'bubai',
   version: '0.1.0',
   orientation: 'portrait',

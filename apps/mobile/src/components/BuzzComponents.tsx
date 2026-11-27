@@ -1,8 +1,25 @@
 import { buzzGrid, buzzRadii, buzzTypography } from '@buzz-botmux/design-tokens';
 import * as Haptics from 'expo-haptics';
 import React from 'react';
-import { Pressable, StyleSheet, Text, View, type ViewStyle } from 'react-native';
+import { TextInput, type TextInputProps, type ButtonProps, Pressable, StyleSheet, Text, View, type ViewStyle } from 'react-native';
 import { useBuzzTheme } from '../theme/ThemeProvider';
+
+export function BuzzButton({title, onPress, color, disabled, ...props}: ButtonProps) {
+  const { colors } = useBuzzTheme();
+  return <Pressable {...props} accessibilityRole="button" accessibilityLabel={props.accessibilityLabel ?? title}
+    accessibilityState={{disabled}} disabled={disabled} onPress={onPress}
+    style={({pressed}) => ({minHeight: 44, justifyContent: 'center', alignItems: 'center',
+      borderRadius: buzzRadii.sm, paddingHorizontal: 12, backgroundColor: colors.surfaceContainerHigh, opacity: disabled ? 0.45 : pressed ? 0.75 : 1})}>
+    <Text style={[buzzTypography.label, {color: color || colors.primary}]}>{title}</Text>
+  </Pressable>;
+}
+
+export function BuzzInput({style, ...props}: TextInputProps) {
+  const { colors } = useBuzzTheme();
+  return <TextInput placeholderTextColor={colors.onSurfaceVariant} {...props}
+    style={[buzzTypography.body, {minHeight: 44, paddingHorizontal: 12, borderRadius: buzzRadii.sm,
+      borderColor: colors.outline, borderWidth: StyleSheet.hairlineWidth, color: colors.onSurface, backgroundColor: colors.surfaceContainerLow}, style]}/>;
+}
 
 export function BuzzBadge({
   label,
@@ -64,6 +81,8 @@ export function BuzzFilterPill({
   const { colors } = useBuzzTheme();
   return (
     <Pressable
+      accessibilityRole="button"
+      accessibilityState={{selected}}
       onPress={() => {
         void Haptics.selectionAsync();
         onPress();

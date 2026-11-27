@@ -1,6 +1,7 @@
+import { BuzzButton, BuzzInput } from '@/components/BuzzComponents';
 import { useLocalSearchParams, useRouter } from 'expo-router';
 import React, { useState } from 'react';
-import { Alert, Button, Text, TextInput } from 'react-native';
+import { Alert, Text, TextInput } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { mobileDeviceDecision } from '@/services/auth';
 import { useBubai } from '@/store/BubaiProvider';
@@ -29,22 +30,22 @@ export default function Device() {
   return (
     <SafeAreaView style={{ padding: 20, gap: 12 }}>
       <Text style={{ color: colors.onSurface }}>输入你正在登录的 CLI 上显示的设备码</Text>
-      <TextInput
+      <BuzzInput
         accessibilityLabel="设备码"
         value={code}
         onChangeText={setCode}
         style={{ color: colors.onSurface }}
       />
       {!authToken ? (
-        <Button title="登录" onPress={() => router.push('/connect?resume=1')} />
+        <BuzzButton title="登录" onPress={() => router.push('/connect?resume=1')} />
       ) : (
         <>
-          <Button
+          <BuzzButton
             title="授权此设备"
             disabled={!code.trim() || busy}
             onPress={() => void decide(true)}
           />
-          <Button
+          <BuzzButton
             title="拒绝授权"
             disabled={!code.trim() || busy}
             onPress={() => void decide(false)}

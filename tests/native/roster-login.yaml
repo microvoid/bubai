@@ -21,4 +21,5 @@ appId: com.bubai.app.dev
     visible:
       id: channel-row-general
     timeout: 30000
-- tapOn: "Settings, tab, .*"
+- tapOn:
+    id: settings-tab

@@ -8,17 +8,32 @@ appId: com.bubai.app.dev
 - inputText: "${AUTH_SERVER}"
 - pressKey: Enter
 - runFlow:
+    when:
+      visible:
+        id: channel-row-general
+    commands:
+      - tapOn:
+          id: settings-tab
+      - scrollUntilVisible:
+          element: ".*Sign Out.*"
+      - tapOn: ".*Sign Out.*"
+- runFlow:
     file: ../../../tests/native/roster-login.yaml
     env:
       EMAIL: roster-owner@example.test
 - scrollUntilVisible:
     element: "社区成员与邀请"
+    centerElement: true
 - tapOn: "社区成员与邀请"
 - scrollUntilVisible:
     element: "受邀人邮箱"
+    centerElement: true
 - tapOn: "受邀人邮箱"
 - inputText: "roster-guest@example.test"
-- hideKeyboard
+- pressKey: Enter
+- scrollUntilVisible:
+    element: "发送邀请"
+    centerElement: true
 - tapOn: "发送邀请"
 - scrollUntilVisible:
     element: "撤销邀请 · roster-guest@example.test"
@@ -31,15 +46,16 @@ appId: com.bubai.app.dev
     file: ../../../tests/native/roster-login.yaml
     env:
       EMAIL: roster-guest@example.test
-- openLink: "bubai://invite/${output.inviteId}"
-- tapOn:
-    text: "打开|Open"
-    optional: true
+- runFlow:
+    file: ../../../tests/native/open-app-link.yaml
+    env:
+      LINK: "bubai://invite/${output.inviteId}"
 - assertVisible: "Roster owner"
 - tapOn: "接受邀请"
 - assertVisible:
     id: channel-row-general
-- tapOn: "Settings, tab, .*"
+- tapOn:
+    id: settings-tab
 - scrollUntilVisible:
     element: ".*Sign Out.*"
 - tapOn: ".*Sign Out.*"
@@ -49,6 +65,7 @@ appId: com.bubai.app.dev
       EMAIL: roster-owner@example.test
 - scrollUntilVisible:
     element: "社区成员与邀请"
+    centerElement: true
 - tapOn: "社区成员与邀请"
 - scrollUntilVisible:
     element: "Roster guest · member"

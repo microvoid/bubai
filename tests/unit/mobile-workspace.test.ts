@@ -1,3 +1,4 @@
+import { createRequire } from 'node:module';
 import { expect, test } from 'bun:test';
 import type { Channel } from '../../packages/chat-client/src';
 import { notificationRoute } from '../../apps/mobile/src/services/notificationRoute';
@@ -16,6 +17,10 @@ test('notification taps target the supplied channel, reply and message only', ()
   expect(notificationRoute({ channelId: 'c', threadId: null })).toEqual({
     pathname: '/channel/[id]',
     params: { id: 'c' },
+  });
+  expect(notificationRoute(null)).toBeNull();
+  expect(notificationRoute({ channelId: 'c', messageId: '../invalid' })).toEqual({
+    pathname: '/channel/[id]', params: { id: 'c' },
   });
   expect(notificationRoute({ url: 'https://example.com' })).toBeNull();
   expect(notificationRoute({ channelId: 'c', threadId: '../other' })).toBeNull();
@@ -67,4 +72,20 @@ test('stream bursts coalesce per root, discard stale replies, and stop on unmoun
   await Bun.sleep(10);
   expect(results).toEqual([2]);
   expect(pending).toHaveLength(2);
+});
+
+test('Expo loads the mobile config with or without a push project ID', () => {
+  const mobile = new URL('../../apps/mobile/', import.meta.url);
+  const { getConfig } = createRequire(new URL('package.json', mobile))('expo/config');
+  const prior = process.env.EXPO_PUBLIC_EAS_PROJECT_ID;
+  try {
+    for (const id of ['', ' test-project ']) {
+      process.env.EXPO_PUBLIC_EAS_PROJECT_ID = id;
+      const { exp } = getConfig(mobile.pathname);
+      expect(exp.extra?.eas).toEqual(id ? { projectId: 'test-project' } : undefined);
+    }
+  } finally {
+    if (prior === undefined) delete process.env.EXPO_PUBLIC_EAS_PROJECT_ID;
+    else process.env.EXPO_PUBLIC_EAS_PROJECT_ID = prior;
+  }
 });

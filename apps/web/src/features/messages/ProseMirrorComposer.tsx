@@ -25,7 +25,7 @@ import {
   type MarkType,
   type Node as PMNode,
 } from 'prosemirror-model';
-import { EditorState, TextSelection } from 'prosemirror-state';
+import { EditorState, Selection, TextSelection } from 'prosemirror-state';
 import { EditorView } from 'prosemirror-view';
 import { history, undo, redo } from 'prosemirror-history';
 import { keymap } from 'prosemirror-keymap';
@@ -355,7 +355,7 @@ function getActiveFormats(state: EditorState): ComposerFormat[] {
   const { $from, empty, from, to } = state.selection;
   const inlineMarks: InlineFormat[] = ['bold', 'italic', 'strike', 'code', 'spoiler'];
   for (const name of inlineMarks) {
-    const type = composerSchema.marks[name];
+    const type = state.schema.marks[name];
     if (!type) continue;
     if (empty) {
       const stored = state.storedMarks || $from.marks();
@@ -399,8 +399,8 @@ function toggleBlockNode(
       : format === 'ordered_list'
         ? 'ordered_list_item'
         : format;
-  const targetType = composerSchema.nodes[nodeName];
-  const paragraphType = composerSchema.nodes.paragraph;
+  const targetType = state.schema.nodes[nodeName];
+  const paragraphType = state.schema.nodes.paragraph;
   if (!targetType || !paragraphType) return false;
   const { $from, $to } = state.selection;
   const isAlreadyTarget = $from.parent.type === targetType;
@@ -412,6 +412,76 @@ function toggleBlockNode(
     dispatch(tr.scrollIntoView());
   }
   return true;
+}
+
+const DRAFT_STORAGE_PREFIX = 'buzz-draft.v1:';
+
+interface SavedComposerDraft {
+  doc?: Record<string, unknown>;
+  attachments?: UploadedAttachment[];
+  updatedAt: number;
+}
+
+function draftStorageKey(scope: string): string {
+  return `${DRAFT_STORAGE_PREFIX}${scope}`;
+}
+
+function readSavedDraft(
+  scope: string,
+  schema: Schema = composerSchema,
+): { doc?: PMNode; attachments: UploadedAttachment[] } {
+  if (!scope || typeof localStorage === 'undefined') return { attachments: [] };
+  try {
+    const raw = localStorage.getItem(draftStorageKey(scope));
+    if (!raw) return { attachments: [] };
+    const parsed = JSON.parse(raw) as SavedComposerDraft | null;
+    if (!parsed || typeof parsed !== 'object') return { attachments: [] };
+    let doc: PMNode | undefined;
+    if (parsed.doc && typeof parsed.doc === 'object') {
+      try {
+        doc = schema.nodeFromJSON(parsed.doc);
+      } catch {
+        doc = undefined;
+      }
+    }
+    const attachments = Array.isArray(parsed.attachments)
+      ? parsed.attachments.filter(
+          (item): item is UploadedAttachment =>
+            Boolean(item && typeof item.id === 'string' && typeof item.url === 'string'),
+        )
+      : [];
+    return { doc, attachments };
+  } catch {
+    return { attachments: [] };
+  }
+}
+
+function writeSavedDraft(scope: string, doc: PMNode, attachments: UploadedAttachment[]): void {
+  if (!scope || typeof localStorage === 'undefined') return;
+  try {
+    const hasText = serializeDoc(doc).trim().length > 0;
+    if (!hasText && attachments.length === 0) {
+      localStorage.removeItem(draftStorageKey(scope));
+      return;
+    }
+    const payload: SavedComposerDraft = {
+      doc: doc.toJSON() as Record<string, unknown>,
+      ...(attachments.length > 0 ? { attachments } : {}),
+      updatedAt: Date.now(),
+    };
+    localStorage.setItem(draftStorageKey(scope), JSON.stringify(payload));
+  } catch {
+    // Ignore storage quota / private-mode errors
+  }
+}
+
+function clearSavedDraft(scope: string): void {
+  if (!scope || typeof localStorage === 'undefined') return;
+  try {
+    localStorage.removeItem(draftStorageKey(scope));
+  } catch {
+    // Ignore storage errors
+  }
 }
 
 export interface ProseMirrorComposerHandle {
@@ -458,7 +528,9 @@ export function ProseMirrorComposer({
 
   const [isEmpty, setIsEmpty] = useState(true);
   const [activeFormats, setActiveFormats] = useState<ComposerFormat[]>([]);
-  const [attachments, setAttachments] = useState<UploadedAttachment[]>([]);
+  const [attachments, setAttachments] = useState<UploadedAttachment[]>(() => readSavedDraft(draftScope).attachments);
+  const loadedScopeRef = useRef<string>(draftScope);
+  const skipNextAttachmentsPersistRef = useRef(false);
   const [uploading, setUploading] = useState(false);
   const [sending, setSending] = useState(false);
   const [sendError, setSendError] = useState<string | null>(null);
@@ -506,7 +578,7 @@ export function ProseMirrorComposer({
       format === 'code' ||
       format === 'spoiler'
     ) {
-      const markType: MarkType | undefined = composerSchema.marks[format];
+      const markType: MarkType | undefined = view.state.schema.marks[format];
       if (markType) {
         toggleMark(markType)(view.state, view.dispatch);
       }
@@ -522,7 +594,7 @@ export function ProseMirrorComposer({
     const { $from } = view.state.selection;
     const existing = $from
       .marks()
-      .find((m) => m.type === composerSchema.marks.link);
+      .find((m) => m.type === view.state.schema.marks.link);
     setLinkDraft({
       open: true,
       url: typeof existing?.attrs.href === 'string' ? existing.attrs.href : 'https://',
@@ -537,10 +609,11 @@ export function ProseMirrorComposer({
       view?.focus();
       return;
     }
-    const linkMark = composerSchema.marks.link.create({ href: trimmed });
+    const schema = view.state.schema;
+    const linkMark = schema.marks.link.create({ href: trimmed });
     const { from, to, empty } = view.state.selection;
     if (empty) {
-      const tr = view.state.tr.insert(from, composerSchema.text(trimmed, [linkMark]));
+      const tr = view.state.tr.insert(from, schema.text(trimmed, [linkMark]));
       view.dispatch(tr.scrollIntoView());
     } else {
       const tr = view.state.tr.addMark(from, to, linkMark);
@@ -561,13 +634,14 @@ export function ProseMirrorComposer({
     const view = viewRef.current;
     const ms = stateRef.current.mentionState;
     if (!view || !ms) return;
-    const mentionNode = composerSchema.nodes.mention.create({
+    const schema = view.state.schema;
+    const mentionNode = schema.nodes.mention.create({
       id: candidate.id,
       label: candidate.name,
     });
     const tr = view.state.tr.replaceWith(ms.from, ms.to, [
       mentionNode,
-      composerSchema.text('\u00a0'),
+      schema.text('\u00a0'),
     ]);
     tr.setSelection(TextSelection.create(tr.doc, ms.from + 2));
     view.dispatch(tr);
@@ -582,10 +656,11 @@ export function ProseMirrorComposer({
       insertMention(candidate: Pick<MentionCandidate, 'id' | 'name'>) {
         const view = viewRef.current;
         if (!view || stateRef.current.disabled) return;
+        const schema = view.state.schema;
         const firstParagraph = view.state.doc.firstChild;
         const firstInline = firstParagraph?.firstChild;
         const alreadyMentionedAtStart =
-          (firstInline?.type === composerSchema.nodes.mention &&
+          (firstInline?.type === schema.nodes.mention &&
             firstInline.attrs.id === candidate.id) ||
           view.state.doc.textContent
             .trimStart()
@@ -595,14 +670,14 @@ export function ProseMirrorComposer({
           view.focus();
           return;
         }
-        const mentionNode = composerSchema.nodes.mention.create({
+        const mentionNode = schema.nodes.mention.create({
           id: candidate.id,
           label: candidate.name,
         });
         const { from, to } = view.state.selection;
         const tr = view.state.tr.replaceWith(from, to, [
           mentionNode,
-          composerSchema.text('\u00a0'),
+          schema.text('\u00a0'),
         ]);
         tr.setSelection(TextSelection.create(tr.doc, from + 2));
         view.dispatch(tr.scrollIntoView());
@@ -645,14 +720,26 @@ export function ProseMirrorComposer({
     try {
       await onSend(text, files, messageId);
       lastAttempt.current = null;
-      if (viewRef.current !== view) return;
+      const remainingAttachments =
+        files.length > 0
+          ? stateRef.current.attachments.filter((file) => !files.includes(file))
+          : stateRef.current.attachments;
+      if (viewRef.current !== view) {
+        if (remainingAttachments.length === 0) clearSavedDraft(scope);
+        return;
+      }
       if (view.state.doc.eq(doc)) {
-        const fresh = EditorState.create({ schema: composerSchema, plugins: view.state.plugins });
+        const fresh = EditorState.create({ schema: view.state.schema, plugins: view.state.plugins });
         view.updateState(fresh);
         setIsEmpty(true);
         setActiveFormats([]);
         setMentionState(null);
         setMentionIndex(0);
+        if (remainingAttachments.length === 0) {
+          clearSavedDraft(scope);
+        } else {
+          writeSavedDraft(scope, fresh.doc, remainingAttachments);
+        }
       }
       if (files.length > 0) {
         setAttachments((current) => current.filter((file) => !files.includes(file)));
@@ -761,10 +848,11 @@ export function ProseMirrorComposer({
           if (dispatch) dispatch(state.tr.insertText('\n').scrollIntoView());
           return true;
         }
-        if (dispatch) {
+        const hardBreak = state.schema.nodes.hard_break;
+        if (dispatch && hardBreak) {
           dispatch(
             state.tr
-              .replaceSelectionWith(composerSchema.nodes.hard_break.create())
+              .replaceSelectionWith(hardBreak.create())
               .scrollIntoView(),
           );
         }
@@ -777,10 +865,18 @@ export function ProseMirrorComposer({
       },
     });
 
+    const initialDraft = readSavedDraft(stateRef.current.draftScope, composerSchema);
+    loadedScopeRef.current = stateRef.current.draftScope;
     const state = EditorState.create({
       schema: composerSchema,
+      ...(initialDraft.doc
+        ? { doc: initialDraft.doc, selection: Selection.atEnd(initialDraft.doc) }
+        : {}),
       plugins: [history(), customKeymap, keymap(baseKeymap)],
     });
+    if (initialDraft.doc) {
+      setIsEmpty(serializeDoc(initialDraft.doc).trim().length === 0);
+    }
 
     const view = new EditorView(hostRef.current, {
       state,
@@ -795,8 +891,16 @@ export function ProseMirrorComposer({
         view.updateState(nextState);
         const text = serializeDoc(nextState.doc);
         setIsEmpty(text.trim().length === 0);
-        if (tr.docChanged && text.trim().length > 0) {
-          stateRef.current.onTyping?.();
+        if (tr.docChanged) {
+          setSendError(null);
+          writeSavedDraft(
+            stateRef.current.draftScope,
+            nextState.doc,
+            stateRef.current.attachments,
+          );
+          if (text.trim().length > 0) {
+            stateRef.current.onTyping?.();
+          }
         }
         setActiveFormats(getActiveFormats(nextState));
         const ms = getActiveMentionAtCursor(nextState);
@@ -823,6 +927,41 @@ export function ProseMirrorComposer({
       viewRef.current = null;
     };
   }, []);
+
+  // Restore saved draft whenever draftScope changes (e.g. switching channels or threads)
+  useEffect(() => {
+    const view = viewRef.current;
+    if (!view || loadedScopeRef.current === draftScope) return;
+    loadedScopeRef.current = draftScope;
+    const restored = readSavedDraft(draftScope, view.state.schema);
+    const nextState = EditorState.create({
+      schema: view.state.schema,
+      ...(restored.doc
+        ? { doc: restored.doc, selection: Selection.atEnd(restored.doc) }
+        : {}),
+      plugins: view.state.plugins,
+    });
+    view.updateState(nextState);
+    skipNextAttachmentsPersistRef.current = true;
+    setAttachments(restored.attachments);
+    setIsEmpty(serializeDoc(nextState.doc).trim().length === 0);
+    setActiveFormats(getActiveFormats(nextState));
+    setMentionState(null);
+    setMentionIndex(0);
+    setSendError(null);
+    lastAttempt.current = null;
+  }, [draftScope]);
+
+  // Keep localStorage synced when attachments are added/removed
+  useEffect(() => {
+    const view = viewRef.current;
+    if (!view || loadedScopeRef.current !== draftScope) return;
+    if (skipNextAttachmentsPersistRef.current) {
+      skipNextAttachmentsPersistRef.current = false;
+      return;
+    }
+    writeSavedDraft(draftScope, view.state.doc, attachments);
+  }, [attachments, draftScope]);
 
   // Re-evaluate ProseMirror's contenteditable attribute whenever `disabled` changes
   // (fixes initial channel load leaving contenteditable="false" after /api/bootstrap resolves).
@@ -856,6 +995,7 @@ export function ProseMirrorComposer({
           data-composer-surface=""
           data-attachments={attachments.length > 0 || undefined}
           data-disabled={disabled || undefined}
+          data-error={sendError ? '' : undefined}
           onSubmit={(e) => {
             e.preventDefault();
             void triggerSend();
@@ -1019,9 +1159,6 @@ export function ProseMirrorComposer({
             </div>
           </div>
 
-          {sendError && (
-            <p className={styles.composerStatus} role="alert">{sendError}</p>
-          )}
           <div className={styles.composerActions}>
             <div className={styles.composerToolRow}>
               <div className={styles.composerLeadingTools} style={{ marginInlineEnd: 'auto' }}>
@@ -1078,6 +1215,30 @@ export function ProseMirrorComposer({
             </div>
           </div>
         </form>
+        {sendError && (
+          <div className={styles.composerError} role="alert" data-composer-error="">
+            <span className={styles.composerErrorText}>{sendError}</span>
+            <div className={styles.composerErrorActions}>
+              <Button
+                type="button"
+                variant="ghost"
+                size="xs"
+                disabled={!canSend}
+                onClick={() => void triggerSend()}
+              >
+                Retry
+              </Button>
+              <IconButton
+                hint="familiar"
+                size="xs"
+                type="button"
+                aria-label="Dismiss error"
+                onClick={() => setSendError(null)}
+                icon={<XIcon size={12} aria-hidden="true" />}
+              />
+            </div>
+          </div>
+        )}
       </div>
     </div>
   );

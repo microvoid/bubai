@@ -159,7 +159,10 @@ describe('Web composer @ mention E2E (real headless Chrome)', () => {
       chromeBin,
       [
         '--headless=new',
+        '--disable-gpu',
+        '--no-sandbox',
         `--remote-debugging-port=${CDP_PORT}`,
+        `--user-data-dir=/tmp/bubai-e2e-mention-${Date.now()}`,
         '--no-first-run',
         '--no-default-browser-check',
         '--window-size=1440,900',
@@ -330,6 +333,81 @@ describe('Web composer @ mention E2E (real headless Chrome)', () => {
 
     assert.equal(inserted.mentionId, expectedId);
     assert.equal(inserted.popupOpen, false);
+    assert.deepEqual(cdp.consoleErrors, []);
+  });
+
+  it('persists unsent composer draft (including mention chip and text) across page reload and clears storage when emptied', async () => {
+    assert.ok(cdp);
+    // Append unsent text after the mention chip inserted in the previous test
+    await cdp.send('Input.insertText', { text: 'unsent draft survives reload' });
+
+    await cdp.waitFor(() =>
+      cdp!.eval<boolean>(`(() => {
+        const text = document.querySelector('.spike-editor')?.textContent || '';
+        const keys = Object.keys(localStorage).filter((k) => k.startsWith('buzz-draft.v1:'));
+        return text.includes('unsent draft survives reload') && keys.length > 0;
+      })()`),
+    );
+
+    // Reload the page completely
+    await cdp.send('Page.reload', {});
+    const restored = await cdp.waitFor(
+      () =>
+        cdp!.eval<{ text: string; hasMention: boolean } | null>(`(() => {
+          const editor = document.querySelector('.spike-editor');
+          if (!editor) return null;
+          const text = editor.textContent || '';
+          const hasMention = Boolean(editor.querySelector('[data-mention-id]'));
+          if (!text.includes('unsent draft survives reload') || !hasMention) return null;
+          return { text, hasMention };
+        })()`),
+      10000,
+    );
+    assert.equal(restored.hasMention, true);
+    assert.match(restored.text, /unsent draft survives reload/);
+
+    // Verify Shift+Enter inserts a newline at the end of the restored draft (not at the start)
+    await cdp.eval(`document.querySelector('.spike-editor')?.focus()`);
+    await cdp.send('Input.dispatchKeyEvent', {
+      type: 'keyDown',
+      key: 'Enter',
+      code: 'Enter',
+      windowsVirtualKeyCode: 13,
+      modifiers: 8,
+    });
+    await cdp.send('Input.dispatchKeyEvent', {
+      type: 'keyUp',
+      key: 'Enter',
+      code: 'Enter',
+      windowsVirtualKeyCode: 13,
+      modifiers: 8,
+    });
+    await cdp.send('Input.insertText', { text: 'second line after Shift+Enter' });
+
+    const afterNewline = await cdp.waitFor(() =>
+      cdp!.eval<{ html: string; hasBr: boolean } | null>(`(() => {
+        const editor = document.querySelector('.spike-editor');
+        if (!editor) return null;
+        const html = editor.innerHTML;
+        if (!html.includes('second line after Shift+Enter')) return null;
+        return { html, hasBr: Boolean(editor.querySelector('br')) };
+      })()`),
+    );
+    assert.equal(afterNewline.hasBr, true, `Expected <br> after Shift+Enter, got: ${afterNewline.html}`);
+    assert.ok(
+      afterNewline.html.indexOf('unsent draft survives reload') <
+        afterNewline.html.indexOf('second line after Shift+Enter'),
+      `Expected restored draft cursor at end so Shift+Enter appends after existing text, got: ${afterNewline.html}`,
+    );
+
+    // Clear composer -> localStorage draft entry should be removed
+    await cdp.clearComposer();
+    const cleared = await cdp.waitFor(() =>
+      cdp!.eval<boolean>(
+        `Object.keys(localStorage).filter((k) => k.startsWith('buzz-draft.v1:')).length === 0`,
+      ),
+    );
+    assert.equal(cleared, true);
     assert.deepEqual(cdp.consoleErrors, []);
   });
 });

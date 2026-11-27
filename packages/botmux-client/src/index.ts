@@ -3,6 +3,7 @@ import { promisify } from 'node:util';
 import fs from 'node:fs';
 import type { TriggerRequest, TriggerResponse } from './trigger-types.js';
 
+export * from './antigravity-result.js';
 export * from './trigger-types.js';
 export * from './progress/index.js';
 
@@ -48,6 +49,8 @@ export interface BotmuxSession {
   backendType?: string;
   queued?: boolean;
   tuiPromptActive?: boolean;
+  backgroundTaskCount?: number | null;
+  busySinceAt?: number | null;
   title?: string;
   workingDir?: string;
   createdAt?: string | number;
@@ -446,7 +449,7 @@ export class BotmuxClient {
     };
   }
 
-  async triggerTurn(params: {
+  buildTurnTrigger(params: {
     botId: string;
     cliId?: string;
     sessionId?: string;
@@ -454,7 +457,8 @@ export class BotmuxClient {
     senderName: string;
     systemPrompt?: string;
     context?: BuzzTurnContext;
-  }): Promise<TriggerResponse> {
+    idempotencyKey?: string;
+  }): TriggerRequest {
     const trimmedSystemPrompt = params.systemPrompt?.trim();
     const outbound = params.context?.outboundApi?.endpoint ? params.context.outboundApi : undefined;
     const requiresExplicitOutbound = Boolean(
@@ -482,11 +486,11 @@ export class BotmuxClient {
             : []),
         ];
 
-    const body: TriggerRequest = {
+    return {
       source: {
         type: 'headless',
         connectorId: 'buzz-botmux',
-        requestId: `buzz_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
+        requestId: params.idempotencyKey ?? `buzz_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
       },
       target: {
         kind: 'turn',
@@ -516,22 +520,38 @@ export class BotmuxClient {
       ].join('\n'),
       options: {
         asyncReturnSessionId: true,
+        ...(params.idempotencyKey && (params.sessionId
+          ? { turnIdempotencyKey: params.idempotencyKey }
+          : { idempotencyKey: params.idempotencyKey })),
       },
     };
+  }
 
+  async submitTrigger(body: TriggerRequest, signal?: AbortSignal): Promise<{ httpStatus: number; result: TriggerResponse }> {
     const res = await this.request('/api/trigger', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body),
+      signal,
     });
 
-    return (await res.json()) as TriggerResponse;
+    const result = (await res.json().catch(() => undefined)) as TriggerResponse | undefined;
+    if (result && typeof result.ok === 'boolean') return { httpStatus: res.status, result };
+    if (!res.ok) {
+      return { httpStatus: res.status, result: { ok: false, error: `Botmux trigger returned HTTP ${res.status}` } };
+    }
+    throw new Error('Unexpected Botmux trigger response');
   }
 
-  async pollTriggerResult(sessionId: string, triggerId?: string): Promise<TriggerResponse> {
+  async triggerTurn(params: Parameters<BotmuxClient['buildTurnTrigger']>[0]): Promise<TriggerResponse> {
+    return (await this.submitTrigger(this.buildTurnTrigger(params))).result;
+  }
+
+  async pollTriggerResult(sessionId: string, triggerId?: string, signal?: AbortSignal): Promise<TriggerResponse> {
     const query = triggerId ? `?triggerId=${encodeURIComponent(triggerId)}` : '';
     const res = await this.request(
-      `/api/sessions/${encodeURIComponent(sessionId)}/trigger-result${query}`
+      `/api/sessions/${encodeURIComponent(sessionId)}/trigger-result${query}`,
+      { signal },
     );
     if (!res.ok && res.status !== 400 && res.status !== 404) {
       throw new Error(`Botmux result lookup returned HTTP ${res.status}`);

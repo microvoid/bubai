@@ -2,13 +2,13 @@ import { afterEach, beforeEach, expect, test } from 'bun:test';
 import { mkdir, mkdtemp, rm, utimes, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { readAntigravityResult } from './antigravity-result.js';
+import { readAntigravityTurnOutcome } from './antigravity-result.js';
 
 const conversationId = '706093e6-0317-4b9f-9905-7dccf5b73141';
 const triggerId = 'trg_test';
 const botId = 'gemini';
 const channelId = 'channel-1';
-const createdAt = new Date(Date.now() - 20_000);
+const createdAt = new Date(Date.now() - 90_000);
 const inputTime = new Date(createdAt.getTime() + 1_000).toISOString();
 const answerTime = new Date(createdAt.getTime() + 5_000).toISOString();
 let brainDir: string;
@@ -25,6 +25,7 @@ function userInput(overrides: {
   triggerId?: string;
   botId?: string;
   channelId?: string;
+  placeholderMessageId?: string;
   connectorId?: string;
   afterBotmuxBlock?: string;
 } = {}) {
@@ -36,7 +37,11 @@ function userInput(overrides: {
       trusted: false,
       payload: { conversation: {
         channel: { id: channelId },
-        outboundApi: { channelId: overrides.channelId ?? channelId, botId: overrides.botId ?? botId },
+        outboundApi: {
+          channelId: overrides.channelId ?? channelId,
+          botId: overrides.botId ?? botId,
+          placeholderMessageId: overrides.placeholderMessageId,
+        },
       } },
     },
     options: { asyncReturnSessionId: true },
@@ -76,18 +81,25 @@ function reply(content: string) {
 
 async function writeTranscript(
   steps: unknown[],
-  { compact = false, partial = false } = {}
+  { compact = false, partial = false, recent = false } = {}
 ) {
   const dir = join(brainDir, conversationId, '.system_generated', 'logs');
   await mkdir(dir, { recursive: true });
   const path = join(dir, compact ? 'transcript.jsonl' : 'transcript_full.jsonl');
   const data = steps.map((step) => JSON.stringify(step)).join('\n');
   await writeFile(path, partial ? data : `${data}\n`);
-  await utimes(path, new Date(answerTime), new Date(answerTime));
+  const modifiedAt = recent ? new Date(Date.now() - 5_000) : new Date(answerTime);
+  await utimes(path, modifiedAt, modifiedAt);
 }
 
-function readResult() {
-  return readAntigravityResult({ triggerId, botId, channelId, createdAt, brainDir });
+function readOutcome() {
+  return readAntigravityTurnOutcome({ triggerId, botId, channelId, createdAt, brainDir });
+}
+
+async function readResult() {
+  const outcome = await readOutcome();
+  expect(outcome?.status).not.toBe('no_reply');
+  return outcome?.status === 'completed' ? outcome.content : undefined;
 }
 
 test('finds the exact turn and prefers the complete transcript', async () => {
@@ -112,6 +124,15 @@ test('requires the matching final request block, connector, bot, and channel', a
     userInput({ channelId: 'another-channel' }), reply('different channel'),
   ]);
   expect(await readResult()).toBeUndefined();
+});
+
+test('requires the exact reply placeholder when provided', async () => {
+  const lookup = { triggerId, botId, channelId, createdAt, brainDir, placeholderMessageId: 'reply-1' };
+  await writeTranscript([userInput({ placeholderMessageId: 'reply-2' }), reply('Different reply card')]);
+  expect(await readAntigravityTurnOutcome(lookup)).toBeUndefined();
+
+  await writeTranscript([userInput({ placeholderMessageId: 'reply-1' }), reply('Original reply')]);
+  expect(await readAntigravityTurnOutcome(lookup)).toEqual({ status: 'completed', content: 'Original reply' });
 });
 
 test('waits for the real final after a background task and its continuation', async () => {
@@ -145,4 +166,21 @@ test('refuses interrupted, partial, and truncated finals', async () => {
 test('accepts a complete compact transcript when there is no full transcript', async () => {
   await writeTranscript([userInput(), reply('Compact final')], { compact: true });
   expect(await readResult()).toBe('Compact final');
+});
+
+test('reports no reply only for a quiet full transcript ending at the exact request', async () => {
+  await writeTranscript([userInput()], { compact: true });
+  expect(await readOutcome()).toBeUndefined();
+
+  await writeTranscript([userInput()], { recent: true });
+  expect(await readOutcome()).toBeUndefined();
+
+  await writeTranscript([userInput(), { type: 'GENERIC', status: 'RUNNING' }]);
+  expect(await readOutcome()).toBeUndefined();
+
+  await writeTranscript([userInput(), userInput({ triggerId: 'trg_follow_up' })]);
+  expect(await readOutcome()).toBeUndefined();
+
+  await writeTranscript([userInput()]);
+  expect(await readOutcome()).toEqual({ status: 'no_reply' });
 });

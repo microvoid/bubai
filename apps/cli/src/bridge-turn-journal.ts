@@ -16,6 +16,7 @@ export type PendingTurn = {
 } & (
   | { stage: 'dispatch'; request: TriggerRequest }
   | { stage: 'poll'; sessionId: string; triggerId: string; acceptedAt: number }
+  | { stage: 'direct' }
   | { stage: 'deliver'; completion: TurnCompletion }
 );
 
@@ -30,6 +31,7 @@ function isPendingTurn(value: unknown): value is PendingTurn {
       typeof turn.bindingKey !== 'string' || !Number.isFinite(turn.deadline) ||
       (turn.createdAt !== undefined && !Number.isFinite(turn.createdAt))) return false;
   switch (turn.stage) {
+    case 'direct': return true;
     case 'dispatch':
       return turn.request?.target?.kind === 'turn' && turn.request.source?.type === 'headless' &&
         typeof turn.request.target.botId === 'string' && turn.request.envelope?.trusted === false;

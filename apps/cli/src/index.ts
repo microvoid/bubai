@@ -3,7 +3,9 @@ import { BubaiClient } from '@buzz-botmux/chat-client';
 import { version } from '../package.json';
 import { loadCliConfig, saveCliConfig } from './config';
 import { daemonRequest, runDaemon, startDaemon } from './daemon';
-import { startBotmuxBridge } from './bridge-botmux';
+import { configureAgents, selectRuntime, type RuntimeMode } from './direct-config';
+import { startRuntime } from './runtime';
+import { superviseDirectCli } from './direct-adapters/worker';
 import { listCommunities, resolveAndActivateCommunity } from './community';
 
 interface ParsedArgs {
@@ -62,7 +64,10 @@ Usage:
   bub community list [--server <url>] [--token <token>] [--json]
   bub community use <name|slug|id> [--server <url>] [--token <token>] [--json]
   bub config set --server <url> [--token <token>]
-  bub start [same options as bridge botmux]
+  bub start [--mode auto|botmux|direct] [--cli claude,codex] [--cwd <dir>] [--permission read-only|workspace-write|full-access] [--concurrency <n>]
+  bub bridge direct [--cli claude,codex] [--cwd <dir>]
+  bub agent add --cli <claude|codex> [--name <name>] [--cwd <dir>] [--permission <mode>]
+  bub agent remove <externalId|name>
   bub stop
   bub status [--server <url>] [--token <token>] [--json]
   bub agent create --name <name> [--id <id>] [--external-id <ext>] [--community <name|slug|id>] [--channel <name|id>] [--auto-reply] [--issue-key]
@@ -218,6 +223,7 @@ async function resolveChannelId(sdk: BubaiClient, channelRef: string): Promise<s
 }
 
 async function main() {
+  if (process.argv[2] === '_direct-worker') return superviseDirectCli(process.argv.slice(3));
   const { positionals, flags } = parseArgs(process.argv.slice(2));
   const [cmd, sub] = positionals;
 
@@ -255,7 +261,11 @@ async function main() {
   }
 
   if (cmd === 'start') {
-    await startDaemon(process.argv.slice(3));
+    await startDaemon(async () => {
+      const endpoint = getStringFlag(flags, 'botmux') || process.env.BOTMUX_ENDPOINT || 'http://127.0.0.1:7891';
+      const { mode, selectedAgents } = await selectRuntime(flags, endpoint);
+      return [...process.argv.slice(3), '--runtime', mode, ...(selectedAgents ? ['--selected-agents', selectedAgents.join(',')] : [])];
+    });
     return;
   }
   if (cmd === 'stop') {
@@ -264,6 +274,18 @@ async function main() {
     return;
   }
 
+  if (cmd === 'agent' && sub === 'add') {
+    console.log(JSON.stringify(configureAgents(flags), null, 2));
+    return;
+  }
+  if (cmd === 'agent' && sub === 'remove') {
+    const agents = loadCliConfig().localAgents ?? [];
+    const matches = agents.filter(agent => agent.externalId === positionals[2] || agent.name === positionals[2]);
+    if (matches.length !== 1) throw new Error('Specify a unique local agent name or external ID');
+    saveCliConfig({ localAgents: agents.filter(agent => agent !== matches[0]) });
+    console.log('Removed local configuration. Restart the bridge to apply.');
+    return;
+  }
   const { serverUrl, token } = resolveConnection(flags);
 
   if (cmd === 'login') {
@@ -314,6 +336,7 @@ async function main() {
   if (cmd === 'status') {
     const bridge = await daemonRequest();
     if (!flags.json) console.log(`Local bridge: ${bridge?.state ?? 'stopped'}`);
+    if (bridge?.mode && !flags.json) console.log(`Mode: ${bridge.mode}; direct agents online: ${bridge.directAgents.join(', ') || 'none'}`);
     const [instance, { agents }] = await Promise.all([sdk.getInstance(), sdk.listAgents()]);
     if (flags.json) {
       console.log(JSON.stringify({ ok: true, serverUrl, instance, agents, bridge }, null, 2));
@@ -399,7 +422,7 @@ async function main() {
     return;
   }
 
-  if ((cmd === 'bridge' && sub === 'botmux') || cmd === '_bridge-daemon') {
+  if ((cmd === 'bridge' && ['botmux', 'direct'].includes(sub)) || cmd === '_bridge-daemon') {
     const botmuxEndpoint =
       getStringFlag(flags, 'botmux') || process.env.BOTMUX_ENDPOINT || 'http://127.0.0.1:7891';
     const botmuxToken = getStringFlag(flags, 'botmux-token') || process.env.BOTMUX_TOKEN;
@@ -425,8 +448,18 @@ async function main() {
       autoReply: flags['auto-reply'] !== undefined ? Boolean(flags['auto-reply']) : undefined,
       pollMs,
     };
-    if (cmd === '_bridge-daemon') return runDaemon(options);
-    const bridge = await startBotmuxBridge(options);
+    const timeout = Number(flags['turn-timeout-ms'] ?? 1_800_000);
+    const concurrency = Number(flags.concurrency ?? 3);
+    if (!Number.isSafeInteger(concurrency) || concurrency < 1 || !Number.isSafeInteger(timeout) || timeout < 1 || timeout > 2147483647)
+      throw new Error('Expected positive integer concurrency and turn timeout');
+    const runtimeOptions = { ...options, turnTimeoutMs: timeout };
+    if (cmd === '_bridge-daemon') {
+      const mode = (getStringFlag(flags, 'runtime') || 'botmux') as RuntimeMode;
+      const selected = getStringFlag(flags, 'selected-agents')?.split(',');
+      return runDaemon(runtimeOptions, mode, concurrency, selected);
+    }
+    const selection = await selectRuntime({ ...flags, mode: sub }, botmuxEndpoint);
+    const bridge = await startRuntime(runtimeOptions, selection.mode, concurrency, selection.selectedAgents);
 
     const shutdown = () => {
       bridge.stop();

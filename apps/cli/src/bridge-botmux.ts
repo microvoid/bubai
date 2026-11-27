@@ -1,41 +1,29 @@
+import { isRetryable, startRuntimeBridge } from './bridge-core';
+import type { GatewayOptions, TurnContext } from './bridge-provider';
 import { setTimeout as delay } from 'node:timers/promises';
 import {
   BotmuxClient,
   isIdleLocalAntigravitySession,
   isLocalBotmuxEndpoint,
-  progressSnapshotEquals,
   readAntigravityTurnOutcome,
   readTurnProgress,
-  type AgentProgressSnapshot,
   type BotmuxBot,
   type BotmuxSession,
   type TriggerResponse,
 } from '@buzz-botmux/botmux-client';
 import {
-  BubaiClient,
   normalizeServerUrl,
-  type BotGatewayAgentDescriptor,
-  type BotGatewayHandle,
   type BotTurnRequestedEvent,
 } from '@buzz-botmux/chat-client';
 import { openTurnJournal, type PendingTurn, type TurnCompletion } from './bridge-turn-journal';
 
-export interface BotmuxBridgeOptions {
-  serverUrl: string;
-  /** Human session token (used for provisioning/issuing bot_ keys) OR legacy static token */
-  token?: string;
-  /** Optional explicit Bot API key (`bot_...` or `bot-server_...`) for direct /ws/bot connection */
-  botToken?: string;
+export interface BotmuxBridgeOptions extends GatewayOptions {
   botmuxEndpoint: string;
   botmuxToken?: string;
   botIds?: string[];
-  channelRef?: string;
-  community?: string;
-  autoReply?: boolean;
   pollMs?: number;
   turnTimeoutMs?: number;
-  onDisconnect?: (agentIds: string[]) => void;
-  onReady?: (info: { agentIds: string[]; connectionId: string }) => void;
+
 }
 
 const TURN_TIMEOUT_MS = 30 * 60_000;
@@ -49,14 +37,6 @@ const BOTMUX_CAPABILITIES = [
   'terminal_attach',
   'session_control',
 ];
-
-function isBotCredential(token?: string): boolean {
-  return Boolean(token && (token.startsWith('bot_') || token.startsWith('bot-server_')));
-}
-
-function isRetryable(status?: number): boolean {
-  return status === undefined || status === 408 || status === 429 || status >= 500;
-}
 
 function terminalResult(result: TriggerResponse): TurnCompletion | undefined {
   if (result.state === 'completed') {
@@ -85,7 +65,6 @@ export async function startBotmuxBridge(options: BotmuxBridgeOptions): Promise<{
   const pollMs = options.pollMs ?? 500;
   const turnTimeoutMs = options.turnTimeoutMs ?? TURN_TIMEOUT_MS;
   const sessionBindings = new Map<string, string>();
-  const activeTurns = new Set<string>();
   const controller = new AbortController();
   const { signal } = controller;
 
@@ -106,70 +85,6 @@ export async function startBotmuxBridge(options: BotmuxBridgeOptions): Promise<{
   const localAntigravityBots = new Set(isLocalBotmux
     ? bots.filter((bot) => bot.cliId === 'antigravity').map((bot) => bot.larkAppId)
     : []);
-  const explicitBotToken = options.botToken || (isBotCredential(options.token) ? options.token : undefined);
-  const humanToken = !isBotCredential(options.token) ? options.token : undefined;
-
-  const provisionedEntries: Array<{
-    descriptor: BotGatewayAgentDescriptor;
-    gatewayToken?: string;
-  }> = [];
-
-  if (explicitBotToken) {
-    // Pure bot-key runtime mode: connect directly without calling human /api/agents/provision
-    for (const bot of bots) {
-      provisionedEntries.push({
-        descriptor: {
-          id: bot.larkAppId,
-          externalId: bot.larkAppId,
-          name: bot.botName,
-          cliId: bot.cliId,
-          workingDir: bot.workingDir,
-          capabilities: BOTMUX_CAPABILITIES,
-        },
-        gatewayToken: explicitBotToken,
-      });
-    }
-  } else {
-    const provisionSdk = new BubaiClient({ baseUrl: options.serverUrl, token: humanToken });
-    for (const bot of bots) {
-      const isUuid =
-        options.channelRef &&
-        /^[a-f\d]{8}(?:-[a-f\d]{4}){3}-[a-f\d]{12}$/i.test(options.channelRef);
-      const provisioned = await provisionSdk.provisionAgent({
-        agentId: bot.larkAppId,
-        adapterType: 'gateway',
-        externalId: bot.larkAppId,
-        name: bot.botName,
-        cliId: bot.cliId,
-        workingDir: bot.workingDir || undefined,
-        capabilities: BOTMUX_CAPABILITIES,
-        ...(isUuid
-          ? { channelId: options.channelRef }
-          : options.channelRef
-            ? { channelName: options.channelRef }
-            : {}),
-        ...(options.community ? { community: options.community } : {}),
-        ...(options.autoReply !== undefined ? { autoReply: options.autoReply } : {}),
-        issueKey: Boolean(humanToken),
-        keyScope: 'bot',
-      });
-
-      provisionedEntries.push({
-        descriptor: {
-          id: provisioned.agent.id,
-          externalId: bot.larkAppId,
-          name: bot.botName,
-          cliId: bot.cliId,
-          workingDir: bot.workingDir,
-          capabilities: BOTMUX_CAPABILITIES,
-        },
-        gatewayToken: provisioned.apiKey || humanToken,
-      });
-    }
-  }
-
-  const gateways: BotGatewayHandle[] = [];
-
   const journal = openTurnJournal(normalizeServerUrl(options.serverUrl), botmux.getEndpoint());
 
   const prepareTurn = (event: BotTurnRequestedEvent): PendingTurn => {
@@ -327,7 +242,7 @@ export async function startBotmuxBridge(options: BotmuxBridgeOptions): Promise<{
 
   async function waitForResult(
     turn: Extract<PendingTurn, { stage: 'poll' }>,
-    sdk: BubaiClient,
+    publish: TurnContext['progress'],
   ): Promise<TurnCompletion> {
     const { messageId, agentId, sessionId, triggerId, acceptedAt, deadline } = turn;
     const adapterMeta = { adapter: 'bubai-cli-botmux', sessionId, triggerId };
@@ -339,8 +254,6 @@ export async function startBotmuxBridge(options: BotmuxBridgeOptions): Promise<{
     const readsLocalTranscript = separator > 0 && localAntigravityBots.has(runtimeBotId);
     const readsLocalProgress = separator > 0 && isLocalBotmux;
     let nextTranscriptCheck = acceptedAt + RESULT_NOT_FOUND_GRACE_MS;
-    let lastProgress: AgentProgressSnapshot | undefined;
-
     const syncProgress = async () => {
       if (!readsLocalProgress) return;
       const progress = await readTurnProgress({
@@ -352,10 +265,7 @@ export async function startBotmuxBridge(options: BotmuxBridgeOptions): Promise<{
         createdAt,
       }).catch(() => undefined);
       signal.throwIfAborted();
-      if (!progress || progressSnapshotEquals(lastProgress, progress)) return;
-      const sent = await sdk.sendBotProgress(messageId, progress).then(() => true, () => false);
-      signal.throwIfAborted();
-      if (sent) lastProgress = progress;
+      if (progress) await publish(progress);
     };
 
     for (;;) {
@@ -388,116 +298,27 @@ export async function startBotmuxBridge(options: BotmuxBridgeOptions): Promise<{
     }
   }
 
-  async function deliverTurn(turn: Extract<PendingTurn, { stage: 'deliver' }>, sdk: BubaiClient) {
-    let retryMs = 250;
-    for (;;) {
-      signal.throwIfAborted();
-      try {
-        await sdk.completeBotTurn(turn.messageId, turn.completion, { signal: requestSignal(5_000) });
-        break;
-      } catch (error) {
-        const status = (error as { status?: number }).status;
-        // The server may already have removed the card or made it non-settleable.
-        if (status === 404 || status === 409) break;
-        if (!isRetryable(status)) throw error;
-        await wait(retryMs);
-        retryMs = Math.min(retryMs * 2, 15_000);
-      }
-    }
-    signal.throwIfAborted();
-    journal.remove(turn.messageId);
-  }
-
-  const runTurn = async (initial: PendingTurn, sdk: BubaiClient, firstDispatch: boolean) => {
-    let turn = initial;
-    if (turn.stage === 'dispatch') {
-      turn = await dispatchTurn(turn, firstDispatch);
-      signal.throwIfAborted();
-      journal.save(turn);
-    }
-    if (turn.stage === 'poll') {
-      const { messageId, agentId, bindingKey, createdAt, deadline, sessionId } = turn;
-      sessionBindings.set(bindingKey, sessionId);
-      const completion = await waitForResult(turn, sdk);
-      signal.throwIfAborted();
-      turn = { messageId, agentId, bindingKey, createdAt, deadline, stage: 'deliver', completion };
-      journal.save(turn);
-    }
-    await deliverTurn(turn, sdk);
-  };
-
-  function trackTurn(
-    messageId: string,
-    sdk: BubaiClient,
-    load: () => { turn: PendingTurn; firstDispatch?: boolean } | undefined,
-  ) {
-    if (signal.aborted || activeTurns.has(messageId)) return;
-    activeTurns.add(messageId);
-    void (async () => {
-      const loaded = load();
-      if (loaded) await runTurn(loaded.turn, sdk, loaded.firstDispatch ?? false);
-    })().catch((error) => {
-      if (!signal.aborted) console.error(`Botmux bridge could not settle message ${messageId}:`, error);
-    }).finally(() => activeTurns.delete(messageId));
-  }
-
-  // Group entries by gatewayToken so a shared bot-server_ / static token uses 1 WS connection,
-  // while individual per-bot `bot_` keys each get their own scoped WS connection.
-  const groups = new Map<string, { token?: string; agents: BotGatewayAgentDescriptor[] }>();
-  for (const entry of provisionedEntries) {
-    const key = entry.gatewayToken || '__no_token__';
-    const existing = groups.get(key);
-    if (existing) {
-      existing.agents.push(entry.descriptor);
-    } else {
-      groups.set(key, { token: entry.gatewayToken, agents: [entry.descriptor] });
-    }
-  }
-
-  for (const group of groups.values()) {
-    const groupSdk = new BubaiClient({ baseUrl: options.serverUrl, token: group.token });
-    const gw = groupSdk.connectBotGateway({
-      agents: group.agents,
-      onStateChange: state => {
-        if (state === 'closed' || state === 'reconnecting') options.onDisconnect?.(group.agents.map(agent => agent.id));
-      },
-      onWelcome: (info) => {
-        console.log(
-          JSON.stringify({
-            event: 'bridge.ready',
-            connectionId: info.connectionId,
-            agentIds: info.agentIds,
-          }),
-        );
-        const welcomed = new Set(info.agentIds);
-        for (const turn of journal.list().sort((a, b) => a.deadline - b.deadline)) {
-          if (welcomed.has(turn.agentId)) trackTurn(turn.messageId, groupSdk, () => ({ turn }));
-        }
-        options.onReady?.(info);
-      },
-      onTurnRequested: (event) => {
-        if (!group.agents.some((agent) => agent.id === event.botId)) return;
-        const messageId = event.replyTarget.messageId;
-        trackTurn(messageId, groupSdk, () => {
-          const saved = journal.get(messageId);
-          if (saved) return saved.agentId === event.botId ? { turn: saved } : undefined;
-          const turn = prepareTurn(event);
-          journal.save(turn);
-          return { turn, firstDispatch: true };
-        });
-      },
-      onAskAnswered: (answer) => {
-        void botmux.answerAsk(answer);
-      },
-    });
-    gateways.push(gw);
-  }
-
-  return {
-    agentIds: provisionedEntries.map((e) => e.descriptor.id),
-    stop: () => {
-      controller.abort();
-      for (const gw of gateways) gw.close();
+  return startRuntimeBridge(options, {
+    async discoverAgents() {
+      return bots.map(bot => ({ id: bot.larkAppId, name: bot.botName, cliId: bot.cliId,
+        workingDir: bot.workingDir, capabilities: BOTMUX_CAPABILITIES }));
     },
-  };
+    prepareTurn,
+    async executeTurn({ initial, event, progress }) {
+      let turn = initial;
+      if (turn.stage === 'dispatch') {
+        turn = await dispatchTurn(turn, Boolean(event));
+        signal.throwIfAborted();
+        journal.save(turn);
+      }
+      if (turn.stage === 'poll') {
+        sessionBindings.set(turn.bindingKey, turn.sessionId);
+        return waitForResult(turn, progress);
+      }
+      if (turn.stage === 'deliver') return turn.completion;
+      throw new Error('Unexpected Botmux turn stage');
+    },
+    onAskAnswered: answer => { void botmux.answerAsk(answer); },
+    stop: () => controller.abort(),
+  }, journal);
 }

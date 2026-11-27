@@ -2,10 +2,34 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 
+import { randomUUID } from 'node:crypto';
+
+export type CliId = 'claude' | 'codex';
+export type PermissionMode = 'read-only' | 'workspace-write' | 'full-access';
+export interface DirectCliAgentConfig {
+  externalId: string;
+  cliId: CliId;
+  name: string;
+  workingDir: string;
+  permissionMode: PermissionMode;
+}
+
+export function writeJson(file: string, value: unknown) {
+  fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
+  const tmp = file + '.' + randomUUID();
+  try {
+    fs.writeFileSync(tmp, JSON.stringify(value, null, 2), { mode: 0o600, flag: 'wx' });
+    fs.renameSync(tmp, file);
+  } finally {
+    fs.rmSync(tmp, { force: true });
+  }
+}
+
 export interface BubaiCliConfig {
   serverUrl?: string;
   token?: string;
   userId?: string;
+  localAgents?: DirectCliAgentConfig[];
 }
 
 export function getConfigPath(overrideDir?: string): string {
@@ -42,7 +66,6 @@ export function saveCliConfig(
     ...(serverChanged ? { token: undefined } : {}),
   };
   if (next.token === undefined) delete next.token;
-  fs.mkdirSync(path.dirname(file), { recursive: true });
-  fs.writeFileSync(file, JSON.stringify(next, null, 2), 'utf8');
+  writeJson(file, next);
   return next;
 }

@@ -6,9 +6,11 @@ import os from 'node:os';
 import path from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { getConfigPath } from './config';
-import { startBotmuxBridge, type BotmuxBridgeOptions } from './bridge-botmux';
+import { startRuntime } from './runtime';
+import type { RuntimeMode } from './direct-config';
+import { type BotmuxBridgeOptions } from './bridge-botmux';
 
-type Status = { state: 'connecting' | 'online'; pid: number; online: number };
+type Status = { mode: RuntimeMode; directAgents: string[]; state: 'connecting' | 'online'; pid: number; online: number };
 
 function socketPath() {
   const scope = createHash('sha256').update(path.resolve(getConfigPath())).digest('hex').slice(0, 24);
@@ -39,9 +41,9 @@ export function daemonRequest(stop = false): Promise<Status | null> {
   });
 }
 
-export async function runDaemon(options: BotmuxBridgeOptions) {
+export async function runDaemon(options: BotmuxBridgeOptions, mode: RuntimeMode, concurrency?: number, selectedAgents?: string[]) {
   const online = new Set<string>();
-  let bridge: Awaited<ReturnType<typeof startBotmuxBridge>> | undefined;
+  let bridge: Awaited<ReturnType<typeof startRuntime>> | undefined;
   const server = net.createServer(client => {
     client.on('error', () => client.destroy());
     client.setTimeout(3000, () => client.destroy());
@@ -51,7 +53,7 @@ export async function runDaemon(options: BotmuxBridgeOptions) {
       if (!command.includes('\n')) return;
       const status: Status = {
         state: bridge && bridge.agentIds.every(id => online.has(id)) ? 'online' : 'connecting',
-        pid: process.pid, online: online.size,
+        pid: process.pid, online: online.size, mode, directAgents: bridge?.directIds.filter(id => online.has(id)) ?? [],
       };
       client.end(JSON.stringify(status));
       if (command.trim() === 'stop') shutdown();
@@ -69,18 +71,18 @@ export async function runDaemon(options: BotmuxBridgeOptions) {
   process.once('SIGTERM', shutdown);
   process.once('SIGINT', shutdown);
   try {
-    bridge = await startBotmuxBridge({
+    bridge = await startRuntime({
       ...options,
       onReady: info => info.agentIds.forEach(id => online.add(id)),
       onDisconnect: ids => ids.forEach(id => online.delete(id)),
-    });
+    }, mode, concurrency, selectedAgents);
   } catch (err) {
     server.close();
     throw err;
   }
 }
 
-export async function startDaemon(args: string[]) {
+export async function startDaemon(prepareArgs: () => Promise<string[]>) {
   let status = await daemonRequest();
   if (status) {
     const deadline = Date.now() + 60_000;
@@ -92,6 +94,7 @@ export async function startDaemon(args: string[]) {
     console.log(`Bridge already running (${status.state}, PID ${status.pid}).`);
     return;
   }
+  const args = await prepareArgs();
   const dir = path.dirname(getConfigPath());
   fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
   const socket = socketPath();

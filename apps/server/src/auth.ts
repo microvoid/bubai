@@ -11,34 +11,51 @@ const DEFAULT_DEV_SECRET = 'bubai-dev-better-auth-secret-change-in-production-01
 
 export { resolveDisplayName };
 
-/**
- * Default OTP sender: uses Resend HTTP API when `RESEND_API_KEY` is configured,
- * otherwise falls back to `consoleVerificationOTP` for local development.
- */
+interface CloudflareEmailResponse {
+  success: boolean;
+  result?: {
+    delivered?: string[];
+    queued?: string[];
+  };
+}
+
 export const envVerificationOTP: NonNullable<
   Parameters<typeof createAuth>[0]['sendVerificationOTP']
 > = async ({ email, otp, type }, request) => {
-  const resendKey = process.env.RESEND_API_KEY?.trim();
-  if (!resendKey) {
+  const accountId = process.env.CLOUDFLARE_ACCOUNT_ID?.trim();
+  const apiToken = process.env.CLOUDFLARE_EMAIL_API_TOKEN?.trim();
+  const from = process.env.EMAIL_FROM?.trim();
+
+  if (!accountId && !apiToken && !from && process.env.NODE_ENV !== 'production') {
     return consoleVerificationOTP({ email, otp, type }, request);
   }
-  const from = process.env.EMAIL_FROM?.trim() || 'Bubai <noreply@bubai.local>';
-  const res = await fetch('https://api.resend.com/emails', {
-    method: 'POST',
-    headers: {
-      Authorization: `Bearer ${resendKey}`,
-      'Content-Type': 'application/json',
+  if (!accountId || !apiToken || !from) {
+    throw new Error('Configure CLOUDFLARE_ACCOUNT_ID, CLOUDFLARE_EMAIL_API_TOKEN, and EMAIL_FROM to send verification emails');
+  }
+
+  const res = await fetch(
+    `https://api.cloudflare.com/client/v4/accounts/${encodeURIComponent(accountId)}/email/sending/send`,
+    {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${apiToken}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        from,
+        to: [email],
+        subject: `Your Bubai verification code: ${otp}`,
+        text: `Your Bubai verification code is ${otp}. It expires in 5 minutes.`,
+      }),
+      signal: AbortSignal.timeout(10_000),
     },
-    body: JSON.stringify({
-      from,
-      to: [email],
-      subject: `Your Bubai verification code: ${otp}`,
-      text: `Your Bubai verification code is ${otp}. It expires in 5 minutes.`,
-    }),
-  });
+  );
   if (!res.ok) {
-    const body = await res.text().catch(() => '');
-    throw new Error(`Failed to send OTP email via Resend (${res.status}): ${body}`);
+    throw new Error(`Cloudflare Email Sending request failed (HTTP ${res.status})`);
+  }
+  const response = await res.json().catch(() => null) as CloudflareEmailResponse | null;
+  if (response?.success !== true || !(response.result?.delivered?.length || response.result?.queued?.length)) {
+    throw new Error('Cloudflare Email Sending did not accept the verification email');
   }
 };
 

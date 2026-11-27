@@ -33,7 +33,7 @@ pnpm dev
 
 ## Docker Compose 部署
 
-1. 按 `.env.example` 配置 `PUBLIC_URL`、`DATABASE_URL`、`BETTER_AUTH_SECRET`、`RESEND_API_KEY` 和使用已验证域名的 `EMAIL_FROM`。生产环境默认要求登录，登录验证码由 Resend 发出。
+1. 按 `.env.example` 配置 `PUBLIC_URL`、`DATABASE_URL` 和 `BETTER_AUTH_SECRET`。生产环境默认要求登录，验证码通过 [Cloudflare Email Sending](https://developers.cloudflare.com/email-service/get-started/send-emails/) 发出。在 Cloudflare 启用发件域名后，配置 `CLOUDFLARE_ACCOUNT_ID`、有 `Email Sending: Edit` 权限的 `CLOUDFLARE_EMAIL_API_TOKEN`，以及该域名下的 `EMAIL_FROM`。向任意收件人发信需要 Workers Paid。
 2. 升级已有实例前，备份 PostgreSQL 并在副本上演练升级。首次启动会将旧 `users` 表迁入 Better Auth 的 `user` 表并删除旧表。回滚到旧版本时需恢复升级前的数据库。没有组织归属的旧频道在生产登录模式下不可见，需先确定频道对应的 Community。
 3. 运行 `docker compose build bubai` 构建镜像。发布时运行 `docker compose up -d --wait bubai`，然后检查 `/healthz`、邮件验证码登录和 Community 内的历史消息。
 

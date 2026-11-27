@@ -90,7 +90,7 @@ export async function readArtifact(files: TurnFiles, artifact: LocalArtifact, li
 
 export async function uploadArtifacts(
   files: TurnFiles,
-  sdk: Pick<BubaiClient, 'downloadTurnAttachment'>,
+  sdk: Pick<BubaiClient, 'uploadFile'>,
   turnId: string,
   signal: AbortSignal,
 ) {

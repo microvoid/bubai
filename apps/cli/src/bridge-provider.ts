@@ -4,9 +4,10 @@ import type { AgentProgressSnapshot } from '@buzz-botmux/botmux-client';
 import type { PendingTurn, TurnCompletion } from './bridge-turn-journal';
 
 export function turnAbortSignal(signal: AbortSignal, deadline?: number): AbortSignal {
-  return deadline === undefined ? signal : AbortSignal.any([
-    signal, AbortSignal.timeout(Math.max(0, deadline - Date.now())),
-  ]);
+  if (deadline === undefined || signal.aborted) return signal;
+  const remaining = deadline - Date.now();
+  if (remaining <= 0) return AbortSignal.abort(new DOMException('Turn timed out', 'TimeoutError'));
+  return AbortSignal.any([signal, AbortSignal.timeout(remaining)]);
 }
 
 export type LocalAgentDescriptor = BotGatewayAgentDescriptor;

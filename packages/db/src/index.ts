@@ -174,6 +174,8 @@ ALTER TABLE messages ADD COLUMN IF NOT EXISTS adapter_meta jsonb;
 
 CREATE INDEX IF NOT EXISTS messages_channel_created_idx ON messages (channel_id, created_at);
 CREATE INDEX IF NOT EXISTS messages_thread_created_idx ON messages (thread_id, created_at);
+CREATE INDEX IF NOT EXISTS messages_running_agent_created_idx ON messages (created_at)
+  WHERE sender_agent_id IS NOT NULL AND deleted_at IS NULL AND card->>'status' = 'running';
 
 CREATE TABLE IF NOT EXISTS message_reactions (
   message_id uuid NOT NULL REFERENCES messages(id) ON DELETE CASCADE,

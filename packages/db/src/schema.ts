@@ -1,6 +1,7 @@
 /**
  * Group chat PostgreSQL schema copied/adapted from references/agentes-chat/packages/db/src/schema/chat.ts
  */
+import { sql } from 'drizzle-orm';
 import {
   boolean,
   index,
@@ -166,7 +167,12 @@ export const messages = pgTable(
     updatedAt: timestamp('updated_at', { withTimezone: true }),
     deletedAt: timestamp('deleted_at', { withTimezone: true }),
   },
-  (t) => [index().on(t.channelId, t.createdAt), index().on(t.threadId, t.createdAt)]
+  (t) => [
+    index().on(t.channelId, t.createdAt),
+    index().on(t.threadId, t.createdAt),
+    index('messages_running_agent_created_idx').on(t.createdAt)
+      .where(sql`${t.senderAgentId} IS NOT NULL AND ${t.deletedAt} IS NULL AND ${t.card}->>'status' = 'running'`),
+  ]
 );
 
 export const messageReactions = pgTable(

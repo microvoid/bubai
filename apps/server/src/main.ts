@@ -38,6 +38,8 @@ import {
 } from '@buzz-botmux/db';
 import {
   finalizeProgressSnapshot,
+  isIdleLocalAntigravitySession,
+  isLocalBotmuxEndpoint,
   normalizeProgressSnapshot,
   progressSnapshotEquals,
   readTurnProgress,
@@ -46,7 +48,7 @@ import {
   type BuzzTurnContext,
   type DashboardAskAnswerRequest,
 } from '@buzz-botmux/botmux-client';
-import { readAntigravityResult } from './antigravity-result';
+import { readAntigravityTurnOutcome } from './antigravity-result';
 import {
   buildProxiedTerminalUrl,
   proxyTerminalHttpRequest,
@@ -83,12 +85,12 @@ const CONTEXT_HISTORY_LIMIT = Math.min(
 const THREAD_REPLY_PREVIEW_LIMIT = 5;
 const BOTMUX_RESULT_POLL_MS = 2000;
 const BOTMUX_RESULT_GRACE_MS = 10_000;
-const BOTMUX_RESULT_TIMEOUT_MS = 30 * 60_000;
+const configuredBotTurnTimeoutMs = Number(process.env.BUBAI_BOT_TURN_TIMEOUT_MS);
+const BOT_TURN_TIMEOUT_MS = Number.isSafeInteger(configuredBotTurnTimeoutMs) && configuredBotTurnTimeoutMs > 0
+  ? configuredBotTurnTimeoutMs
+  : 30 * 60_000;
 const BOTMUX_TRIGGER_SUMMARY_PREFIX = 'triggerId: ';
-const LOCAL_BOTMUX_HOSTS = new Set(['localhost', '127.0.0.1', '[::1]']);
-const LOCAL_BOTMUX_BACKENDS = new Set(['pty', 'tmux', 'herdr', 'zellij', 'zmx']);
-const isLocalBotmux = URL.canParse(BOTMUX_ENDPOINT) &&
-  LOCAL_BOTMUX_HOSTS.has(new URL(BOTMUX_ENDPOINT).hostname);
+const isLocalBotmux = isLocalBotmuxEndpoint(BOTMUX_ENDPOINT);
 const BOT_TURN_TERMINAL_STATUSES = ['completed', 'failed', 'interrupted', 'timeout', 'dispatch_failed'] as const;
 const MESSAGE_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
@@ -1076,21 +1078,21 @@ async function reconcileBotmuxTurn(
   ) {
     // In Botmux's default reply mode, Antigravity can go idle without reporting a final.
     const session = (await getSessions()).find((item) => item.sessionId === sessionId);
-    if (
-      session?.larkAppId === botId && session.cliId === 'antigravity' &&
-      session.state === 'idle' && !session.queued && !session.tuiPromptActive &&
-      LOCAL_BOTMUX_BACKENDS.has(session.backendType ?? '')
-    ) {
-      const agyContent = await readAntigravityResult({ triggerId, botId, channelId, createdAt: row.createdAt });
-      if (agyContent) {
-        content = agyContent;
+    if (isIdleLocalAntigravitySession(session, botId)) {
+      const outcome = await readAntigravityTurnOutcome({ triggerId, botId, channelId, createdAt: row.createdAt });
+      if (outcome?.status === 'completed') {
+        content = outcome.content;
         status = 'completed';
+        settled = true;
+      } else if (outcome?.status === 'no_reply' && !session.backgroundTaskCount && !session.busySinceAt) {
+        content = '会话已返回空闲，本轮未生成回复';
+        status = 'failed';
         settled = true;
       }
     }
   }
 
-  if (!settled && age >= BOTMUX_RESULT_TIMEOUT_MS) {
+  if (!settled && Date.now() - row.createdAt.getTime() >= BOT_TURN_TIMEOUT_MS) {
     content = '等待回复超时';
     status = 'timeout';
     settled = true;
@@ -1143,6 +1145,7 @@ async function pollBotmuxTurns() {
   if (!botmuxAdapter.isEnabled()) return;
   // The placeholder carries the accepted trigger so polling can resume on restart.
   const pending = await db.select().from(messages).where(and(
+    isNotNull(messages.senderAgentId),
     isNull(messages.deletedAt),
     sql`${messages.card}->>'status' = 'running'`,
     sql`${messages.card}->>'summary' LIKE ${`${BOTMUX_TRIGGER_SUMMARY_PREFIX}%`}`
@@ -1156,6 +1159,26 @@ async function pollBotmuxTurns() {
   }
   if (results.some((result) => result.status === 'fulfilled' && result.value)) {
     await broadcastSessionsUpdated(await (sessions ?? botmuxAdapter.getSessions()));
+  }
+}
+
+async function expireUntrackedBotTurns() {
+  const expired = await db.select().from(messages).where(and(
+    isNotNull(messages.senderAgentId),
+    isNull(messages.deletedAt),
+    lt(messages.createdAt, new Date(Date.now() - BOT_TURN_TIMEOUT_MS)),
+    sql`${messages.card}->>'status' = 'running'`,
+    // Let direct Botmux reconciliation read any available result before expiring its own turns.
+    botmuxAdapter.isEnabled() ? sql`(
+      ${messages.botmuxSessionId} IS NULL OR
+      coalesce(${messages.card}->>'summary', '') NOT LIKE ${`${BOTMUX_TRIGGER_SUMMARY_PREFIX}%`}
+    )` : undefined,
+  ));
+  const results = await Promise.allSettled(expired.map((row) =>
+    settleBotTurn(row, { content: '等待回复超时', status: 'timeout' }),
+  ));
+  for (const result of results) {
+    if (result.status === 'rejected') console.error('[Server] Bot turn timeout writeback failed:', result.reason);
   }
 }
 
@@ -1182,7 +1205,10 @@ async function runBotmuxTurnPoll() {
 
 function scheduleBotmuxResultPoll() {
   setTimeout(() => {
-    void runBotmuxTurnPoll().finally(scheduleBotmuxResultPoll);
+    void Promise.all([
+      runBotmuxTurnPoll(),
+      expireUntrackedBotTurns().catch((error) => console.error('[Server] Bot turn expiration failed:', error)),
+    ]).finally(scheduleBotmuxResultPoll);
   }, BOTMUX_RESULT_POLL_MS);
 }
 
@@ -3184,6 +3210,8 @@ app.post('/api/agents/provision', async (c) => {
     webhookSecret?: string;
     channelId?: string;
     channelName?: string;
+    organizationId?: string;
+    community?: string;
     autoReply?: boolean;
     issueKey?: boolean;
     keyScope?: 'bot' | 'bot-server';
@@ -3193,7 +3221,7 @@ app.post('/api/agents/provision', async (c) => {
   if (!name) return c.json({ error: 'name is required' }, 400);
 
   const authUserId = c.get('authUserId');
-  const authOrgId = c.get('authOrgId');
+  const sessionOrgId = c.get('authOrgId');
 
   // P0-1: Only system admins may issue multi-bot `bot-server_` keys
   let isAdmin = false;
@@ -3219,9 +3247,69 @@ app.post('/api/agents/provision', async (c) => {
     validatedWebhookUrl = check.url;
   }
 
-  // Validate requested channel BEFORE mutating DB so missing channel returns 404
   const rawChannelId = body?.channelId?.trim();
   const rawChannelName = body?.channelName?.trim().replace(/^#/, '');
+  const requestedCommunity = body?.organizationId?.trim() || body?.community?.trim();
+
+  // Resolve effective organization (Community) so device-auth / bearer CLI sessions
+  // without an activeOrganizationId never silently provision "invisible" agents.
+  let authOrgId = sessionOrgId;
+  if (authUserId && (requestedCommunity || !authOrgId)) {
+    const userOrgs = await db
+      .select({
+        id: authSchema.organization.id,
+        name: authSchema.organization.name,
+        slug: authSchema.organization.slug,
+      })
+      .from(authSchema.member)
+      .innerJoin(
+        authSchema.organization,
+        eq(authSchema.member.organizationId, authSchema.organization.id),
+      )
+      .where(eq(authSchema.member.userId, authUserId));
+
+    if (requestedCommunity) {
+      const lower = requestedCommunity.toLowerCase();
+      const matched =
+        userOrgs.find(
+          (o) => o.id === requestedCommunity || o.slug === requestedCommunity || o.name === requestedCommunity,
+        ) ??
+        userOrgs.find(
+          (o) => o.slug.toLowerCase() === lower || o.name.toLowerCase() === lower,
+        );
+      if (!matched) {
+        return c.json(
+          { error: `Community "${requestedCommunity}" not found or you are not a member` },
+          404,
+        );
+      }
+      authOrgId = matched.id;
+    } else if (userOrgs.length === 1) {
+      authOrgId = userOrgs[0]!.id;
+    } else if (userOrgs.length > 1) {
+      // If a channel UUID was provided and belongs to one of the user's communities, infer it
+      let inferredFromChannel: string | null = null;
+      if (rawChannelId) {
+        const [ch] = await db.select().from(channels).where(eq(channels.id, rawChannelId));
+        if (ch?.organizationId && userOrgs.some((o) => o.id === ch.organizationId)) {
+          inferredFromChannel = ch.organizationId;
+        }
+      }
+      if (inferredFromChannel) {
+        authOrgId = inferredFromChannel;
+      } else {
+        const names = userOrgs.map((o) => `${o.name} (${o.slug})`).join(', ');
+        return c.json(
+          {
+            error: `No active community selected. You belong to multiple communities: ${names}. Run "bub community use <name|slug|id>" or pass --community <name|slug|id>.`,
+          },
+          400,
+        );
+      }
+    }
+  }
+
+  // Validate requested channel BEFORE mutating DB so missing channel returns 404
   let targetChannel: typeof channels.$inferSelect | undefined;
   if (rawChannelId || rawChannelName) {
     const [ch] = rawChannelId
@@ -3274,7 +3362,7 @@ app.post('/api/agents/provision', async (c) => {
     await dispatcher.upsertAgents([
       {
         agentId,
-        organizationId: authOrgId ?? null,
+        organizationId: authOrgId ?? existing?.organizationId ?? null,
         ownerUserId: existing?.ownerUserId ?? authUserId ?? null,
         adapterType,
         externalId: externalId ?? agentId,
@@ -3382,6 +3470,7 @@ app.post('/api/agents/provision', async (c) => {
         adapterType,
         capabilities: body?.capabilities ?? [],
       },
+      ...(authOrgId ? { organizationId: authOrgId } : {}),
       ...(joinedChannelId ? { channelId: joinedChannelId } : {}),
       ...(apiKey ? { apiKey } : {}),
       provisionedBy: userId,
@@ -4043,7 +4132,11 @@ Bun.serve<WsClientData>({
                     summary: errMsg,
                   },
                 })
-                .where(eq(messages.id, placeholder.id))
+                .where(and(
+                  eq(messages.id, placeholder.id),
+                  isNull(messages.deletedAt),
+                  sql`${messages.card}->>'status' = 'running'`,
+                ))
                 .returning();
               if (failed) {
                 broadcast(

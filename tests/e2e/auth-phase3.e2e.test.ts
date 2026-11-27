@@ -330,22 +330,33 @@ describe('Phase 3 E2E: Bot Convergence, Strict Bot API Key, CLI Device Auth, and
     assert.equal(savedConfig.serverUrl, BASE_URL);
     assert.ok(savedConfig.token && savedConfig.token.length > 10, 'Expected saved Bearer token in config.json');
 
-    const { stdout: statusOut } = await execFileAsync(
-      'bun',
-      [CLI_ENTRY, 'status'],
-      {
-        env: {
-          ...process.env,
-          BUBAI_CONFIG_DIR: cliConfigDir,
-          BUBAI_TOKEN: '',
-          BUBAI_BOT_TOKEN: '',
-          BUZZ_BOT_TOKEN: '',
-        },
+    const statusOptions = {
+      env: {
+        ...process.env,
+        BUBAI_CONFIG_DIR: cliConfigDir,
+        BUBAI_TOKEN: '',
+        BUBAI_BOT_TOKEN: '',
+        BUZZ_BOT_TOKEN: '',
       },
-    );
-    const statusJson = JSON.parse(statusOut) as { ok: boolean; instance: { authRequired: boolean } };
+    };
+    const { stdout: statusOut } = await execFileAsync('bun', [CLI_ENTRY, 'status', '--json'], statusOptions);
+    const statusJson = JSON.parse(statusOut) as {
+      ok: boolean;
+      serverUrl: string;
+      instance: { authRequired: boolean };
+      agents: Array<{ archived?: boolean; status: 'online' | 'offline' }>;
+    };
     assert.equal(statusJson.ok, true);
+    assert.equal(statusJson.serverUrl, BASE_URL);
     assert.equal(statusJson.instance.authRequired, true);
+
+    const activeAgents = statusJson.agents.filter((agent) => !agent.archived);
+    const onlineAgents = activeAgents.filter((agent) => agent.status === 'online').length;
+    const { stdout: summaryOut } = await execFileAsync('bun', [CLI_ENTRY, 'status'], statusOptions);
+    assert.deepEqual(summaryOut.trim().split('\n'), [
+      `Server: ${BASE_URL} (reachable)`,
+      `Agents: ${onlineAgents} online, ${activeAgents.length - onlineAgents} offline`,
+    ]);
   });
 
   it('3. Mobile Auth Service: sign-in via Email OTP & Password, list/switch Organizations, and connect authenticated BubaiClient + WS', async () => {

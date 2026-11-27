@@ -5,6 +5,8 @@ import { authClient } from './auth-client';
 import { AccountEmailForm, accountCallback } from './AccountEmailForm';
 import styles from './IdentitySetup.module.css';
 
+const OTP_RESEND_COOLDOWN_MS = 60_000;
+
 export interface AuthFormProps {
   emailAndPasswordEnabled: boolean;
   lockedEmail?: string;
@@ -34,6 +36,7 @@ export function AuthForm({
   const [name, setName] = useState('');
   const [password, setPassword] = useState('');
   const [otp, setOtp] = useState('');
+  const [resendAvailableAt, setResendAvailableAt] = useState(0);
   const [cooldown, setCooldown] = useState(0);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -43,10 +46,24 @@ export function AuthForm({
   }, [lockedEmail]);
 
   useEffect(() => {
-    if (cooldown <= 0) return;
-    const t = setTimeout(() => setCooldown((c) => Math.max(0, c - 1)), 1000);
-    return () => clearTimeout(t);
-  }, [cooldown]);
+    if (resendAvailableAt === 0) return;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const updateCooldown = () => {
+      clearTimeout(timer);
+      const remaining = resendAvailableAt - Date.now();
+      setCooldown(Math.max(0, Math.ceil(remaining / 1000)));
+      if (remaining > 0) {
+        const untilNextSecond = remaining % 1000 || 1000;
+        timer = setTimeout(updateCooldown, untilNextSecond);
+      }
+    };
+    updateCooldown();
+    document.addEventListener('visibilitychange', updateCooldown);
+    return () => {
+      clearTimeout(timer);
+      document.removeEventListener('visibilitychange', updateCooldown);
+    };
+  }, [resendAvailableAt]);
 
   const handleSendOtp = async (e?: FormEvent) => {
     e?.preventDefault();
@@ -67,7 +84,8 @@ export function AuthForm({
         return;
       }
       setOtpStep('verify');
-      setCooldown(60);
+      setResendAvailableAt(Date.now() + OTP_RESEND_COOLDOWN_MS);
+      setCooldown(OTP_RESEND_COOLDOWN_MS / 1000);
     } catch (err) {
       setError(err instanceof Error ? err.message : '发送验证码失败');
     } finally {

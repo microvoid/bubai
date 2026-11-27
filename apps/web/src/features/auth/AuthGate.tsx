@@ -49,6 +49,7 @@ export function AuthGate({ children }: { children: ReactNode }) {
   const [instanceInfo, setInstanceInfo] = useState<InstanceAuthInfo | null>(null);
   const { data: sessionData, isPending: sessionPending, refetch: refetchSession } =
     authClient.useSession();
+  const [hasResolvedSession, setHasResolvedSession] = useState(false);
   const [organizations, setOrganizations] = useState<AuthOrgSummary[]>([]);
   const [loadedOrgsForUserId, setLoadedOrgsForUserId] = useState<string | null>(null);
   const [orgRevision, setOrgRevision] = useState(0);
@@ -126,6 +127,7 @@ export function AuthGate({ children }: { children: ReactNode }) {
 
   useEffect(() => {
     if (sessionPending) return;
+    setHasResolvedSession(true);
     void refreshOrganizations();
   }, [user?.id, sessionPending]);
 
@@ -216,7 +218,8 @@ export function AuthGate({ children }: { children: ReactNode }) {
     return <AuthContext.Provider value={contextValue}>{children}</AuthContext.Provider>;
   }
 
-  if (sessionPending || (user && loadedOrgsForUserId !== user.id)) {
+  // Better Auth reports anonymous background refreshes as pending too.
+  if ((!hasResolvedSession && sessionPending) || (user && loadedOrgsForUserId !== user.id)) {
     return (
       <AuthContext.Provider value={contextValue}>
         <div className={`${styles.landing} ${styles.step}`} data-auth-screen="boot">

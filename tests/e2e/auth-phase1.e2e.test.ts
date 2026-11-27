@@ -287,6 +287,235 @@ describe('Phase 1 Auth & Tenant Isolation E2E (isolated server with BUBAI_AUTH_R
     assert.ok(orgA.id && orgB.id);
   });
 
+  it('isolates /api/search, /api/activity, /api/messages/*, /api/bootstrap participants & null-org channels, and protects /api/uploads', async () => {
+    const alice = await signUpAndGetSession('alice-iso@example.com', 'Alice Iso');
+    const bob = await signUpAndGetSession('bob-iso@example.com', 'Bob Iso');
+    const charlie = await signUpAndGetSession('charlie-iso@example.com', 'Charlie Iso');
+
+    const orgA = await createAndActivateOrg(alice.token, 'Iso Alpha', 'iso-alpha');
+    const orgB = await createAndActivateOrg(bob.token, 'Iso Beta', 'iso-beta');
+
+    // Invite & add Charlie into Org A so we can test same-org non-author edit/delete protection
+    const inviteRes = await fetch(`${BASE_URL}/api/auth/organization/invite-member`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${alice.token}`,
+        Origin: 'http://localhost:5173',
+      },
+      body: JSON.stringify({ organizationId: orgA.id, email: 'charlie-iso@example.com', role: 'member' }),
+    });
+    assert.equal(inviteRes.status, 200, `invite charlie failed: ${await inviteRes.clone().text()}`);
+    const inv = (await inviteRes.json()) as { id: string };
+    const acceptRes = await fetch(`${BASE_URL}/api/auth/organization/accept-invitation`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${charlie.token}`,
+        Origin: 'http://localhost:5173',
+      },
+      body: JSON.stringify({ invitationId: inv.id }),
+    });
+    assert.equal(acceptRes.status, 200, `charlie accept failed: ${await acceptRes.clone().text()}`);
+    await fetch(`${BASE_URL}/api/auth/organization/set-active`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${charlie.token}`,
+        Origin: 'http://localhost:5173',
+      },
+      body: JSON.stringify({ organizationId: orgA.id }),
+    });
+
+    // Alice creates a channel in Org A and sends a message mentioning Bob Iso
+    const chARes = await fetch(`${BASE_URL}/api/channels`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${alice.token}`,
+      },
+      body: JSON.stringify({ name: 'iso-secret', topic: 'Alpha secret' }),
+    });
+    assert.equal(chARes.status, 201);
+    const chA = ((await chARes.json()) as { channel: { id: string } }).channel;
+
+    const aliceWs = new WebSocket(
+      `ws://127.0.0.1:${PORT}/ws?token=${encodeURIComponent(alice.token)}`,
+    );
+    const createdPromise = new Promise<string>((resolve, reject) => {
+      aliceWs.onopen = () => {
+        aliceWs.send(
+          JSON.stringify({
+            type: 'message.send',
+            payload: {
+              channelId: chA.id,
+              senderId: alice.user.id,
+              content: 'TopSecretAlphaPhrase @Bob Iso',
+            },
+          }),
+        );
+      };
+      aliceWs.onmessage = (evt) => {
+        const msg = JSON.parse(String(evt.data));
+        if (msg.type === 'message.created' && msg.payload?.channelId === chA.id) {
+          resolve(msg.payload.id as string);
+        }
+      };
+      aliceWs.onerror = () => reject(new Error('Alice WS error'));
+    });
+    const aliceMsgId = await createdPromise;
+    aliceWs.close();
+
+    // 1. Cross-org /api/search MUST NOT leak Org A messages to Bob (Org B)
+    const bobSearchRes = await fetch(
+      `${BASE_URL}/api/search?q=${encodeURIComponent('TopSecretAlphaPhrase')}`,
+      { headers: { Authorization: `Bearer ${bob.token}` } },
+    );
+    assert.equal(bobSearchRes.status, 200);
+    const bobSearch = (await bobSearchRes.json()) as { results: Array<{ id: string }> };
+    assert.equal(
+      bobSearch.results.length,
+      0,
+      `Org B /api/search leaked Org A message: ${JSON.stringify(bobSearch.results)}`,
+    );
+
+    // 2. Cross-org /api/activity MUST NOT leak Org A mentions to Bob (Org B)
+    const bobActivityRes = await fetch(`${BASE_URL}/api/activity`, {
+      headers: { Authorization: `Bearer ${bob.token}` },
+    });
+    assert.equal(bobActivityRes.status, 200);
+    const bobActivity = (await bobActivityRes.json()) as { items: Array<{ messageId: string }> };
+    assert.equal(
+      bobActivity.items.some((item) => item.messageId === aliceMsgId),
+      false,
+      `Org B /api/activity leaked Org A mention: ${JSON.stringify(bobActivity.items)}`,
+    );
+
+    // 3. Cross-org GET/PATCH/DELETE /api/messages/:id and POST /reactions MUST be denied
+    const bobGetMsg = await fetch(`${BASE_URL}/api/messages/${aliceMsgId}`, {
+      headers: { Authorization: `Bearer ${bob.token}` },
+    });
+    assert.ok(
+      bobGetMsg.status === 403 || bobGetMsg.status === 404,
+      `Cross-org GET /api/messages/:id should be 403/404, got ${bobGetMsg.status}`,
+    );
+
+    const bobPatchMsg = await fetch(`${BASE_URL}/api/messages/${aliceMsgId}`, {
+      method: 'PATCH',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${bob.token}`,
+      },
+      body: JSON.stringify({ content: 'Tampered by Bob' }),
+    });
+    assert.ok(
+      bobPatchMsg.status === 403 || bobPatchMsg.status === 404,
+      `Cross-org PATCH /api/messages/:id should be 403/404, got ${bobPatchMsg.status}`,
+    );
+
+    const bobReactMsg = await fetch(`${BASE_URL}/api/messages/${aliceMsgId}/reactions`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${bob.token}`,
+      },
+      body: JSON.stringify({ emoji: '🔥' }),
+    });
+    assert.ok(
+      bobReactMsg.status === 403 || bobReactMsg.status === 404,
+      `Cross-org POST /api/messages/:id/reactions should be 403/404, got ${bobReactMsg.status}`,
+    );
+
+    const bobDeleteMsg = await fetch(`${BASE_URL}/api/messages/${aliceMsgId}`, {
+      method: 'DELETE',
+      headers: { Authorization: `Bearer ${bob.token}` },
+    });
+    assert.ok(
+      bobDeleteMsg.status === 403 || bobDeleteMsg.status === 404,
+      `Cross-org DELETE /api/messages/:id should be 403/404, got ${bobDeleteMsg.status}`,
+    );
+
+    // Same-org non-author (Charlie in Org A) MUST NOT edit or delete Alice's message
+    const charliePatchMsg = await fetch(`${BASE_URL}/api/messages/${aliceMsgId}`, {
+      method: 'PATCH',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${charlie.token}`,
+      },
+      body: JSON.stringify({ content: 'Tampered by Charlie' }),
+    });
+    assert.equal(
+      charliePatchMsg.status,
+      403,
+      `Same-org non-author PATCH /api/messages/:id should be 403, got ${charliePatchMsg.status}`,
+    );
+
+    const charlieDeleteMsg = await fetch(`${BASE_URL}/api/messages/${aliceMsgId}`, {
+      method: 'DELETE',
+      headers: { Authorization: `Bearer ${charlie.token}` },
+    });
+    assert.equal(
+      charlieDeleteMsg.status,
+      403,
+      `Same-org non-author DELETE /api/messages/:id should be 403, got ${charlieDeleteMsg.status}`,
+    );
+
+    // 4. /api/bootstrap participants filtered by org & no null-org channels leaked
+    const bobBootRes = await fetch(`${BASE_URL}/api/bootstrap`, {
+      headers: { Authorization: `Bearer ${bob.token}` },
+    });
+    assert.equal(bobBootRes.status, 200);
+    const bobBoot = (await bobBootRes.json()) as {
+      participants: Array<{ id: string; role: string }>;
+      channels: Array<{ id: string; organizationId?: string; name: string }>;
+    };
+    const bobHumanIds = bobBoot.participants.filter((p) => p.role === 'human').map((p) => p.id);
+    assert.ok(bobHumanIds.includes(bob.user.id), 'Bob should see himself in Org B participants');
+    assert.equal(
+      bobHumanIds.includes(alice.user.id),
+      false,
+      `Org B participants leaked Org A user Alice: ${JSON.stringify(bobHumanIds)}`,
+    );
+    assert.equal(
+      bobHumanIds.includes('u-owner'),
+      false,
+      `Org B participants leaked legacy u-owner: ${JSON.stringify(bobHumanIds)}`,
+    );
+    assert.ok(bobBoot.channels.length >= 1, 'Org B should have at least its own default channel');
+    for (const ch of bobBoot.channels) {
+      assert.equal(
+        ch.organizationId,
+        orgB.id,
+        `Org B /api/bootstrap leaked channel outside Org B: ${JSON.stringify(ch)}`,
+      );
+    }
+
+    // 5. GET /api/uploads/:filename MUST require authentication when AUTH_REQUIRED=true
+    const form = new FormData();
+    form.append('file', new Blob(['secret-upload-bytes'], { type: 'text/plain' }), 'secret.txt');
+    const uploadRes = await fetch(`${BASE_URL}/api/uploads`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${alice.token}` },
+      body: form,
+    });
+    assert.equal(uploadRes.status, 201, `upload failed: ${await uploadRes.clone().text()}`);
+    const uploaded = (await uploadRes.json()) as { attachment: { url: string } };
+    const uploadUrl = new URL(uploaded.attachment.url, BASE_URL).toString();
+
+    const unauthDownload = await fetch(uploadUrl);
+    assert.equal(
+      unauthDownload.status,
+      401,
+      `Unauthenticated GET /api/uploads/:filename should return 401, got ${unauthDownload.status}`,
+    );
+
+    const authDownload = await fetch(uploadUrl, {
+      headers: { Authorization: `Bearer ${alice.token}` },
+    });
+    assert.equal(authDownload.status, 200);
+    assert.equal(await authDownload.text(), 'secret-upload-bytes');
+  });
+
   it('validates Better Auth bot_ API key on BOTH /api/bot/messages and /api/bot/messages/:id/progress', async () => {
     const owner = await signUpAndGetSession('bot-owner@example.com', 'Bot Owner');
 

@@ -24,9 +24,23 @@ import React, {
   useState,
 } from 'react';
 import { AppState, Platform, type AppStateStatus } from 'react-native';
+import {
+  mobileCreateOrganization,
+  mobileGetSession,
+  mobileListOrganizations,
+  mobileSendEmailOtp,
+  mobileSetActiveOrganization,
+  mobileSignInWithEmailOtp,
+  mobileSignInWithPassword,
+  mobileSignOut,
+  mobileSignUpWithPassword,
+  type MobileAuthOrg,
+  type MobileAuthUser,
+} from '@/services/auth';
 
 const SERVER_URL_KEY = 'bubai.server.url';
 const USER_ID_KEY = 'bubai.user.id';
+const AUTH_TOKEN_KEY = 'bubai.auth.token';
 const DEFAULT_SERVER_URL =
   process.env.EXPO_PUBLIC_SERVER_URL ||
   (Platform.OS === 'android' ? 'http://10.0.2.2:4000' : 'http://127.0.0.1:4000');
@@ -34,6 +48,11 @@ const DEFAULT_SERVER_URL =
 interface BubaiContextValue {
   hydrated: boolean;
   serverUrl: string | null;
+  authToken: string | null;
+  authUser: MobileAuthUser | null;
+  authRequired: boolean;
+  organizations: MobileAuthOrg[];
+  activeOrgId: string | null;
   currentUserId: string;
   client: BubaiClient | null;
   wsState: WsConnectionState;
@@ -47,6 +66,12 @@ interface BubaiContextValue {
   error: string | null;
   connectToServer: (rawUrl: string) => Promise<InstanceInfo>;
   disconnectServer: () => Promise<void>;
+  sendEmailOtp: (email: string) => Promise<void>;
+  signInWithOtp: (email: string, otp: string) => Promise<void>;
+  signInWithPassword: (email: string, password: string) => Promise<void>;
+  signUpWithPassword: (email: string, password: string, name: string) => Promise<void>;
+  switchOrganization: (orgId: string) => Promise<void>;
+  signOut: () => Promise<void>;
   setCurrentUserId: (userId: string) => void;
   refreshBootstrap: () => Promise<void>;
   answerAsk: (ask: BotmuxPendingAsk, optionKey: string) => Promise<void>;
@@ -67,52 +92,94 @@ export function BubaiProvider({ children }: { children: React.ReactNode }) {
   const queryClient = useQueryClient();
   const [hydrated, setHydrated] = useState(false);
   const [serverUrl, setServerUrl] = useState<string | null>(null);
-  const [currentUserId, setCurrentUserIdState] = useState<string>('u-owner');
+  const [authToken, setAuthToken] = useState<string | null>(null);
+  const [authUser, setAuthUser] = useState<MobileAuthUser | null>(null);
+  const [organizations, setOrganizations] = useState<MobileAuthOrg[]>([]);
+  const [activeOrgId, setActiveOrgId] = useState<string | null>(null);
+  const [currentUserIdState, setCurrentUserIdState] = useState<string>('u-owner');
   const [instance, setInstance] = useState<InstanceInfo | null>(null);
   const [wsState, setWsState] = useState<WsConnectionState>('closed');
   const wsHandleRef = useRef<ReturnType<BubaiClient['connectWebSocket']> | null>(null);
   const wsListenersRef = useRef(new Set<(event: ServerWsEvent) => void>());
 
+  const hydrateSessionAndOrgs = useCallback(async (url: string, token: string) => {
+    const session = await mobileGetSession(url, token);
+    if (!session) {
+      setAuthToken(null);
+      setAuthUser(null);
+      setOrganizations([]);
+      setActiveOrgId(null);
+      await SecureStore.deleteItemAsync(AUTH_TOKEN_KEY).catch(() => {});
+      return null;
+    }
+    setAuthToken(token);
+    setAuthUser(session.user);
+    setCurrentUserIdState(session.user.id);
+    let orgs = await mobileListOrganizations(url, token).catch(() => []);
+    let resolvedOrgId = session.activeOrganizationId;
+    if (orgs.length === 0) {
+      const created = await mobileCreateOrganization(url, token, `${session.user.name}'s Community`).catch(
+        () => null,
+      );
+      if (created) orgs = [created];
+    }
+    if (!resolvedOrgId && orgs[0]?.id) {
+      await mobileSetActiveOrganization(url, token, orgs[0].id).catch(() => {});
+      resolvedOrgId = orgs[0].id;
+    }
+    setOrganizations(orgs);
+    setActiveOrgId(resolvedOrgId);
+    return session;
+  }, []);
+
   useEffect(() => {
     void Promise.all([
       SecureStore.getItemAsync(SERVER_URL_KEY).catch(() => null),
       SecureStore.getItemAsync(USER_ID_KEY).catch(() => null),
-    ]).then(([savedUrl, savedUser]) => {
+      SecureStore.getItemAsync(AUTH_TOKEN_KEY).catch(() => null),
+    ]).then(async ([savedUrl, savedUser, savedToken]) => {
+      let resolvedUrl = DEFAULT_SERVER_URL;
       if (savedUrl) {
         try {
-          setServerUrl(normalizeServerUrl(savedUrl));
+          resolvedUrl = normalizeServerUrl(savedUrl);
         } catch {
-          setServerUrl(DEFAULT_SERVER_URL);
+          resolvedUrl = DEFAULT_SERVER_URL;
         }
-      } else {
-        setServerUrl(DEFAULT_SERVER_URL);
       }
+      setServerUrl(resolvedUrl);
       if (savedUser) setCurrentUserIdState(savedUser);
+      if (savedToken) {
+        await hydrateSessionAndOrgs(resolvedUrl, savedToken);
+      }
       setHydrated(true);
     });
-  }, []);
+  }, [hydrateSessionAndOrgs]);
+
+  const currentUserId = authUser?.id || currentUserIdState;
+  const authRequired = Boolean(instance?.authRequired);
+  const canQueryWorkspace = hydrated && Boolean(serverUrl) && (!authRequired || Boolean(authToken));
 
   const client = useMemo(
-    () => (serverUrl ? new BubaiClient({ baseUrl: serverUrl }) : null),
-    [serverUrl],
+    () => (serverUrl ? new BubaiClient({ baseUrl: serverUrl, token: authToken || undefined }) : null),
+    [authToken, serverUrl],
   );
 
   const bootstrapQueryKey = useMemo(
-    () => ['bootstrap', serverUrl, currentUserId] as const,
-    [serverUrl, currentUserId],
+    () => ['bootstrap', serverUrl, currentUserId, activeOrgId, Boolean(authToken)] as const,
+    [activeOrgId, authToken, currentUserId, serverUrl],
   );
 
   const bootstrapQuery = useQuery<BootstrapPayload>({
     queryKey: bootstrapQueryKey,
-    enabled: hydrated && Boolean(client),
+    enabled: canQueryWorkspace && Boolean(client),
     queryFn: async () => {
       if (!client) throw new Error('Not connected');
-      const [inst, data] = await Promise.all([
-        client.getInstance().catch(() => null),
-        client.bootstrap(currentUserId),
-      ]);
+      const inst = await client.getInstance().catch(() => null);
       if (inst) setInstance(inst);
-      return data;
+      if (inst?.authRequired && !authToken) {
+        throw new Error('Authentication required');
+      }
+      return client.bootstrap(currentUserId);
     },
     retry: 1,
     staleTime: 10_000,
@@ -120,7 +187,7 @@ export function BubaiProvider({ children }: { children: React.ReactNode }) {
 
   // WebSocket live subscription + AppState foreground resume
   useEffect(() => {
-    if (!client || !hydrated) return;
+    if (!client || !canQueryWorkspace) return;
 
     const handleEvent = (event: ServerWsEvent) => {
       for (const listener of wsListenersRef.current) {
@@ -198,7 +265,7 @@ export function BubaiProvider({ children }: { children: React.ReactNode }) {
       handle.close();
       wsHandleRef.current = null;
     };
-  }, [bootstrapQueryKey, client, currentUserId, hydrated, queryClient]);
+  }, [bootstrapQueryKey, canQueryWorkspace, client, currentUserId, queryClient]);
 
   const connectToServer = useCallback(async (rawUrl: string): Promise<InstanceInfo> => {
     const normalized = normalizeServerUrl(rawUrl);
@@ -207,14 +274,91 @@ export function BubaiProvider({ children }: { children: React.ReactNode }) {
     await SecureStore.setItemAsync(SERVER_URL_KEY, normalized).catch(() => {});
     setInstance(info);
     setServerUrl(normalized);
+    if (authToken) {
+      await hydrateSessionAndOrgs(normalized, authToken);
+    }
     return info;
-  }, []);
+  }, [authToken, hydrateSessionAndOrgs]);
 
   const disconnectServer = useCallback(async () => {
-    await SecureStore.deleteItemAsync(SERVER_URL_KEY).catch(() => {});
+    await Promise.all([
+      SecureStore.deleteItemAsync(SERVER_URL_KEY).catch(() => {}),
+      SecureStore.deleteItemAsync(AUTH_TOKEN_KEY).catch(() => {}),
+    ]);
     setServerUrl(null);
+    setAuthToken(null);
+    setAuthUser(null);
+    setOrganizations([]);
+    setActiveOrgId(null);
     setInstance(null);
   }, []);
+
+  const sendEmailOtp = useCallback(
+    async (email: string) => {
+      if (!serverUrl) throw new Error('Not connected to server');
+      await mobileSendEmailOtp(serverUrl, email);
+    },
+    [serverUrl],
+  );
+
+  const completeMobileLogin = useCallback(
+    async (token: string) => {
+      if (!serverUrl) throw new Error('Not connected to server');
+      await SecureStore.setItemAsync(AUTH_TOKEN_KEY, token).catch(() => {});
+      await hydrateSessionAndOrgs(serverUrl, token);
+      await queryClient.invalidateQueries({ queryKey: ['bootstrap'] });
+    },
+    [hydrateSessionAndOrgs, queryClient, serverUrl],
+  );
+
+  const signInWithOtp = useCallback(
+    async (email: string, otp: string) => {
+      if (!serverUrl) throw new Error('Not connected to server');
+      const session = await mobileSignInWithEmailOtp(serverUrl, email, otp);
+      await completeMobileLogin(session.token);
+    },
+    [completeMobileLogin, serverUrl],
+  );
+
+  const signInWithPassword = useCallback(
+    async (email: string, password: string) => {
+      if (!serverUrl) throw new Error('Not connected to server');
+      const session = await mobileSignInWithPassword(serverUrl, email, password);
+      await completeMobileLogin(session.token);
+    },
+    [completeMobileLogin, serverUrl],
+  );
+
+  const signUpWithPassword = useCallback(
+    async (email: string, password: string, name: string) => {
+      if (!serverUrl) throw new Error('Not connected to server');
+      const session = await mobileSignUpWithPassword(serverUrl, email, password, name);
+      await completeMobileLogin(session.token);
+    },
+    [completeMobileLogin, serverUrl],
+  );
+
+  const switchOrganization = useCallback(
+    async (orgId: string) => {
+      if (!serverUrl || !authToken) return;
+      await mobileSetActiveOrganization(serverUrl, authToken, orgId);
+      setActiveOrgId(orgId);
+      await queryClient.invalidateQueries({ queryKey: ['bootstrap'] });
+    },
+    [authToken, queryClient, serverUrl],
+  );
+
+  const signOut = useCallback(async () => {
+    if (serverUrl && authToken) {
+      await mobileSignOut(serverUrl, authToken);
+    }
+    await SecureStore.deleteItemAsync(AUTH_TOKEN_KEY).catch(() => {});
+    setAuthToken(null);
+    setAuthUser(null);
+    setOrganizations([]);
+    setActiveOrgId(null);
+    queryClient.clear();
+  }, [authToken, queryClient, serverUrl]);
 
   const setCurrentUserId = useCallback((userId: string) => {
     setCurrentUserIdState(userId);
@@ -294,6 +438,11 @@ export function BubaiProvider({ children }: { children: React.ReactNode }) {
     () => ({
       hydrated,
       serverUrl,
+      authToken,
+      authUser,
+      authRequired,
+      organizations,
+      activeOrgId,
       currentUserId,
       client,
       wsState,
@@ -307,6 +456,12 @@ export function BubaiProvider({ children }: { children: React.ReactNode }) {
       error: bootstrapQuery.error instanceof Error ? bootstrapQuery.error.message : null,
       connectToServer,
       disconnectServer,
+      sendEmailOtp,
+      signInWithOtp,
+      signInWithPassword,
+      signUpWithPassword,
+      switchOrganization,
+      signOut,
       setCurrentUserId,
       refreshBootstrap,
       answerAsk,
@@ -315,7 +470,11 @@ export function BubaiProvider({ children }: { children: React.ReactNode }) {
       clearChannelUnread,
     }),
     [
+      activeOrgId,
       answerAsk,
+      authRequired,
+      authToken,
+      authUser,
       bootstrapQuery.error,
       bootstrapQuery.isLoading,
       clearChannelUnread,
@@ -326,11 +485,18 @@ export function BubaiProvider({ children }: { children: React.ReactNode }) {
       disconnectServer,
       hydrated,
       instance,
+      organizations,
       refreshBootstrap,
+      sendEmailOtp,
       sendWsMessage,
       serverUrl,
       setCurrentUserId,
+      signInWithOtp,
+      signInWithPassword,
+      signOut,
+      signUpWithPassword,
       subscribeWsEvents,
+      switchOrganization,
       wsState,
     ],
   );

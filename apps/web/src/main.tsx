@@ -7,13 +7,16 @@ import { StrictMode } from 'react';
 import { createRoot } from 'react-dom/client';
 import { TooltipProvider } from './design-system/ui/Tooltip';
 import { useKeyboardFocusVisibility } from './design-system/useKeyboardFocusVisibility';
+import { AuthGate } from './features/auth/AuthGate';
 import App from './App';
 
 function RootApp() {
   useKeyboardFocusVisibility();
   return (
     <TooltipProvider>
-      <App />
+      <AuthGate>
+        <App />
+      </AuthGate>
     </TooltipProvider>
   );
 }

@@ -72,7 +72,8 @@ async function main() {
     /\/+$/,
     '',
   );
-  const token = args.token || process.env.BUZZ_BOT_TOKEN || '';
+  const token =
+    args.token || process.env.BUBAI_BOT_TOKEN || process.env.BUBAI_TOKEN || process.env.BUZZ_BOT_TOKEN || '';
   const botRef = (args.bot || process.env.BUZZ_BOT_ID || '').trim();
   const channelRef = (args.channel || process.env.BUZZ_CHANNEL_ID || '').trim();
   const text = (args.text !== undefined ? args.text : await readStdin()).trim();

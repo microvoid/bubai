@@ -1,0 +1,236 @@
+/* Ported from references/buzz-app/src/features/identity/IdentitySetup.module.css */
+.landing {
+  min-height: 100dvh;
+  position: relative;
+  isolation: isolate;
+  display: flex;
+  flex-direction: column;
+  color: var(--text-primary);
+  background: var(--surface-panel);
+}
+
+.titlebar {
+  height: 3.5rem;
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: flex-start;
+  padding-inline: var(--space-5);
+  gap: var(--space-2);
+}
+
+.cornerMark {
+  width: 1.75rem;
+  height: 1.75rem;
+  display: block;
+  border-radius: var(--radius-sm, 6px);
+}
+
+.cornerTitle {
+  font-size: var(--text-label);
+  font-weight: 600;
+  color: var(--text-standard);
+  letter-spacing: -0.01em;
+}
+
+.content {
+  flex: 1;
+  width: 100%;
+  max-width: 40rem;
+  margin-inline: auto;
+  display: flex;
+  flex-direction: column;
+  padding: var(--space-6) var(--space-6) var(--space-8);
+}
+
+.step {
+  background: var(--surface-onboarding);
+  --text-heading: var(--text-title);
+  --text-heading--line-height: var(--text-title--line-height);
+  --text-heading--font-weight: var(--text-title--font-weight);
+  --text-heading--letter-spacing: var(--text-title--letter-spacing);
+  --text-body: var(--text-body-sm);
+  --text-body--line-height: var(--text-body-sm--line-height);
+  --text-body--font-weight: var(--text-body-sm--font-weight);
+  --text-body--letter-spacing: var(--text-body-sm--letter-spacing);
+}
+
+.step .content {
+  max-width: calc(490px + 3rem);
+  justify-content: center;
+  padding-bottom: var(--space-16);
+}
+
+.cardContent {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-6);
+  padding: var(--space-8);
+}
+
+.brand {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  justify-content: flex-start;
+  gap: var(--space-2);
+}
+
+.brandHeader {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  margin-bottom: var(--space-1);
+}
+
+.brandIcon {
+  width: 2.25rem;
+  height: 2.25rem;
+  border-radius: var(--radius-md, 10px);
+  display: block;
+}
+
+.actions {
+  width: 100%;
+  display: grid;
+  gap: var(--space-3);
+  text-align: left;
+}
+
+.form {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+}
+
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1h);
+}
+
+.fieldLabel {
+  font-size: var(--text-label);
+  font-weight: 500;
+  color: var(--text-standard);
+}
+
+.fieldHint {
+  font-size: var(--text-caption);
+  color: var(--text-subtle);
+}
+
+.errorText {
+  font-size: var(--text-caption);
+  color: var(--text-danger, #dc2626);
+  margin: 0;
+}
+
+.divider {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  color: var(--text-subtle);
+  font-size: var(--text-caption);
+  margin-block: var(--space-1);
+}
+
+.divider::before,
+.divider::after {
+  content: '';
+  flex: 1;
+  height: 1px;
+  background: var(--border-standard);
+}
+
+.rowActions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2);
+  flex-wrap: wrap;
+}
+
+.linkButton {
+  background: none;
+  border: none;
+  padding: 0;
+  color: var(--text-subtle);
+  font-size: var(--text-body-sm);
+  cursor: pointer;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+.linkButton:hover {
+  color: var(--text-standard);
+}
+
+.modeTabs {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: var(--space-1);
+  padding: var(--space-1);
+  border-radius: var(--radius-control, 10px);
+  background: var(--surface-inset);
+}
+
+.modeTab {
+  border: none;
+  background: transparent;
+  color: var(--text-subtle);
+  font-size: var(--text-body-sm);
+  font-weight: 500;
+  padding: var(--space-1h) var(--space-2);
+  border-radius: var(--radius-chip, 7px);
+  cursor: pointer;
+}
+
+.modeTab[aria-selected='true'] {
+  background: var(--surface-panel);
+  color: var(--text-standard);
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.06);
+}
+
+.otpInput {
+  font-family: var(--font-mono, monospace);
+  font-size: 1.25rem;
+  letter-spacing: 0.35em;
+  text-align: center;
+}
+
+.topLayerOverlay {
+  position: fixed;
+  inset: 0;
+  z-index: 90;
+  overflow: auto;
+}
+
+.progress {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-3);
+  text-align: center;
+  padding-block: var(--space-8);
+}
+
+.inviteBox {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  padding: var(--space-3);
+  border-radius: var(--radius-control, 10px);
+  background: var(--surface-inset);
+}
+
+@media (max-width: 35rem) {
+  .content {
+    padding-inline: var(--space-4);
+  }
+  .cardContent {
+    padding: var(--space-6);
+  }
+}

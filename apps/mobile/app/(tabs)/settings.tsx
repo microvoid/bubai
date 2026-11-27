@@ -22,6 +22,11 @@ export default function SettingsScreen() {
   const { colors, mode, preference, accentId, setPreference, setAccentId } = useBuzzTheme();
   const {
     serverUrl,
+    authUser,
+    organizations,
+    activeOrgId,
+    switchOrganization,
+    signOut,
     wsState,
     botmuxConnected,
     participants,
@@ -138,7 +143,87 @@ export default function SettingsScreen() {
           </View>
         </BuzzSectionGroup>
 
-        {humans.length > 0 && (
+        {authUser && (
+          <BuzzSectionGroup title="Account">
+            <View style={styles.row}>
+              <BuzzAvatar
+                name={authUser.name}
+                uri={authUser.image || undefined}
+                size={36}
+                status="online"
+                ringColor={colors.surfaceContainerLow}
+              />
+              <View style={{ flex: 1, gap: 2 }}>
+                <Text
+                  style={[buzzTypography.titleSmall, { color: colors.onSurface }]}
+                  numberOfLines={1}
+                >
+                  {authUser.name}
+                </Text>
+                <Text
+                  style={[buzzTypography.caption, { color: colors.onSurfaceVariant }]}
+                  numberOfLines={1}
+                >
+                  {authUser.email}
+                </Text>
+              </View>
+            </View>
+            <Pressable
+              onPress={() => {
+                void signOut().then(() => router.push('/connect'));
+              }}
+              style={[
+                styles.row,
+                {
+                  borderTopWidth: StyleSheet.hairlineWidth,
+                  borderTopColor: colors.outline,
+                },
+              ]}
+            >
+              <Ionicons name="log-out-outline" size={20} color={colors.error} />
+              <Text style={[buzzTypography.titleSmall, { color: colors.error, flex: 1 }]}>
+                Sign Out
+              </Text>
+            </Pressable>
+          </BuzzSectionGroup>
+        )}
+
+        {organizations.length > 0 && (
+          <BuzzSectionGroup title="Community">
+            {organizations.map((org, idx) => {
+              const selected = org.id === activeOrgId;
+              return (
+                <Pressable
+                  key={org.id}
+                  onPress={() => {
+                    void Haptics.selectionAsync();
+                    void switchOrganization(org.id);
+                  }}
+                  style={[
+                    styles.row,
+                    idx > 0 && {
+                      borderTopWidth: StyleSheet.hairlineWidth,
+                      borderTopColor: colors.outline,
+                    },
+                  ]}
+                >
+                  <Ionicons name="business-outline" size={20} color={colors.onSurfaceVariant} />
+                  <Text
+                    style={[buzzTypography.titleSmall, { color: colors.onSurface, flex: 1 }]}
+                    numberOfLines={1}
+                  >
+                    {org.name}
+                  </Text>
+                  {selected && (
+                    <Ionicons name="checkmark-circle" size={20} color={colors.success} />
+                  )}
+                </Pressable>
+              );
+            })}
+          </BuzzSectionGroup>
+        )}
+
+        {!authUser && humans.length > 0 && (
           <BuzzSectionGroup title="Active Identity">
             {humans.map((human, idx) => {
               const selected = human.id === currentUserId;

@@ -54,7 +54,15 @@ import { NotificationSettingsDialog } from './features/settings/NotificationSett
 import bubaiLogoUrl from './assets/bubai-logo.svg?no-inline';
 import workspaceStyles from './Workspace.module.css';
 import messageStyles from './features/messages/Messages.module.css';
-import { useAppearance } from './shared/theme/service';
+import { appearance, useAppearance } from './shared/theme/service';
+import { apiFetch, notifyUnauthorized } from './features/auth/auth-client';
+import { useBubaiAuth } from './features/auth/AuthGate';
+import { ProfileButton } from './features/auth/ProfileButton';
+import {
+  CommunityMembersDialog,
+  CreateCommunityDialog,
+  ProfileSettingsDialog,
+} from './features/auth/AuthDialogs';
 import { NavigationSection } from './design-system/ui/NavigationSection';
 import { NavigationItem } from './design-system/ui/NavigationItem';
 import { Panel } from './design-system/ui/Panel';
@@ -173,7 +181,7 @@ async function fetchMessagePage(
     query.set('before', String(cursor.nextCursor));
     if (cursor.nextCursorId) query.set('beforeId', cursor.nextCursorId);
   }
-  const response = await fetch(
+  const response = await apiFetch(
     `${SERVER_HTTP}/api/channels/${encodeURIComponent(channelId)}/messages?${query}`,
     { signal },
   );
@@ -481,7 +489,11 @@ function ConversationSurface({
 
 export default function App() {
   // Initialize Buzz appearance service (theme mode, accent color, bubble contrast / vibe level)
-  useAppearance();
+  const appearanceSnapshot = useAppearance();
+  const auth = useBubaiAuth();
+  const [showProfileSettings, setShowProfileSettings] = useState(false);
+  const [showCommunityMembers, setShowCommunityMembers] = useState(false);
+  const [showCreateCommunity, setShowCreateCommunity] = useState(false);
 
   const [channels, setChannels] = useState<Channel[]>([]);
   const [sidebarGroups, setSidebarGroups] = useState<SidebarGroup[]>([]);
@@ -534,11 +546,18 @@ export default function App() {
   const [sessions, setSessions] = useState<BotmuxSession[]>([]);
   const [asks, setAsks] = useState<BotmuxPendingAsk[]>([]);
   const [botmuxStatus, setBotmuxStatus] = useState<BotmuxStatus | null>(null);
+  const [wsConnected, setWsConnected] = useState(false);
 
   const [activeChannelId, setActiveChannelId] = useState<string>('');
-  const [currentUserId, setCurrentUserId] = useState<string>('u-owner');
+  const [currentUserId, setCurrentUserId] = useState<string>(() => auth.user?.id || 'u-owner');
   const currentUserIdRef = useRef(currentUserId);
   currentUserIdRef.current = currentUserId;
+
+  useEffect(() => {
+    if (auth.user?.id && auth.user.id !== currentUserId) {
+      setCurrentUserId(auth.user.id);
+    }
+  }, [auth.user?.id, currentUserId]);
 
   // Appearance popover
   const [showAppearance, setShowAppearance] = useState(false);
@@ -659,7 +678,7 @@ export default function App() {
   const loadActivity = useCallback(async () => {
     setActivityLoading(true);
     try {
-      const res = await fetch(
+      const res = await apiFetch(
         `${SERVER_HTTP}/api/activity?userId=${encodeURIComponent(currentUserIdRef.current)}`,
       );
       if (!res.ok) return;
@@ -706,7 +725,7 @@ export default function App() {
         prev.map((m) => (m.unreadReplyCount ? { ...m, unreadReplyCount: 0 } : m)),
       );
     }
-    void fetch(`${SERVER_HTTP}/api/channels/${encodeURIComponent(channelId)}/read`, {
+    void apiFetch(`${SERVER_HTTP}/api/channels/${encodeURIComponent(channelId)}/read`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ userId, includeThreads }),
@@ -729,7 +748,7 @@ export default function App() {
         return { ...c, threadUnreadCount: nextCount };
       }),
     );
-    void fetch(
+    void apiFetch(
       `${SERVER_HTTP}/api/channels/${encodeURIComponent(channelId)}/threads/${encodeURIComponent(rootMessageId)}/read`,
       {
         method: 'POST',
@@ -748,7 +767,7 @@ export default function App() {
   }, [channels]);
 
   useEffect(() => {
-    fetch(`${SERVER_HTTP}/api/bootstrap?userId=${encodeURIComponent(currentUserId)}`)
+    apiFetch(`${SERVER_HTTP}/api/bootstrap?userId=${encodeURIComponent(currentUserId)}`)
       .then((r) => r.json())
       .then(
         (data: {
@@ -778,7 +797,7 @@ export default function App() {
               prev && nextChannels.some((c) => c.id === prev) ? prev : defaultChannel.id,
             );
             if (hashMessageId) {
-              void fetch(
+              void apiFetch(
                 `${SERVER_HTTP}/api/messages/${encodeURIComponent(hashMessageId)}?userId=${encodeURIComponent(currentUserId)}`,
               )
                 .then((r) => (r.ok ? r.json() : null))
@@ -791,7 +810,7 @@ export default function App() {
         },
       )
       .catch(console.error);
-  }, [currentUserId]);
+  }, [currentUserId, auth.orgRevision]);
 
   useEffect(() => {
     if (!activeChannelId) return;
@@ -843,7 +862,7 @@ export default function App() {
     setPins([]);
     setPinsLoading(true);
     setPinsError(null);
-    fetch(`${SERVER_HTTP}/api/channels/${encodeURIComponent(activeChannelId)}/pins`, {
+    apiFetch(`${SERVER_HTTP}/api/channels/${encodeURIComponent(activeChannelId)}/pins`, {
       signal: controller.signal,
     })
       .then(async (response) => {
@@ -878,7 +897,7 @@ export default function App() {
       setMembersLoading(true);
     }
     setMembersError(null);
-    fetch(`${SERVER_HTTP}/api/channels/${encodeURIComponent(activeChannelId)}/members`, {
+    apiFetch(`${SERVER_HTTP}/api/channels/${encodeURIComponent(activeChannelId)}/members`, {
       signal: controller.signal,
     })
       .then(async (response) => {
@@ -969,7 +988,7 @@ export default function App() {
     setThreadReplies((current) => current.filter(belongsToThread));
     markThreadRead(activeChannelId, activeThreadRootId, currentUserId);
     let cancelled = false;
-    fetch(
+    apiFetch(
       `${SERVER_HTTP}/api/channels/${encodeURIComponent(activeChannelId)}/threads/${encodeURIComponent(activeThreadRootId)}`,
     )
       .then((r) => r.json())
@@ -1005,7 +1024,7 @@ export default function App() {
       const controller = new AbortController();
       previewRequests.set(rootId, controller);
       try {
-        const response = await fetch(
+        const response = await apiFetch(
           `${SERVER_HTTP}/api/channels/${encodeURIComponent(channelId)}/threads/${encodeURIComponent(rootId)}/preview`,
           { signal: controller.signal },
         );
@@ -1045,14 +1064,17 @@ export default function App() {
         return;
       }
       stopHeartbeat();
+      let opened = false;
       const ws = new WebSocket(SERVER_WS);
       wsRef.current = ws;
 
       ws.onopen = () => {
+        opened = true;
         if (closed || wsRef.current !== ws) {
           ws.close();
           return;
         }
+        setWsConnected(true);
         const isReconnect = hasConnectedOnce;
         hasConnectedOnce = true;
         ws.send(
@@ -1392,9 +1414,32 @@ export default function App() {
       ws.onclose = () => {
         if (closed || wsRef.current !== ws) return;
         wsRef.current = null;
+        setWsConnected(false);
         stopHeartbeat();
         failPendingSends();
         if (timer) clearTimeout(timer);
+        if (auth.authRequired && !opened) {
+          // Browser WebSocket hides HTTP 401 on handshake failure; probe session via raw fetch
+          // (without mutating Better Auth's useSession store) so Workspace stays mounted under SessionExpiredOverlay.
+          void fetch(`${SERVER_HTTP}/api/auth/get-session`, { credentials: 'include' })
+            .then(async (res) => {
+              if (closed) return;
+              const data = res.ok
+                ? ((await res.json().catch(() => null)) as { user?: unknown } | null)
+                : null;
+              if (!res.ok || !data?.user) {
+                notifyUnauthorized();
+                return;
+              }
+              timer = setTimeout(connect, 1000);
+            })
+            .catch(() => {
+              if (!closed) {
+                timer = setTimeout(connect, 1000);
+              }
+            });
+          return;
+        }
         timer = setTimeout(connect, 1000);
       };
 
@@ -1433,7 +1478,7 @@ export default function App() {
       wsRef.current = null;
       ws?.close();
     };
-  }, [applyPins]);
+  }, [applyPins, auth.orgRevision]);
 
   useEffect(() => {
     if (wsRef.current?.readyState === WebSocket.OPEN) {
@@ -1450,7 +1495,7 @@ export default function App() {
       return;
     }
     const controller = new AbortController();
-    fetch(`${SERVER_HTTP}/api/sessions/${encodeURIComponent(terminalSessionId)}/write-link`, {
+    apiFetch(`${SERVER_HTTP}/api/sessions/${encodeURIComponent(terminalSessionId)}/write-link`, {
       signal: controller.signal,
     })
       .then((r) => r.json())
@@ -1539,13 +1584,21 @@ export default function App() {
   }, [typingByChannel]);
 
   useEffect(() => {
+    if (!activeChannelId) return;
+    const hashParams = new URLSearchParams(window.location.hash.replace(/^#/, ''));
+    if (hashParams.get('channel') === activeChannelId) return;
+    const nextUrl = `${window.location.pathname}${window.location.search}#channel=${encodeURIComponent(activeChannelId)}`;
+    window.history.replaceState(null, '', nextUrl);
+  }, [activeChannelId]);
+
+  useEffect(() => {
     const onHashChange = () => {
       const hashRaw = window.location.hash.replace(/^#/, '');
       const hashParams = new URLSearchParams(hashRaw);
       const hashChannelId = hashParams.get('channel') || '';
       const hashMessageId = hashParams.get('message') || '';
       if (hashMessageId) {
-        void fetch(
+        void apiFetch(
           `${SERVER_HTTP}/api/messages/${encodeURIComponent(hashMessageId)}?userId=${encodeURIComponent(currentUserIdRef.current)}`,
         )
           .then((r) => (r.ok ? r.json() : null))
@@ -1554,11 +1607,15 @@ export default function App() {
           })
           .catch(() => undefined);
       } else if (hashChannelId && channelsRef.current.some((c) => c.id === hashChannelId)) {
-        openChannel(hashChannelId);
+        openChannel(hashChannelId, { syncUrl: false });
       }
     };
     window.addEventListener('hashchange', onHashChange);
-    return () => window.removeEventListener('hashchange', onHashChange);
+    window.addEventListener('popstate', onHashChange);
+    return () => {
+      window.removeEventListener('hashchange', onHashChange);
+      window.removeEventListener('popstate', onHashChange);
+    };
   }, []);
 
   useEffect(() => {
@@ -1659,7 +1716,7 @@ export default function App() {
     setEditHumanPending(true);
     setEditHumanError(null);
     try {
-      const res = await fetch(`${SERVER_HTTP}/api/humans/${encodeURIComponent(editHumanTarget.id)}`, {
+      const res = await apiFetch(`${SERVER_HTTP}/api/humans/${encodeURIComponent(editHumanTarget.id)}`, {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ name, avatarUrl: editHumanAvatar.trim() || null }),
@@ -1699,7 +1756,7 @@ export default function App() {
   };
 
   const handleToggleChannelMute = async (channel: Channel, muted: boolean) => {
-    const res = await fetch(`${SERVER_HTTP}/api/channels/${encodeURIComponent(channel.id)}/mute`, {
+    const res = await apiFetch(`${SERVER_HTTP}/api/channels/${encodeURIComponent(channel.id)}/mute`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ userId: currentUserId, muted }),
@@ -1712,7 +1769,7 @@ export default function App() {
   };
 
   const handleMarkChannelUnread = async (channel: Channel) => {
-    const res = await fetch(`${SERVER_HTTP}/api/channels/${encodeURIComponent(channel.id)}/unread`, {
+    const res = await apiFetch(`${SERVER_HTTP}/api/channels/${encodeURIComponent(channel.id)}/unread`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ userId: currentUserId }),
@@ -1739,7 +1796,7 @@ export default function App() {
     channel: Channel,
     placement: { starred?: boolean; groupId?: string | null },
   ) => {
-    const res = await fetch(
+    const res = await apiFetch(
       `${SERVER_HTTP}/api/channels/${encodeURIComponent(channel.id)}/placement`,
       {
         method: 'POST',
@@ -1766,7 +1823,7 @@ export default function App() {
     if (!name || creatingGroupPending) return;
     setCreatingGroupPending(true);
     try {
-      const res = await fetch(`${SERVER_HTTP}/api/sidebar-groups`, {
+      const res = await apiFetch(`${SERVER_HTTP}/api/sidebar-groups`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ userId: currentUserId, name }),
@@ -1794,7 +1851,7 @@ export default function App() {
     if (!name) return;
     setRenamingGroupPending(true);
     try {
-      const res = await fetch(
+      const res = await apiFetch(
         `${SERVER_HTTP}/api/sidebar-groups/${encodeURIComponent(renameGroupTarget.id)}`,
         {
           method: 'PATCH',
@@ -1835,7 +1892,7 @@ export default function App() {
     setSettingsPending(true);
     setSettingsError(null);
     try {
-      const res = await fetch(
+      const res = await apiFetch(
         `${SERVER_HTTP}/api/channels/${encodeURIComponent(channelSettingsTarget.id)}/settings`,
         {
           method: 'PATCH',
@@ -1864,7 +1921,7 @@ export default function App() {
   };
 
   const handleDeleteSidebarGroup = async (groupId: string) => {
-    const res = await fetch(
+    const res = await apiFetch(
       `${SERVER_HTTP}/api/sidebar-groups/${encodeURIComponent(groupId)}?userId=${encodeURIComponent(currentUserId)}`,
       { method: 'DELETE' },
     );
@@ -1881,7 +1938,7 @@ export default function App() {
   const handleSetChannelArchived = async (channel: Channel, archived: boolean) => {
     setChannelLifecyclePending(true);
     try {
-      const res = await fetch(
+      const res = await apiFetch(
         `${SERVER_HTTP}/api/channels/${encodeURIComponent(channel.id)}/archive`,
         {
           method: 'PATCH',
@@ -1911,7 +1968,7 @@ export default function App() {
   const handleDeleteChannel = async (channel: Channel) => {
     setChannelLifecyclePending(true);
     try {
-      const res = await fetch(
+      const res = await apiFetch(
         `${SERVER_HTTP}/api/channels/${encodeURIComponent(channel.id)}?userId=${encodeURIComponent(currentUserId)}`,
         { method: 'DELETE' },
       );
@@ -1937,7 +1994,7 @@ export default function App() {
   const handleLeaveChannel = async (channel: Channel) => {
     setChannelLifecyclePending(true);
     try {
-      const res = await fetch(
+      const res = await apiFetch(
         `${SERVER_HTTP}/api/channels/${encodeURIComponent(channel.id)}/members`,
         {
           method: 'DELETE',
@@ -1964,7 +2021,7 @@ export default function App() {
   };
 
   const handleCloseDm = async (channel: Channel) => {
-    const res = await fetch(`${SERVER_HTTP}/api/channels/${encodeURIComponent(channel.id)}/hide`, {
+    const res = await apiFetch(`${SERVER_HTTP}/api/channels/${encodeURIComponent(channel.id)}/hide`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ userId: currentUserId, hidden: true }),
@@ -1983,11 +2040,18 @@ export default function App() {
     });
   };
 
-  const openChannel = (channelId: string) => {
+  const openChannel = (channelId: string, options?: { syncUrl?: boolean }) => {
     setJumpTarget(null);
     setMessageFocus(null);
     setNavigationError(null);
     setActiveChannelId(channelId);
+    if (options?.syncUrl !== false && channelId) {
+      const nextHash = `#channel=${encodeURIComponent(channelId)}`;
+      if (window.location.hash !== nextHash) {
+        const nextUrl = `${window.location.pathname}${window.location.search}${nextHash}`;
+        window.history.pushState(null, '', nextUrl);
+      }
+    }
   };
 
   const openMessage = (message: Message) => {
@@ -2024,7 +2088,7 @@ export default function App() {
   const handleUploadFile = async (file: File): Promise<UploadedAttachment | null> => {
     const form = new FormData();
     form.append('file', file);
-    const res = await fetch(`${SERVER_HTTP}/api/uploads`, {
+    const res = await apiFetch(`${SERVER_HTTP}/api/uploads`, {
       method: 'POST',
       body: form,
     });
@@ -2140,8 +2204,8 @@ export default function App() {
   const handleTogglePin = async (msg: Message) => {
     const endpoint = `${SERVER_HTTP}/api/channels/${encodeURIComponent(msg.channelId)}/pins`;
     const response = msg.pinned
-      ? await fetch(`${endpoint}/${encodeURIComponent(msg.id)}`, { method: 'DELETE' })
-      : await fetch(endpoint, {
+      ? await apiFetch(`${endpoint}/${encodeURIComponent(msg.id)}`, { method: 'DELETE' })
+      : await apiFetch(endpoint, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ messageId: msg.id, userId: currentUserId }),
@@ -2154,7 +2218,7 @@ export default function App() {
   const handleSaveEdit = async (messageId: string) => {
     const content = editingDraft.trim();
     if (!content) return;
-    await fetch(`${SERVER_HTTP}/api/messages/${encodeURIComponent(messageId)}`, {
+    await apiFetch(`${SERVER_HTTP}/api/messages/${encodeURIComponent(messageId)}`, {
       method: 'PATCH',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ content }),
@@ -2164,13 +2228,13 @@ export default function App() {
   };
 
   const handleDeleteMessage = async (messageId: string) => {
-    await fetch(`${SERVER_HTTP}/api/messages/${encodeURIComponent(messageId)}`, {
+    await apiFetch(`${SERVER_HTTP}/api/messages/${encodeURIComponent(messageId)}`, {
       method: 'DELETE',
     });
   };
 
   const handleToggleReaction = async (messageId: string, emoji: string) => {
-    await fetch(`${SERVER_HTTP}/api/messages/${encodeURIComponent(messageId)}/reactions`, {
+    await apiFetch(`${SERVER_HTTP}/api/messages/${encodeURIComponent(messageId)}/reactions`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ userId: currentUserId, emoji }),
@@ -2178,7 +2242,7 @@ export default function App() {
   };
 
   const handleOpenDm = async (target: Participant) => {
-    const res = await fetch(`${SERVER_HTTP}/api/dms`, {
+    const res = await apiFetch(`${SERVER_HTTP}/api/dms`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -2203,7 +2267,7 @@ export default function App() {
   ) => {
     const channelId = activeChannelId;
     if (!channelId) return;
-    const response = await fetch(`${SERVER_HTTP}/api/channels/${encodeURIComponent(channelId)}/members`, {
+    const response = await apiFetch(`${SERVER_HTTP}/api/channels/${encodeURIComponent(channelId)}/members`, {
       method,
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(member),
@@ -2216,7 +2280,7 @@ export default function App() {
     if (!terminalSessionId) return;
     setSessionActionBusy(op);
     try {
-      await fetch(
+      await apiFetch(
         `${SERVER_HTTP}/api/sessions/${encodeURIComponent(terminalSessionId)}/${op}`,
         { method: 'POST' },
       );
@@ -2239,7 +2303,7 @@ export default function App() {
     setSessionHistory(request);
     let content: string;
     try {
-      const res = await fetch(
+      const res = await apiFetch(
         `${SERVER_HTTP}/api/sessions/${encodeURIComponent(terminalSessionId)}/history`,
       );
       content = JSON.stringify(await res.json(), null, 2);
@@ -2251,7 +2315,7 @@ export default function App() {
 
   const handleAnswerAsk = async (ask: BotmuxPendingAsk, optionKey: string) => {
     const currentHuman = humans.find((h) => h.id === currentUserId);
-    await fetch(`${SERVER_HTTP}/api/asks/answer`, {
+    await apiFetch(`${SERVER_HTTP}/api/asks/answer`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -2275,7 +2339,7 @@ export default function App() {
     setCreateChannelError(null);
     setCreatingChannelPending(true);
     try {
-      const res = await fetch(`${SERVER_HTTP}/api/channels`, {
+      const res = await apiFetch(`${SERVER_HTTP}/api/channels`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ name, userId: currentUserId }),
@@ -2315,7 +2379,7 @@ export default function App() {
   const handleAddHuman = async () => {
     const name = newHumanName.trim();
     if (!name) return;
-    const res = await fetch(`${SERVER_HTTP}/api/humans`, {
+    const res = await apiFetch(`${SERVER_HTTP}/api/humans`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ name }),
@@ -2366,6 +2430,26 @@ export default function App() {
             <ResizableSidebar scope="buzz-botmux-workspace">
               <SidebarFrame
                 label="Workspace navigation"
+                footer={
+                  <ProfileButton
+                    user={auth.user}
+                    fallbackName={
+                      participants.find((p) => p.id === currentUserId)?.name || 'Owner'
+                    }
+                    fallbackAvatarUrl={
+                      participants.find((p) => p.id === currentUserId)?.avatarUrl
+                    }
+                    organizations={auth.organizations}
+                    activeOrg={auth.activeOrg}
+                    colorMode={appearanceSnapshot.preference}
+                    onColorModeChange={(mode) => appearance.setMode(mode)}
+                    onSwitchOrg={(orgId) => void auth.switchOrganization(orgId)}
+                    onOpenCreateOrg={() => setShowCreateCommunity(true)}
+                    onOpenCommunityMembers={() => setShowCommunityMembers(true)}
+                    onOpenProfileSettings={() => setShowProfileSettings(true)}
+                    onSignOut={() => void auth.signOut()}
+                  />
+                }
                 header={
                   <div>
                     <PanelHeader
@@ -2381,8 +2465,8 @@ export default function App() {
                       }
                       actions={
                         <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-                          <Badge tone={botmuxStatus?.authenticated ? 'success' : 'neutral'}>
-                            {botmuxStatus?.authenticated ? 'Live' : 'Offline'}
+                          <Badge tone={wsConnected ? 'success' : 'neutral'}>
+                            {wsConnected ? 'Live' : 'Offline'}
                           </Badge>
                           <IconButton
                             ref={settingsButton}
@@ -2858,6 +2942,7 @@ export default function App() {
                   )}
                 </NavigationSection>
 
+                {!auth.authRequired && (
                 <NavigationSection
                   label="Members (切换身份)"
                   action={
@@ -2936,6 +3021,7 @@ export default function App() {
                     </div>
                   ))}
                 </NavigationSection>
+                )}
               </SidebarFrame>
             </ResizableSidebar>
 
@@ -3851,6 +3937,30 @@ export default function App() {
           onClose={() => setMediaViewer(null)}
         />
       )}
+
+      {/* Phase 2 Auth & Community Dialogs */}
+      <ProfileSettingsDialog
+        open={showProfileSettings}
+        user={auth.user}
+        onOpenChange={setShowProfileSettings}
+        onSaved={async () => {
+          await auth.refreshSession();
+        }}
+      />
+      <CommunityMembersDialog
+        open={showCommunityMembers}
+        activeOrg={auth.activeOrg}
+        currentUserId={auth.user?.id}
+        onOpenChange={setShowCommunityMembers}
+      />
+      <CreateCommunityDialog
+        open={showCreateCommunity}
+        onOpenChange={setShowCreateCommunity}
+        onCreated={async (orgId) => {
+          await auth.refreshOrganizations();
+          await auth.switchOrganization(orgId);
+        }}
+      />
     </div>
   );
 }

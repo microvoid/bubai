@@ -24,7 +24,7 @@ export interface RequestIdentity {
 export interface BotVerificationResult {
   ok: boolean;
   botUserId?: string;
-  method?: 'bot-key' | 'static-token' | 'local-dev';
+  method?: 'bot-key' | 'bot-server-key' | 'static-token' | 'local-dev';
 }
 
 export interface CreateServerAuthOptions {
@@ -117,7 +117,9 @@ export async function syncAuthUserToLegacyUsers(
   db: ChatDb,
   authUser: ResolvedAuthSession['user'],
 ): Promise<boolean> {
-  const fingerprint = `${authUser.name}\0${authUser.image ?? ''}`;
+  const effectiveName =
+    authUser.name.trim() || authUser.email.split('@')[0] || authUser.email || 'User';
+  const fingerprint = `${effectiveName}\0${authUser.image ?? ''}`;
   let cache = syncedUsersByDb.get(db);
   if (!cache) {
     cache = new Map<string, string>();
@@ -131,13 +133,13 @@ export async function syncAuthUserToLegacyUsers(
     .insert(users)
     .values({
       id: authUser.id,
-      name: authUser.name,
+      name: effectiveName,
       avatarUrl: authUser.image ?? null,
     })
     .onConflictDoUpdate({
       target: users.id,
       set: {
-        name: authUser.name,
+        name: effectiveName,
         avatarUrl: authUser.image ?? null,
       },
     });
@@ -221,12 +223,23 @@ export async function verifyBotRequest(
   auth: Auth,
   headers: Headers,
   staticBotToken?: string,
+  queryToken?: string | null,
+  requireAuth = false,
 ): Promise<BotVerificationResult> {
   const authHeader = headers.get('authorization') || '';
-  const bearer = authHeader.startsWith('Bearer ') ? authHeader.slice(7).trim() : '';
+  const bearer = authHeader.startsWith('Bearer ')
+    ? authHeader.slice(7).trim()
+    : (queryToken?.trim() || '');
 
-  if (bearer.startsWith('bot_') || bearer.startsWith('bot-server_')) {
-    const creds = botCredentials(auth.api);
+  if (bearer.startsWith('bot-server_')) {
+    const creds = botCredentials(auth.api, 'bot-server');
+    const verified = await creds.verifyBotKey(bearer);
+    if (!verified) return { ok: false };
+    return { ok: true, botUserId: verified.userId, method: 'bot-server-key' };
+  }
+
+  if (bearer.startsWith('bot_')) {
+    const creds = botCredentials(auth.api, 'bot');
     const verified = await creds.verifyBotKey(bearer);
     if (!verified) return { ok: false };
     return { ok: true, botUserId: verified.userId, method: 'bot-key' };
@@ -235,6 +248,10 @@ export async function verifyBotRequest(
   if (staticBotToken) {
     if (bearer !== staticBotToken) return { ok: false };
     return { ok: true, method: 'static-token' };
+  }
+
+  if (requireAuth) {
+    return { ok: false };
   }
 
   return { ok: true, method: 'local-dev' };

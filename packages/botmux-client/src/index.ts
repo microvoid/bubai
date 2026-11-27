@@ -5,6 +5,7 @@ import type { TriggerRequest, TriggerResponse } from './trigger-types.js';
 
 export * from './trigger-types.js';
 export * from './progress/index.js';
+export * from './connector.js';
 
 const execFileAsync = promisify(execFile);
 

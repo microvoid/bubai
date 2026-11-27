@@ -1,12 +1,21 @@
 import type {
   AgentDetail,
+  AgentProgressSnapshot,
+  AgentProvisionInput,
+  AgentProvisionResult,
   AgentUpdateInput,
   BootstrapPayload,
+  BotGatewayAgentDescriptor,
+  BotGatewayHandle,
+  BotmuxPendingAskQuestion,
+  BotTurnRequestedEvent,
   Channel,
   ChannelMemberRow,
   ChatMessage,
   InstanceInfo,
   MessageAttachment,
+  MessageCardStatus,
+  Participant,
   ServerWsEvent,
   ThreadPayload,
   WsConnectionState,
@@ -22,9 +31,16 @@ export function normalizeServerUrl(raw: string): string {
   return `${parsed.origin}${parsed.pathname.replace(/\/+$/, '')}`;
 }
 
-export function toWebSocketUrl(baseUrl: string): string {
+export function toWebSocketUrl(baseUrl: string, token?: string): string {
   const normalized = normalizeServerUrl(baseUrl);
-  return `${normalized.replace(/^http/i, 'ws')}/ws`;
+  const base = `${normalized.replace(/^http/i, 'ws')}/ws`;
+  return token ? `${base}?token=${encodeURIComponent(token)}` : base;
+}
+
+export function toBotGatewayWebSocketUrl(baseUrl: string, token?: string): string {
+  const normalized = normalizeServerUrl(baseUrl);
+  const base = `${normalized.replace(/^http/i, 'ws')}/ws/bot`;
+  return token ? `${base}?token=${encodeURIComponent(token)}` : base;
 }
 
 export interface BubaiClientOptions {
@@ -296,7 +312,7 @@ export class BubaiClient {
     const WS =
       params.WebSocketImpl ??
       (globalThis.WebSocket as unknown as new (url: string) => WsLike);
-    const wsUrl = toWebSocketUrl(this.baseUrl);
+    const wsUrl = toWebSocketUrl(this.baseUrl, this.token);
 
     let closed = false;
     let socket: WsLike | null = null;
@@ -382,6 +398,302 @@ export class BubaiClient {
       close() {
         closed = true;
         clearTimer();
+        params.onStateChange?.('closed');
+        if (socket) {
+          const prev = socket;
+          socket = null;
+          try {
+            prev.close();
+          } catch {
+            // ignore
+          }
+        }
+      },
+    };
+  }
+
+  // ── Unified Agent & Bot Protocol API (shared by CLI, Web, Native, and Bridges) ──
+
+  listAgents(): Promise<{ agents: Participant[] }> {
+    return this.requestJson('/api/agents');
+  }
+
+  provisionAgent(input: AgentProvisionInput): Promise<AgentProvisionResult> {
+    return this.requestJson('/api/agents/provision', {
+      method: 'POST',
+      body: JSON.stringify(input),
+    });
+  }
+
+  addChannelMember(
+    channelId: string,
+    member: { userId?: string; agentId?: string; autoReply?: boolean },
+  ): Promise<{ member: ChannelMemberRow }> {
+    return this.requestJson(`/api/channels/${encodeURIComponent(channelId)}/members`, {
+      method: 'POST',
+      body: JSON.stringify(member),
+    });
+  }
+
+  registerBotAgents(
+    agents: Array<{
+      agentId: string;
+      adapterType?: 'botmux' | 'gateway' | 'webhook';
+      externalId?: string;
+      defaultName?: string;
+      description?: string;
+      cliId?: string;
+      workingDir?: string | null;
+      capabilities?: string[];
+      webhookUrl?: string;
+      webhookSecret?: string;
+    }>,
+  ): Promise<{ ok: boolean; registered: string[] }> {
+    return this.requestJson('/api/bot/agents/register', {
+      method: 'POST',
+      body: JSON.stringify({ agents }),
+    });
+  }
+
+  sendBotHeartbeat(input: {
+    agentId?: string;
+    status?: 'online' | 'offline';
+    capabilities?: string[];
+    ttlMs?: number;
+  }): Promise<{ ok: boolean; agentId: string; status: string }> {
+    return this.requestJson('/api/bot/heartbeat', {
+      method: 'POST',
+      body: JSON.stringify(input),
+    });
+  }
+
+  sendBotMessage(input: {
+    botId: string;
+    channelId?: string;
+    channelName?: string;
+    content: string;
+    threadId?: string | null;
+    replyToId?: string | null;
+    messageId?: string | null;
+    attachments?: MessageAttachment[];
+    adapterMeta?: Record<string, unknown>;
+  }): Promise<{ message: ChatMessage; settledPlaceholder?: boolean }> {
+    return this.requestJson('/api/bot/messages', {
+      method: 'POST',
+      body: JSON.stringify(input),
+    });
+  }
+
+  updateBotMessage(
+    messageId: string,
+    patch: {
+      content?: string;
+      status?: MessageCardStatus;
+      summary?: string;
+      progress?: AgentProgressSnapshot;
+      adapterMeta?: Record<string, unknown>;
+      attachments?: MessageAttachment[];
+    },
+  ): Promise<{ ok: boolean; message: ChatMessage }> {
+    return this.requestJson(`/api/bot/messages/${encodeURIComponent(messageId)}`, {
+      method: 'PATCH',
+      body: JSON.stringify(patch),
+    });
+  }
+
+  sendBotProgress(
+    messageId: string,
+    progress: AgentProgressSnapshot,
+  ): Promise<{ ok: boolean; updated: boolean; message: ChatMessage }> {
+    return this.requestJson(`/api/bot/messages/${encodeURIComponent(messageId)}/progress`, {
+      method: 'POST',
+      body: JSON.stringify({ progress }),
+    });
+  }
+
+  createBotAsk(input: {
+    askId?: string;
+    agentId?: string;
+    botName?: string;
+    sessionId?: string;
+    title?: string;
+    prompt?: string;
+    questions?: BotmuxPendingAskQuestion[];
+  }): Promise<{ ok: boolean; ask: Record<string, unknown> }> {
+    return this.requestJson('/api/bot/asks', {
+      method: 'POST',
+      body: JSON.stringify(input),
+    });
+  }
+
+  getBotChannelMessages(
+    channelId: string,
+    opts?: { threadId?: string; limit?: number },
+  ): Promise<{ channelId: string; threadId: string | null; messages: ChatMessage[] }> {
+    const params = new URLSearchParams();
+    if (opts?.threadId) params.set('threadId', opts.threadId);
+    if (opts?.limit !== undefined) params.set('limit', String(opts.limit));
+    const qs = params.toString();
+    return this.requestJson(
+      `/api/bot/channels/${encodeURIComponent(channelId)}/messages${qs ? `?${qs}` : ''}`,
+    );
+  }
+
+  connectBotGateway(params: {
+    agents: BotGatewayAgentDescriptor[];
+    onWelcome?: (payload: { connectionId: string; agentIds: string[] }) => void;
+    onTurnRequested?: (event: BotTurnRequestedEvent) => void;
+    onAskAnswered?: (payload: {
+      askId: string;
+      larkAppId: string;
+      selections: string[][];
+      by?: string;
+    }) => void;
+    onStateChange?: (state: WsConnectionState) => void;
+    heartbeatMs?: number;
+    WebSocketImpl?: new (url: string) => WsLike;
+  }): BotGatewayHandle {
+    const WS =
+      params.WebSocketImpl ??
+      (globalThis.WebSocket as unknown as new (url: string) => WsLike);
+    const wsUrl = toBotGatewayWebSocketUrl(this.baseUrl, this.token);
+    const heartbeatMs = params.heartbeatMs ?? 25_000;
+
+    let closed = false;
+    let socket: WsLike | null = null;
+    let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+    let heartbeatTimer: ReturnType<typeof setInterval> | null = null;
+    let attempt = 0;
+
+    const clearTimers = () => {
+      if (reconnectTimer !== null) {
+        clearTimeout(reconnectTimer);
+        reconnectTimer = null;
+      }
+      if (heartbeatTimer !== null) {
+        clearInterval(heartbeatTimer);
+        heartbeatTimer = null;
+      }
+    };
+
+    const sendRaw = (payload: Record<string, unknown>): boolean => {
+      if (!socket || socket.readyState !== 1) return false;
+      socket.send(JSON.stringify(payload));
+      return true;
+    };
+
+    const connect = () => {
+      if (closed) return;
+      clearTimers();
+      params.onStateChange?.(attempt === 0 ? 'connecting' : 'reconnecting');
+
+      const ws = new WS(wsUrl);
+      socket = ws;
+
+      ws.onopen = () => {
+        if (closed || socket !== ws) return;
+        attempt = 0;
+        params.onStateChange?.('open');
+        ws.send(
+          JSON.stringify({
+            type: 'bot.hello',
+            payload: {
+              adapterType: 'gateway',
+              agents: params.agents,
+            },
+          }),
+        );
+        heartbeatTimer = setInterval(() => {
+          if (socket === ws && ws.readyState === 1) {
+            ws.send(JSON.stringify({ type: 'bot.ping' }));
+          }
+        }, heartbeatMs);
+      };
+
+      ws.onmessage = (evt) => {
+        if (closed || socket !== ws) return;
+        try {
+          const parsed = JSON.parse(String(evt.data)) as { type?: string; payload?: unknown };
+          if (parsed.type === 'bot.welcome' && parsed.payload) {
+            params.onWelcome?.(parsed.payload as { connectionId: string; agentIds: string[] });
+          } else if (parsed.type === 'turn.requested') {
+            params.onTurnRequested?.(parsed as unknown as BotTurnRequestedEvent);
+          } else if (parsed.type === 'ask.answered' && parsed.payload) {
+            params.onAskAnswered?.(
+              parsed.payload as {
+                askId: string;
+                larkAppId: string;
+                selections: string[][];
+                by?: string;
+              },
+            );
+          }
+        } catch {
+          // ignore malformed frames
+        }
+      };
+
+      ws.onclose = () => {
+        if (closed || socket !== ws) return;
+        socket = null;
+        clearTimers();
+        attempt += 1;
+        params.onStateChange?.('reconnecting');
+        const delayMs = Math.min(1000 * 2 ** Math.min(attempt - 1, 4), 15_000);
+        reconnectTimer = setTimeout(connect, delayMs);
+      };
+
+      ws.onerror = () => {
+        // onclose handles reconnect
+      };
+    };
+
+    connect();
+
+    return {
+      send: sendRaw,
+      sendPresence(agentId, status, capabilities) {
+        return sendRaw({
+          type: 'bot.presence',
+          payload: { agentId, status, ...(capabilities ? { capabilities } : {}) },
+        });
+      },
+      sendTurnProgress(messageId, progress) {
+        return sendRaw({
+          type: 'bot.turn.progress',
+          payload: { messageId, progress },
+        });
+      },
+      sendTurnComplete(payload) {
+        return sendRaw({
+          type: 'bot.turn.complete',
+          payload,
+        });
+      },
+      createAsk(payload) {
+        return sendRaw({
+          type: 'bot.ask.create',
+          payload,
+        });
+      },
+      reconnectNow() {
+        if (closed) return;
+        clearTimers();
+        attempt = 0;
+        if (socket) {
+          const prev = socket;
+          socket = null;
+          try {
+            prev.close();
+          } catch {
+            // ignore
+          }
+        }
+        connect();
+      },
+      close() {
+        closed = true;
+        clearTimers();
         params.onStateChange?.('closed');
         if (socket) {
           const prev = socket;

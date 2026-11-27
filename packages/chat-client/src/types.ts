@@ -36,6 +36,8 @@ export interface Participant {
   workingDir?: string;
   status: 'online' | 'offline';
   cliId?: string;
+  adapterType?: string;
+  capabilities?: string[];
 }
 
 export interface ReactionGroup {
@@ -108,6 +110,7 @@ export interface ChatMessage {
   card?: MessageCard;
   attachments?: MessageAttachment[];
   botmuxSessionId?: string;
+  adapterMeta?: Record<string, unknown>;
   replyCount?: number;
   reactions?: ReactionGroup[];
   pinned?: boolean;
@@ -176,6 +179,9 @@ export interface AgentDetail {
   name: string;
   botName: string;
   cliId: string;
+  adapterType?: string;
+  capabilities?: string[];
+  webhookUrl?: string | null;
   status: 'online' | 'offline';
   workingDir: string | null;
   description: string;
@@ -240,3 +246,108 @@ export type ServerWsEvent =
   | { type: 'botmux.event'; payload: { eventName: string; data: unknown } };
 
 export type WsConnectionState = 'connecting' | 'open' | 'reconnecting' | 'closed';
+
+export interface AgentProvisionInput {
+  agentId?: string;
+  adapterType?: 'botmux' | 'gateway' | 'webhook';
+  externalId?: string;
+  name: string;
+  description?: string;
+  systemPrompt?: string;
+  avatarUrl?: string;
+  cliId?: string;
+  workingDir?: string;
+  capabilities?: string[];
+  webhookUrl?: string;
+  webhookSecret?: string;
+  channelId?: string;
+  channelName?: string;
+  autoReply?: boolean;
+  issueKey?: boolean;
+  keyScope?: 'bot' | 'bot-server';
+}
+
+export interface AgentProvisionResult {
+  ok: boolean;
+  created: boolean;
+  agent: Participant;
+  channelId?: string;
+  apiKey?: string;
+}
+
+export interface BotGatewayAgentDescriptor {
+  id: string;
+  externalId?: string;
+  name: string;
+  description?: string;
+  cliId?: string;
+  workingDir?: string | null;
+  capabilities?: string[];
+}
+
+export interface BotTurnRequestedEvent {
+  eventId: string;
+  type: 'turn.requested';
+  botId: string;
+  externalId?: string | null;
+  turnId: string;
+  channel: {
+    id: string;
+    name: string;
+    kind: string;
+    topic: string;
+    replyMode: string;
+  };
+  threadId?: string;
+  triggerMessage: {
+    id: string;
+    senderId: string;
+    senderName: string;
+    content: string;
+    attachments: MessageAttachment[];
+  };
+  replyTarget: {
+    channelId: string;
+    threadId?: string;
+    messageId: string;
+  };
+  systemPrompt?: string;
+  history: Array<{
+    sender: string;
+    role: 'human' | 'agent';
+    content: string;
+  }>;
+  outboundApi: {
+    endpoint: string;
+    progressEndpoint: string;
+    cliScriptPath?: string;
+    botId: string;
+    channelId: string;
+    threadId?: string;
+    placeholderMessageId: string;
+  };
+}
+
+export interface BotGatewayHandle {
+  send(payload: Record<string, unknown>): boolean;
+  sendPresence(agentId: string, status: 'online' | 'offline', capabilities?: string[]): boolean;
+  sendTurnProgress(messageId: string, progress: AgentProgressSnapshot): boolean;
+  sendTurnComplete(payload: {
+    botId: string;
+    messageId: string;
+    content: string;
+    status?: 'completed' | 'failed' | 'interrupted' | 'timeout';
+    adapterMeta?: Record<string, unknown>;
+  }): boolean;
+  createAsk(payload: {
+    askId?: string;
+    agentId: string;
+    botName?: string;
+    sessionId?: string;
+    title?: string;
+    prompt?: string;
+    questions?: BotmuxPendingAskQuestion[];
+  }): boolean;
+  reconnectNow(): void;
+  close(): void;
+}

@@ -176,6 +176,7 @@ export const messages = pgTable(
     card: jsonb('card').$type<MessageCardData | null>(),
     attachments: jsonb('attachments').$type<MessageAttachment[] | null>(),
     botmuxSessionId: text('botmux_session_id'),
+    adapterMeta: jsonb('adapter_meta').$type<Record<string, unknown> | null>(),
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp('updated_at', { withTimezone: true }),
     deletedAt: timestamp('deleted_at', { withTimezone: true }),
@@ -226,11 +227,20 @@ export const botmuxBindings = pgTable(
 
 export const agentProfiles = pgTable('agent_profiles', {
   agentId: text('agent_id').primaryKey(),
+  adapterType: text('adapter_type').notNull().default('botmux'),
+  externalId: text('external_id'),
+  defaultName: text('default_name'),
   displayName: text('display_name'),
   description: text('description'),
   systemPrompt: text('system_prompt'),
   avatarUrl: text('avatar_url'),
+  cliId: text('cli_id'),
+  workingDir: text('working_dir'),
+  capabilities: jsonb('capabilities').$type<string[] | null>(),
+  webhookUrl: text('webhook_url'),
+  webhookSecret: text('webhook_secret'),
   archived: boolean('archived').notNull().default(false),
+  lastSeenAt: timestamp('last_seen_at', { withTimezone: true }),
   createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
   updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
 });

@@ -37,17 +37,14 @@ import {
   type MessageCardData,
 } from '@buzz-botmux/db';
 import {
-  BotmuxClient,
   finalizeProgressSnapshot,
   normalizeProgressSnapshot,
   progressSnapshotEquals,
   readTurnProgress,
   type AgentProgressSnapshot,
-  type BotmuxBot,
   type BotmuxSession,
   type BuzzTurnContext,
   type DashboardAskAnswerRequest,
-  type TriggerResponse,
 } from '@buzz-botmux/botmux-client';
 import { readAntigravityResult } from './antigravity-result';
 import {
@@ -55,7 +52,7 @@ import {
   proxyTerminalHttpRequest,
   resolveTerminalUpstreamUrl,
 } from './terminal-proxy';
-import { AUTH_DDL } from '@bubai/auth';
+import { AUTH_DDL, authSchema, botCredentials } from '@bubai/auth';
 import { createUploadStorage } from './storage';
 import {
   buildSessionHeaders,
@@ -64,9 +61,15 @@ import {
   resolveTrustedOrigins,
   verifyBotRequest,
 } from './auth';
+import { AgentDispatcher } from './adapters/dispatcher';
+import { BotmuxAgentAdapter } from './adapters/botmux-adapter';
+import { BotGatewayAdapter, type BotGatewayWsData } from './adapters/gateway-adapter';
+import { WebhookAgentAdapter } from './adapters/webhook-adapter';
+import type { AgentRegistrationInput, ResolvedAgent } from './adapters/types';
 
 const PORT = Number(process.env.PORT || 4000);
 const AUTH_REQUIRED = process.env.BUBAI_AUTH_REQUIRED === 'true';
+const BOTMUX_DISABLED = process.env.BOTMUX_DISABLED === 'true';
 const BOTMUX_ENDPOINT = process.env.BOTMUX_ENDPOINT || 'http://127.0.0.1:7891';
 const BOTMUX_TOKEN = process.env.BOTMUX_TOKEN;
 const BUZZ_BOT_TOKEN = process.env.BUZZ_BOT_TOKEN;
@@ -128,20 +131,97 @@ const STATIC_DIR = process.env.STATIC_DIR?.trim()
 
 const { db, driver: dbDriver } = await openChatDatabase({ beforeDdl: AUTH_DDL });
 const auth = createServerAuth({ db, port: PORT });
-const botmux = new BotmuxClient(BOTMUX_ENDPOINT, BOTMUX_TOKEN);
+
+const botmuxAdapter = new BotmuxAgentAdapter({
+  db,
+  endpoint: BOTMUX_ENDPOINT,
+  token: BOTMUX_TOKEN,
+  enabled: !BOTMUX_DISABLED,
+});
+const webhookAdapter = new WebhookAgentAdapter();
+const gatewayAdapter = new BotGatewayAdapter({
+  onAgentsRegistered: async (agents) => {
+    await dispatcher.upsertAgents(agents);
+  },
+  onPresenceChanged: async () => {
+    broadcast({ type: 'presence.updated', payload: { participants: await listParticipants() } });
+  },
+  onAsksChanged: async () => {
+    broadcast({ type: 'asks.updated', payload: { asks: await dispatcher.getPendingAsks() } });
+  },
+  onTurnProgress: async (messageId, progress) => {
+    const [row] = await db
+      .select()
+      .from(messages)
+      .where(and(eq(messages.id, messageId), isNull(messages.deletedAt)))
+      .limit(1);
+    if (row) {
+      await applyMessageProgress(row, progress);
+    }
+  },
+  onTurnComplete: async ({ botId, messageId, content, status, adapterMeta }) => {
+    const [row] = await db
+      .select()
+      .from(messages)
+      .where(and(eq(messages.id, messageId), isNull(messages.deletedAt)))
+      .limit(1);
+    if (!row || row.card?.status !== 'running') return;
+    const finalStatus = status ?? 'completed';
+    const settledProgress = finalizeProgressSnapshot(
+      row.card.progress,
+      finalStatus === 'completed' ? 'completed' : 'failed',
+    );
+    const finishedAt = Date.now();
+    const startedAt = row.card.startedAt ?? row.createdAt.getTime();
+    const [settled] = await db
+      .update(messages)
+      .set({
+        content: content.trim() || (finalStatus === 'completed' ? '' : `Agent turn ${finalStatus}`),
+        adapterMeta: adapterMeta ?? row.adapterMeta,
+        updatedAt: new Date(),
+        card: {
+          title: row.card.title || botId,
+          status: finalStatus,
+          ...(row.card.parallel ? { parallel: true } : {}),
+          startedAt,
+          finishedAt,
+          summary: finalStatus === 'completed' ? 'Agent turn completed (gateway)' : content || finalStatus,
+          ...(settledProgress ? { progress: settledProgress } : {}),
+        },
+      })
+      .where(and(eq(messages.id, row.id), sql`${messages.card}->>'status' = 'running'`))
+      .returning();
+    if (settled) {
+      const reactions = (await getReactionsForMessages([settled.id])).get(settled.id) || [];
+      broadcast({
+        type: 'message.updated',
+        payload: { ...formatMessageRow(settled, 0, reactions), justCompleted: true },
+      });
+    }
+  },
+});
+const dispatcher = new AgentDispatcher({
+  db,
+  botmux: botmuxAdapter,
+  gateway: gatewayAdapter,
+  webhook: webhookAdapter,
+});
 
 interface WsClientData {
-  kind?: 'chat' | 'terminal-proxy';
+  kind?: 'chat' | 'terminal-proxy' | 'bot-gateway';
   userId?: string;
   organizationId?: string;
   authenticated?: boolean;
   upstreamWsUrl?: string;
   upstreamWs?: WebSocket | null;
   pendingFrames?: Array<string | ArrayBuffer | Uint8Array>;
+  connectionId?: string;
+  botUserId?: string;
+  isServerKey?: boolean;
+  boundAgentIds?: Set<string>;
 }
 
 const clients = new Set<ServerWebSocket<WsClientData>>();
-let cachedBots: BotmuxBot[] = [];
 
 function broadcast(event: { type: string; payload: unknown }, targetOrgId?: string | null) {
   const payload = JSON.stringify(event);
@@ -154,8 +234,7 @@ function broadcast(event: { type: string; payload: unknown }, targetOrgId?: stri
 }
 
 async function syncBotmuxAndSeedDefaults() {
-  const [owner, bots] = await Promise.all([botmux.getOwnerProfile(), botmux.getBots()]);
-  cachedBots = bots;
+  const { owner } = await dispatcher.syncBotmuxAgents();
 
   const ownerName = owner?.ok && owner.name ? owner.name : 'Owner';
   const ownerAvatar = owner?.ok ? owner.avatarUrl ?? null : null;
@@ -175,13 +254,13 @@ async function syncBotmuxAndSeedDefaults() {
       .values([
         {
           name: 'general',
-          topic: '团队与本地 Botmux Agent 实时协作频道',
+          topic: '团队与 Agent 实时协作频道',
           kind: 'channel',
           createdByUserId: 'u-owner',
         },
         {
           name: 'dev-tasks',
-          topic: '研发任务协作（@Bot 直接触发本地 Botmux 会话）',
+          topic: '研发任务协作（@Agent 直接触发协作会话）',
           kind: 'channel',
           createdByUserId: 'u-owner',
         },
@@ -190,18 +269,27 @@ async function syncBotmuxAndSeedDefaults() {
   }
 }
 
-async function listParticipants() {
-  const [dbUsers, dbAgentProfiles] = await Promise.all([
+async function listParticipants(organizationId?: string | null) {
+  const [dbUsers, resolvedAgents, orgMemberRows] = await Promise.all([
     db.select().from(users).orderBy(asc(users.createdAt)),
-    db.select().from(agentProfiles),
+    dispatcher.listAgents(),
+    organizationId
+      ? db
+          .select({ userId: authSchema.member.userId })
+          .from(authSchema.member)
+          .where(eq(authSchema.member.organizationId, organizationId))
+      : Promise.resolve(null),
   ]);
-  const profileMap = new Map(dbAgentProfiles.map((p) => [p.agentId, p]));
+  const allowedMemberIds = orgMemberRows ? new Set(orgMemberRows.map((m) => m.userId)) : null;
+  const filteredUsers = allowedMemberIds
+    ? dbUsers.filter((u) => allowedMemberIds.has(u.id))
+    : dbUsers;
   const onlineUserIds = new Set<string>();
   for (const ws of clients) {
     if (ws.data.userId) onlineUserIds.add(ws.data.userId);
   }
 
-  const humans = dbUsers.map((u) => ({
+  const humans = filteredUsers.map((u) => ({
     id: u.id,
     name: u.name,
     role: 'human' as const,
@@ -209,38 +297,35 @@ async function listParticipants() {
     status: onlineUserIds.has(u.id) ? ('online' as const) : ('offline' as const),
   }));
 
-  const agents = cachedBots.map((b) => {
-    const profile = profileMap.get(b.larkAppId);
-    return {
-      id: b.larkAppId,
-      name: profile?.displayName?.trim() || b.botName,
-      role: 'agent' as const,
-      avatarUrl: profile?.avatarUrl || undefined,
-      description: profile?.description || undefined,
-      archived: profile?.archived ?? false,
-      workingDir: b.workingDir || undefined,
-      status: b.online ? ('online' as const) : ('offline' as const),
-      cliId: b.cliId,
-    };
-  });
+  const agents = resolvedAgents.map((a) => ({
+    id: a.id,
+    name: a.name,
+    role: 'agent' as const,
+    avatarUrl: a.avatarUrl || undefined,
+    description: a.description || undefined,
+    archived: a.archived,
+    workingDir: a.workingDir || undefined,
+    status: a.online ? ('online' as const) : ('offline' as const),
+    cliId: a.cliId || undefined,
+    adapterType: a.adapterType,
+    capabilities: a.capabilities,
+  }));
 
   return [...humans, ...agents];
 }
 
 async function buildAgentDetail(agentId: string, viewerUserId?: string) {
-  const [profileRows, memberRows, bindingRows, allChannels, allSessions, allAsks] =
+  const [resolvedAgent, memberRows, bindingRows, allChannels, allSessions, allAsks] =
     await Promise.all([
-      db.select().from(agentProfiles).where(eq(agentProfiles.agentId, agentId)),
+      dispatcher.getAgent(agentId),
       db.select().from(channelMembers).where(eq(channelMembers.agentId, agentId)),
       db.select().from(botmuxBindings).where(eq(botmuxBindings.botId, agentId)),
       db.select().from(channels).orderBy(asc(channels.createdAt)),
-      botmux.getSessions(),
-      botmux.getPendingAsks(),
+      dispatcher.getSessions(),
+      dispatcher.getPendingAsks(),
     ]);
 
-  const bot = cachedBots.find((b) => b.larkAppId === agentId);
-  const profile = profileRows[0];
-  if (!bot && !profile) return null;
+  if (!resolvedAgent) return null;
 
   const visibleChannels = allChannels.filter((ch) =>
     viewerUserId ? channelVisibleTo(ch, viewerUserId) : ch.kind !== 'dm'
@@ -320,8 +405,8 @@ async function buildAgentDetail(agentId: string, viewerUserId?: string) {
       agentSessions.push({
         sessionId: b.sessionId,
         larkAppId: agentId,
-        botName: bot?.botName,
-        cliId: bot?.cliId,
+        botName: resolvedAgent.defaultName,
+        cliId: resolvedAgent.cliId || undefined,
         state: 'offline',
         title: ch ? `#${ch.name}` : b.sessionId,
         channelId: ch?.id,
@@ -348,16 +433,19 @@ async function buildAgentDetail(agentId: string, viewerUserId?: string) {
 
   return {
     id: agentId,
-    name: profile?.displayName?.trim() || bot?.botName || agentId,
-    botName: bot?.botName || agentId,
-    cliId: bot?.cliId || 'cli',
-    status: bot?.online ? ('online' as const) : ('offline' as const),
-    workingDir: bot?.workingDir || null,
-    description: profile?.description ?? '',
-    systemPrompt: profile?.systemPrompt ?? '',
-    avatarUrl: profile?.avatarUrl ?? '',
-    archived: profile?.archived ?? false,
-    updatedAt: profile?.updatedAt?.getTime() ?? null,
+    name: resolvedAgent.name,
+    botName: resolvedAgent.defaultName,
+    cliId: resolvedAgent.cliId || 'agent',
+    adapterType: resolvedAgent.adapterType,
+    capabilities: resolvedAgent.capabilities,
+    webhookUrl: resolvedAgent.webhookUrl,
+    status: resolvedAgent.online ? ('online' as const) : ('offline' as const),
+    workingDir: resolvedAgent.workingDir,
+    description: resolvedAgent.description ?? '',
+    systemPrompt: resolvedAgent.systemPrompt ?? '',
+    avatarUrl: resolvedAgent.avatarUrl ?? '',
+    archived: resolvedAgent.archived,
+    updatedAt: resolvedAgent.updatedAt,
     channels: joinedChannels,
     sessions: agentSessions,
     pendingAsks,
@@ -367,6 +455,36 @@ async function buildAgentDetail(agentId: string, viewerUserId?: string) {
 
 function channelVisibleTo(channel: { kind: string; dmKey: string | null }, userId: string) {
   return channel.kind !== 'dm' || !channel.dmKey || channel.dmKey.split('|').includes(`u:${userId}`);
+}
+
+function channelBelongsToOrg(
+  channel: { organizationId: string | null },
+  organizationId?: string | null,
+): boolean {
+  if (!organizationId) return true;
+  if (AUTH_REQUIRED) {
+    return channel.organizationId === organizationId;
+  }
+  return !channel.organizationId || channel.organizationId === organizationId;
+}
+
+async function ensureOrgDefaultChannel(organizationId: string, createdByUserId: string) {
+  const existing = await db
+    .select({ id: channels.id })
+    .from(channels)
+    .where(eq(channels.organizationId, organizationId))
+    .limit(1);
+  if (existing.length > 0) return;
+  await db
+    .insert(channels)
+    .values({
+      name: 'general',
+      topic: '团队与 Agent 实时协作频道',
+      kind: 'channel',
+      organizationId,
+      createdByUserId,
+    })
+    .onConflictDoNothing();
 }
 
 function escapeRegExp(value: string): string {
@@ -411,9 +529,7 @@ async function listChannelsWithUnread(userId: string, organizationId?: string | 
 
   const visibleChannels = channelRows.filter((ch) => {
     if (!channelVisibleTo(ch, userId)) return false;
-    if (organizationId && ch.organizationId && ch.organizationId !== organizationId) {
-      return false;
-    }
+    if (!channelBelongsToOrg(ch, organizationId)) return false;
     const readRow = readMap.get(ch.id);
     if (readRow?.hidden) return false;
     return true;
@@ -591,6 +707,7 @@ function formatMessageRow(
     card: m.card || undefined,
     attachments: m.attachments || undefined,
     botmuxSessionId: m.botmuxSessionId || undefined,
+    adapterMeta: m.adapterMeta || undefined,
     replyCount,
     reactions,
     pinned,
@@ -714,21 +831,6 @@ async function formatMessagesWithReplyPreviews(
   });
 }
 
-function findMentionedBots(
-  content: string,
-  displayNames?: Map<string, string>
-): BotmuxBot[] {
-  const lower = content.toLowerCase();
-  return cachedBots.filter((b) => {
-    const customName = displayNames?.get(b.larkAppId)?.trim().toLowerCase();
-    return (
-      lower.includes(`@${b.botName.toLowerCase()}`) ||
-      lower.includes(`@${b.larkAppId.toLowerCase()}`) ||
-      (Boolean(customName) && lower.includes(`@${customName}`))
-    );
-  });
-}
-
 async function applyMessageProgress(
   row: typeof messages.$inferSelect,
   rawProgress: unknown,
@@ -771,8 +873,8 @@ async function reconcileBotmuxTurn(
 
   const age = Date.now() - (row.updatedAt ?? row.createdAt).getTime();
   // A transient lookup error must leave the row eligible for the next poll.
-  const result = await botmux.pollTriggerResult(sessionId, triggerId).catch(() => undefined);
-  const bot = cachedBots.find((item) => item.larkAppId === botId);
+  const result = await botmuxAdapter.pollTriggerResult(sessionId, triggerId).catch(() => undefined);
+  const bot = botmuxAdapter.getCachedBots().find((item) => item.larkAppId === botId);
   let latestProgress: AgentProgressSnapshot | undefined = card.progress;
 
   if (isLocalBotmux) {
@@ -879,6 +981,7 @@ async function reconcileBotmuxTurn(
 }
 
 async function pollBotmuxTurns() {
+  if (!botmuxAdapter.isEnabled()) return;
   // The placeholder carries the accepted trigger so polling can resume on restart.
   const pending = await db.select().from(messages).where(and(
     isNull(messages.deletedAt),
@@ -887,13 +990,13 @@ async function pollBotmuxTurns() {
   ));
   let sessions: Promise<BotmuxSession[]> | undefined;
   const results = await Promise.allSettled(pending.map((row) =>
-    reconcileBotmuxTurn(row, () => (sessions ??= botmux.getSessions()))
+    reconcileBotmuxTurn(row, () => (sessions ??= botmuxAdapter.getSessions()))
   ));
   for (const result of results) {
     if (result.status === 'rejected') console.error('[Server] Botmux reply writeback failed:', result.reason);
   }
   if (results.some((result) => result.status === 'fulfilled' && result.value)) {
-    broadcast({ type: 'sessions.updated', payload: { sessions: await (sessions ?? botmux.getSessions()) } });
+    broadcast({ type: 'sessions.updated', payload: { sessions: await (sessions ?? botmuxAdapter.getSessions()) } });
   }
 }
 
@@ -953,8 +1056,7 @@ app.use('/api/*', async (c, next) => {
   const isPublic =
     pathname.startsWith('/api/auth/') ||
     pathname === '/api/instance' ||
-    pathname.startsWith('/api/bot/') ||
-    (c.req.method === 'GET' && pathname.startsWith('/api/uploads/'));
+    pathname.startsWith('/api/bot/');
 
   if (isPublic) {
     c.set('authUserId', null);
@@ -994,7 +1096,7 @@ async function enforceChannelOrgAccess(
     return next();
   }
   const [ch] = await db.select().from(channels).where(eq(channels.id, channelId));
-  if (ch && ch.organizationId && ch.organizationId !== orgId) {
+  if (ch && !channelBelongsToOrg(ch, orgId)) {
     return c.json({ error: 'Forbidden' }, 403);
   }
   return next();
@@ -1012,16 +1114,24 @@ function getRequestUserId(
 }
 
 app.get('/health', async (c) => {
-  const botmuxStatus = await botmux.checkHealth();
-  return c.json({ status: 'ok', botmux: botmuxStatus });
+  const botmuxStatus = await dispatcher.checkBotmuxHealth();
+  return c.json({
+    status: 'ok',
+    botmux: botmuxStatus,
+    adapters: {
+      botmux: { enabled: botmuxAdapter.isEnabled(), ...botmuxStatus },
+      gateway: { connectedAgents: gatewayAdapter.getConnectedAgentIds().length },
+    },
+  });
 });
 
 app.get('/api/instance', async (c) => {
-  const botmuxStatus = await botmux.checkHealth();
+  const botmuxStatus = await dispatcher.checkBotmuxHealth();
   return c.json({
     name: process.env.BUBAI_INSTANCE_NAME || 'Bubai',
     version: '0.1.0',
     authRequired: AUTH_REQUIRED,
+    emailAndPasswordEnabled: process.env.NODE_ENV !== 'production',
     publicUrl: process.env.PUBLIC_URL || undefined,
     botmux: {
       connected: botmuxStatus.connected,
@@ -1031,6 +1141,8 @@ app.get('/api/instance', async (c) => {
     capabilities: {
       terminalProxy: true,
       ws: true,
+      botGateway: true,
+      webhooks: true,
     },
   });
 });
@@ -1039,12 +1151,15 @@ app.get('/api/bootstrap', async (c) => {
   const userId = getRequestUserId(c, c.req.query('userId'));
   const organizationId = c.get('authOrgId');
   await syncBotmuxAndSeedDefaults();
+  if (organizationId) {
+    await ensureOrgDefaultChannel(organizationId, userId);
+  }
   const [channelList, participants, sessions, asks, botmuxStatus, groupRows] = await Promise.all([
     listChannelsWithUnread(userId, organizationId),
-    listParticipants(),
-    botmux.getSessions(),
-    botmux.getPendingAsks(),
-    botmux.checkHealth(),
+    listParticipants(organizationId),
+    dispatcher.getSessions(),
+    dispatcher.getPendingAsks(),
+    dispatcher.checkBotmuxHealth(),
     db
       .select()
       .from(sidebarGroups)
@@ -1115,26 +1230,34 @@ app.get('/api/channels/:channelId/messages', async (c) => {
 
 app.get('/api/activity', async (c) => {
   const userId = getRequestUserId(c, c.req.query('userId'));
+  const organizationId = c.get('authOrgId');
   const [channelRows, readRows, threadReadRows, userRows, profileRows] = await Promise.all([
     db.select().from(channels).orderBy(asc(channels.createdAt)),
     db.select().from(channelReads).where(eq(channelReads.userId, userId)),
     db.select().from(threadReads).where(eq(threadReads.userId, userId)),
     db.select({ id: users.id, name: users.name }).from(users),
-    db.select({ id: agentProfiles.agentId, displayName: agentProfiles.displayName }).from(agentProfiles),
+    db
+      .select({
+        id: agentProfiles.agentId,
+        displayName: agentProfiles.displayName,
+        defaultName: agentProfiles.defaultName,
+      })
+      .from(agentProfiles),
   ]);
 
   const userNameMap = new Map(userRows.map((u) => [u.id, u.name]));
   const botNameMap = new Map<string, string>();
-  for (const bot of cachedBots) botNameMap.set(bot.larkAppId, bot.botName);
   for (const p of profileRows) {
-    if (p.displayName) botNameMap.set(p.id, p.displayName);
+    botNameMap.set(p.id, p.displayName?.trim() || p.defaultName?.trim() || p.id);
   }
   const currentUserName = userNameMap.get(userId);
   const readMap = new Map(readRows.map((r) => [r.channelId, r]));
   const threadReadMap = new Map(threadReadRows.map((r) => [r.rootMessageId, r.lastReadAt]));
 
   const activeChannels = channelRows.filter((ch) => {
-    if (ch.archived || !channelVisibleTo(ch, userId)) return false;
+    if (ch.archived || !channelVisibleTo(ch, userId) || !channelBelongsToOrg(ch, organizationId)) {
+      return false;
+    }
     const readRow = readMap.get(ch.id);
     if (readRow?.hidden || readRow?.muted) return false;
     return true;
@@ -1279,13 +1402,21 @@ app.get('/api/search', async (c) => {
   const q = (c.req.query('q') || '').trim();
   const channelId = c.req.query('channelId');
   const userId = getRequestUserId(c, c.req.query('userId'));
+  const organizationId = c.get('authOrgId');
   if (!q) return c.json({ results: [] });
 
   const searchChannels = await db
-    .select({ id: channels.id, kind: channels.kind, dmKey: channels.dmKey })
+    .select({
+      id: channels.id,
+      kind: channels.kind,
+      dmKey: channels.dmKey,
+      organizationId: channels.organizationId,
+    })
     .from(channels)
     .where(channelId ? eq(channels.id, channelId) : undefined);
-  const allowed = searchChannels.filter((channel) => channelVisibleTo(channel, userId));
+  const allowed = searchChannels.filter(
+    (channel) => channelVisibleTo(channel, userId) && channelBelongsToOrg(channel, organizationId),
+  );
   if (!allowed.length) return c.json({ results: [] });
 
   const pattern = `%${q.replace(/[\\%_]/g, '\\$&')}%`;
@@ -1443,9 +1574,24 @@ app.get('/api/channels/:channelId/threads/:rootMessageId', async (c) => {
 
 app.patch('/api/messages/:messageId', async (c) => {
   const messageId = c.req.param('messageId');
+  const userId = getRequestUserId(c);
+  const organizationId = c.get('authOrgId');
   const body = await c.req.json<{ content?: string }>();
   const content = body.content?.trim();
   if (!content) return c.json({ error: 'Content required' }, 400);
+
+  const [existing] = await db
+    .select()
+    .from(messages)
+    .where(and(eq(messages.id, messageId), isNull(messages.deletedAt)));
+  if (!existing) return c.json({ error: 'Message not found' }, 404);
+  const [ch] = await db.select().from(channels).where(eq(channels.id, existing.channelId));
+  if (!ch || !channelVisibleTo(ch, userId) || !channelBelongsToOrg(ch, organizationId)) {
+    return c.json({ error: 'Forbidden' }, 403);
+  }
+  if (existing.senderUserId && existing.senderUserId !== userId) {
+    return c.json({ error: 'Only the message author can edit this message' }, 403);
+  }
 
   const [updated] = await db
     .update(messages)
@@ -1456,12 +1602,27 @@ app.patch('/api/messages/:messageId', async (c) => {
 
   const rx = (await getReactionsForMessages([updated.id])).get(updated.id) || [];
   const dto = formatMessageRow(updated, 0, rx);
-  broadcast({ type: 'message.updated', payload: dto });
+  broadcast({ type: 'message.updated', payload: dto }, ch.organizationId);
   return c.json({ message: dto });
 });
 
 app.delete('/api/messages/:messageId', async (c) => {
   const messageId = c.req.param('messageId');
+  const userId = getRequestUserId(c);
+  const organizationId = c.get('authOrgId');
+  const [existing] = await db
+    .select()
+    .from(messages)
+    .where(and(eq(messages.id, messageId), isNull(messages.deletedAt)));
+  if (!existing) return c.json({ error: 'Message not found' }, 404);
+  const [ch] = await db.select().from(channels).where(eq(channels.id, existing.channelId));
+  if (!ch || !channelVisibleTo(ch, userId) || !channelBelongsToOrg(ch, organizationId)) {
+    return c.json({ error: 'Forbidden' }, 403);
+  }
+  if (existing.senderUserId && existing.senderUserId !== userId) {
+    return c.json({ error: 'Only the message author can delete this message' }, 403);
+  }
+
   const [deleted] = await db
     .update(messages)
     .set({ deletedAt: new Date() })
@@ -1469,23 +1630,37 @@ app.delete('/api/messages/:messageId', async (c) => {
     .returning();
   if (!deleted) return c.json({ error: 'Message not found' }, 404);
 
-  broadcast({
-    type: 'message.deleted',
-    payload: {
-      id: deleted.id,
-      channelId: deleted.channelId,
-      threadId: deleted.threadId || undefined,
+  broadcast(
+    {
+      type: 'message.deleted',
+      payload: {
+        id: deleted.id,
+        channelId: deleted.channelId,
+        threadId: deleted.threadId || undefined,
+      },
     },
-  });
+    ch.organizationId,
+  );
   return c.json({ ok: true, id: deleted.id });
 });
 
 app.post('/api/messages/:messageId/reactions', async (c) => {
   const messageId = c.req.param('messageId');
+  const organizationId = c.get('authOrgId');
   const body = await c.req.json<{ userId?: string; emoji?: string }>();
   const userId = getRequestUserId(c, body.userId);
   const emoji = body.emoji?.trim();
   if (!emoji) return c.json({ error: 'Emoji required' }, 400);
+
+  const [targetMsg] = await db
+    .select({ id: messages.id, channelId: messages.channelId })
+    .from(messages)
+    .where(and(eq(messages.id, messageId), isNull(messages.deletedAt)));
+  if (!targetMsg) return c.json({ error: 'Message not found' }, 404);
+  const [ch] = await db.select().from(channels).where(eq(channels.id, targetMsg.channelId));
+  if (!ch || !channelVisibleTo(ch, userId) || !channelBelongsToOrg(ch, organizationId)) {
+    return c.json({ error: 'Forbidden' }, 403);
+  }
 
   const existing = await db
     .select()
@@ -1513,7 +1688,7 @@ app.post('/api/messages/:messageId/reactions', async (c) => {
   }
 
   const reactions = (await getReactionsForMessages([messageId])).get(messageId) || [];
-  broadcast({ type: 'reaction.updated', payload: { messageId, reactions } });
+  broadcast({ type: 'reaction.updated', payload: { messageId, reactions } }, ch.organizationId);
   return c.json({ messageId, reactions });
 });
 
@@ -1882,7 +2057,7 @@ app.patch('/api/channels/:channelId/settings', async (c) => {
 
 /** Explicit outbound endpoint for Bots / automated tasks to post into main timeline or a Thread */
 app.post('/api/bot/messages', async (c) => {
-  const botAuth = await verifyBotRequest(auth, c.req.raw.headers, BUZZ_BOT_TOKEN);
+  const botAuth = await verifyBotRequest(auth, c.req.raw.headers, BUZZ_BOT_TOKEN, null, AUTH_REQUIRED);
   if (!botAuth.ok) {
     return c.json({ error: 'Unauthorized' }, 401);
   }
@@ -1897,9 +2072,10 @@ app.post('/api/bot/messages', async (c) => {
     messageId?: string | null;
     attachments?: MessageAttachment[];
     botmuxSessionId?: string;
+    adapterMeta?: Record<string, unknown>;
   }>();
 
-  const rawBotRef = body.botId?.trim();
+  const rawBotRef = body.botId?.trim() || (botAuth.method === 'bot-key' ? botAuth.botUserId : undefined);
   const rawChannelId = body.channelId?.trim();
   const rawChannelName = body.channelName?.trim().replace(/^#/, '');
   const trimmed = (body.content || '').trim();
@@ -1912,15 +2088,22 @@ app.post('/api/bot/messages', async (c) => {
     return c.json({ error: 'content or attachments required' }, 400);
   }
 
-  if (cachedBots.length === 0) {
-    cachedBots = await botmux.getBots();
+  let knownAgents = await dispatcher.listAgents();
+  if (knownAgents.length === 0 && botmuxAdapter.isEnabled()) {
+    await dispatcher.syncBotmuxAgents();
+    knownAgents = await dispatcher.listAgents();
   }
-  const matchedBot = cachedBots.find(
-    (b) =>
-      b.larkAppId === rawBotRef ||
-      b.botName.toLowerCase() === rawBotRef.toLowerCase()
+  const matchedAgent = knownAgents.find(
+    (a) =>
+      a.id === rawBotRef ||
+      a.externalId === rawBotRef ||
+      a.name.toLowerCase() === rawBotRef.toLowerCase() ||
+      a.defaultName.toLowerCase() === rawBotRef.toLowerCase()
   );
-  const botId = matchedBot?.larkAppId || rawBotRef;
+  const botId = matchedAgent?.id || rawBotRef;
+  if (botAuth.method === 'bot-key' && botAuth.botUserId && botId !== botAuth.botUserId) {
+    return c.json({ error: 'Forbidden: bot key does not match botId' }, 403);
+  }
 
   const [channelRow] = rawChannelId
     ? await db.select().from(channels).where(eq(channels.id, rawChannelId))
@@ -1975,14 +2158,15 @@ app.post('/api/bot/messages', async (c) => {
         content: trimmed,
         attachments: hasFiles ? body.attachments! : pendingPlaceholder.attachments,
         botmuxSessionId: body.botmuxSessionId || pendingPlaceholder.botmuxSessionId,
+        adapterMeta: body.adapterMeta ?? pendingPlaceholder.adapterMeta,
         updatedAt: new Date(),
         card: {
-          title: pendingPlaceholder.card?.title || matchedBot?.botName || botId,
+          title: pendingPlaceholder.card?.title || matchedAgent?.name || botId,
           status: 'completed',
           ...(pendingPlaceholder.card?.parallel ? { parallel: true } : {}),
           startedAt,
           finishedAt,
-          summary: 'Botmux turn completed (outbound reply)',
+          summary: 'Agent turn completed (outbound reply)',
           ...(settledProgress ? { progress: settledProgress } : {}),
         },
       })
@@ -2007,6 +2191,7 @@ app.post('/api/bot/messages', async (c) => {
       content: trimmed,
       attachments: hasFiles ? body.attachments! : null,
       botmuxSessionId: body.botmuxSessionId || null,
+      adapterMeta: body.adapterMeta || null,
     })
     .returning();
 
@@ -2017,7 +2202,7 @@ app.post('/api/bot/messages', async (c) => {
 
 /** Fixed-contract progress endpoint for external adapters / runners to push live tool steps */
 app.post('/api/bot/messages/:messageId/progress', async (c) => {
-  const botAuth = await verifyBotRequest(auth, c.req.raw.headers, BUZZ_BOT_TOKEN);
+  const botAuth = await verifyBotRequest(auth, c.req.raw.headers, BUZZ_BOT_TOKEN, null, AUTH_REQUIRED);
   if (!botAuth.ok) {
     return c.json({ error: 'Unauthorized' }, 401);
   }
@@ -2051,6 +2236,208 @@ app.post('/api/bot/messages/:messageId/progress', async (c) => {
     updated: Boolean(updated),
     message: formatMessageRow(effective, 0, reactions),
   });
+});
+
+/** Standard Bot Protocol: update a bot message / turn card status, content, progress, or adapterMeta. */
+app.patch('/api/bot/messages/:messageId', async (c) => {
+  const botAuth = await verifyBotRequest(auth, c.req.raw.headers, BUZZ_BOT_TOKEN, null, AUTH_REQUIRED);
+  if (!botAuth.ok) return c.json({ error: 'Unauthorized' }, 401);
+
+  const messageId = c.req.param('messageId')?.trim();
+  if (!messageId) return c.json({ error: 'messageId is required' }, 400);
+
+  const body = await c.req.json<{
+    content?: string;
+    status?: MessageCardData['status'];
+    summary?: string;
+    progress?: unknown;
+    adapterMeta?: Record<string, unknown>;
+    attachments?: MessageAttachment[];
+  }>().catch(() => null);
+  if (!body) return c.json({ error: 'Invalid JSON body' }, 400);
+
+  const [row] = await db
+    .select()
+    .from(messages)
+    .where(and(eq(messages.id, messageId), isNull(messages.deletedAt)))
+    .limit(1);
+  if (!row) return c.json({ error: 'Message not found' }, 404);
+
+  const nextStatus = body.status ?? row.card?.status ?? 'running';
+  const normalizedProgress = body.progress ? normalizeProgressSnapshot(body.progress) : undefined;
+  const isTerminal =
+    nextStatus === 'completed' ||
+    nextStatus === 'failed' ||
+    nextStatus === 'interrupted' ||
+    nextStatus === 'timeout' ||
+    nextStatus === 'dispatch_failed';
+  const effectiveProgress = isTerminal
+    ? finalizeProgressSnapshot(
+        normalizedProgress ?? row.card?.progress,
+        nextStatus === 'completed' ? 'completed' : 'failed',
+      )
+    : (normalizedProgress ?? row.card?.progress);
+
+  const nextCard: MessageCardData | null = row.card
+    ? {
+        ...row.card,
+        status: nextStatus,
+        ...(body.summary !== undefined ? { summary: body.summary } : {}),
+        ...(isTerminal ? { finishedAt: row.card.finishedAt ?? Date.now() } : {}),
+        ...(effectiveProgress ? { progress: effectiveProgress } : {}),
+      }
+    : null;
+
+  const [updated] = await db
+    .update(messages)
+    .set({
+      ...(body.content !== undefined ? { content: body.content } : {}),
+      ...(body.attachments !== undefined ? { attachments: body.attachments } : {}),
+      ...(body.adapterMeta !== undefined ? { adapterMeta: body.adapterMeta } : {}),
+      ...(nextCard ? { card: nextCard } : {}),
+      updatedAt: new Date(),
+    })
+    .where(eq(messages.id, messageId))
+    .returning();
+
+  if (!updated) return c.json({ error: 'Message update failed' }, 500);
+  const reactions = (await getReactionsForMessages([updated.id])).get(updated.id) || [];
+  const dto = {
+    ...formatMessageRow(updated, 0, reactions),
+    ...(isTerminal ? { justCompleted: true } : {}),
+  };
+  broadcast({ type: 'message.updated', payload: dto });
+  return c.json({ ok: true, message: dto });
+});
+
+/** Standard Bot Protocol: register or sync one or more external agents into BubAI's persistent registry. */
+app.post('/api/bot/agents/register', async (c) => {
+  const botAuth = await verifyBotRequest(auth, c.req.raw.headers, BUZZ_BOT_TOKEN, null, AUTH_REQUIRED);
+  if (!botAuth.ok) return c.json({ error: 'Unauthorized' }, 401);
+
+  const body = await c.req.json<{
+    agents?: AgentRegistrationInput[];
+    agent?: AgentRegistrationInput;
+  } & Partial<AgentRegistrationInput>>().catch(() => null);
+  if (!body) return c.json({ error: 'Invalid JSON body' }, 400);
+
+  const list: AgentRegistrationInput[] = Array.isArray(body.agents)
+    ? body.agents
+    : body.agent
+      ? [body.agent]
+      : body.agentId
+        ? [body as AgentRegistrationInput]
+        : [];
+  if (list.length === 0) {
+    return c.json({ error: 'agents[] or agentId is required' }, 400);
+  }
+
+  // Non-server bot keys can only register themselves
+  const isServerKey = botAuth.method !== 'bot-key';
+  const filtered =
+    !isServerKey && botAuth.botUserId
+      ? list.filter((a) => a.agentId === botAuth.botUserId)
+      : list;
+
+  await dispatcher.upsertAgents(
+    filtered.map((a) => ({
+      ...a,
+      adapterType: a.adapterType ?? (a.webhookUrl ? 'webhook' : 'gateway'),
+    })),
+  );
+  const participants = await listParticipants();
+  broadcast({ type: 'presence.updated', payload: { participants } });
+  return c.json({ ok: true, registered: filtered.map((a) => a.agentId) });
+});
+
+/** Standard Bot Protocol: HTTP heartbeat / presence update for external bots. */
+app.post('/api/bot/heartbeat', async (c) => {
+  const botAuth = await verifyBotRequest(auth, c.req.raw.headers, BUZZ_BOT_TOKEN, null, AUTH_REQUIRED);
+  if (!botAuth.ok) return c.json({ error: 'Unauthorized' }, 401);
+
+  const body = await c.req.json<{
+    agentId?: string;
+    status?: 'online' | 'offline';
+    capabilities?: string[];
+    ttlMs?: number;
+  }>().catch(() => null);
+  const agentId = body?.agentId?.trim() || botAuth.botUserId;
+  if (!agentId) return c.json({ error: 'agentId is required' }, 400);
+  if (botAuth.method === 'bot-key' && botAuth.botUserId && agentId !== botAuth.botUserId) {
+    return c.json({ error: 'Forbidden' }, 403);
+  }
+
+  await dispatcher.recordHeartbeat(agentId, {
+    status: body?.status,
+    capabilities: body?.capabilities,
+    ttlMs: body?.ttlMs,
+  });
+  broadcast({ type: 'presence.updated', payload: { participants: await listParticipants() } });
+  return c.json({ ok: true, agentId, status: body?.status ?? 'online' });
+});
+
+/** Standard Bot Protocol: allow external agents to fetch channel/thread history on demand. */
+app.get('/api/bot/channels/:channelId/messages', async (c) => {
+  const botAuth = await verifyBotRequest(auth, c.req.raw.headers, BUZZ_BOT_TOKEN, null, AUTH_REQUIRED);
+  if (!botAuth.ok) return c.json({ error: 'Unauthorized' }, 401);
+
+  const channelId = c.req.param('channelId');
+  const threadId = c.req.query('threadId')?.trim() || null;
+  const limit = Math.min(Math.max(Number(c.req.query('limit') || 30), 1), 100);
+
+  const conditions = [eq(messages.channelId, channelId), isNull(messages.deletedAt)];
+  if (threadId) {
+    conditions.push(eq(messages.threadId, threadId));
+  } else {
+    conditions.push(isNull(messages.threadId));
+  }
+
+  const rows = await db
+    .select()
+    .from(messages)
+    .where(and(...conditions))
+    .orderBy(desc(messages.createdAt))
+    .limit(limit);
+
+  return c.json({
+    channelId,
+    threadId,
+    messages: rows.reverse().map((r) => formatMessageRow(r)),
+  });
+});
+
+/** Standard Bot Protocol: create a native interactive ask/approval prompt from any external agent. */
+app.post('/api/bot/asks', async (c) => {
+  const botAuth = await verifyBotRequest(auth, c.req.raw.headers, BUZZ_BOT_TOKEN, null, AUTH_REQUIRED);
+  if (!botAuth.ok) return c.json({ error: 'Unauthorized' }, 401);
+
+  const body = await c.req.json<{
+    askId?: string;
+    agentId?: string;
+    botName?: string;
+    sessionId?: string;
+    title?: string;
+    prompt?: string;
+    questions?: Array<{
+      question?: string;
+      header?: string;
+      multiSelect?: boolean;
+      options?: Array<{ key: string; label: string; description?: string }>;
+    }>;
+  }>().catch(() => null);
+  const agentId = body?.agentId?.trim() || botAuth.botUserId;
+  if (!agentId) return c.json({ error: 'agentId is required' }, 400);
+
+  const ask = await gatewayAdapter.createNativeAsk({
+    askId: body?.askId,
+    larkAppId: agentId,
+    botName: body?.botName,
+    sessionId: body?.sessionId,
+    title: body?.title,
+    prompt: body?.prompt,
+    questions: body?.questions,
+  });
+  return c.json({ ok: true, ask }, 201);
 });
 
 app.post('/api/dms', async (c) => {
@@ -2317,19 +2704,22 @@ app.patch('/api/humans/:userId', async (c) => {
 app.get('/api/messages/:messageId', async (c) => {
   const messageId = c.req.param('messageId');
   const userId = getRequestUserId(c, c.req.query('userId'));
+  const organizationId = c.get('authOrgId');
   const [row] = await db
     .select()
     .from(messages)
     .where(and(eq(messages.id, messageId), isNull(messages.deletedAt)));
   if (!row) return c.json({ error: 'Message not found' }, 404);
   const [ch] = await db.select().from(channels).where(eq(channels.id, row.channelId));
-  if (!ch || !channelVisibleTo(ch, userId)) return c.json({ error: 'Message not found' }, 404);
+  if (!ch || !channelVisibleTo(ch, userId) || !channelBelongsToOrg(ch, organizationId)) {
+    return c.json({ error: 'Message not found' }, 404);
+  }
   return c.json({ message: formatMessageRow(row) });
 });
 
 app.get('/api/sessions/:sessionId/write-link', async (c) => {
   const sessionId = c.req.param('sessionId');
-  const upstreamUrl = await botmux.getSessionWriteLink(sessionId);
+  const upstreamUrl = await botmuxAdapter.getSessionWriteLink(sessionId);
   if (!upstreamUrl) {
     return c.json({ sessionId, url: null });
   }
@@ -2365,8 +2755,8 @@ app.post('/api/sessions/:sessionId/:op', async (c) => {
   if (op !== 'restart' && op !== 'close' && op !== 'resume') {
     return c.json({ error: 'Unsupported session op' }, 400);
   }
-  const result = await botmux.sessionAction(sessionId, op);
-  const sessions = await botmux.getSessions();
+  const result = await botmuxAdapter.sessionAction(sessionId, op);
+  const sessions = await dispatcher.getSessions();
   broadcast({ type: 'sessions.updated', payload: { sessions } });
   return c.json(result.body as Record<string, unknown>, result.status as 200);
 });
@@ -2374,7 +2764,7 @@ app.post('/api/sessions/:sessionId/:op', async (c) => {
 app.get('/api/sessions/:sessionId/history', async (c) => {
   const sessionId = c.req.param('sessionId');
   const [result, localRows] = await Promise.all([
-    botmux.getSessionHistory(sessionId),
+    botmuxAdapter.getSessionHistory(sessionId),
     db
       .select()
       .from(messages)
@@ -2430,16 +2820,197 @@ app.get('/api/sessions/:sessionId/history', async (c) => {
 });
 
 app.get('/api/asks/pending', async (c) => {
-  const asks = await botmux.getPendingAsks();
+  const asks = await dispatcher.getPendingAsks();
   return c.json({ asks });
 });
 
 app.post('/api/asks/answer', async (c) => {
   const body = await c.req.json<DashboardAskAnswerRequest>();
-  const result = await botmux.answerAsk(body);
-  const asks = await botmux.getPendingAsks();
+  const result = await dispatcher.answerAsk(body);
+  const asks = await dispatcher.getPendingAsks();
   broadcast({ type: 'asks.updated', payload: { asks } });
   return c.json(result.body as Record<string, unknown>, result.status as 200);
+});
+
+app.get('/api/agents', async (c) => {
+  const agents = (await dispatcher.listAgents()).map((a) => ({
+    id: a.id,
+    name: a.name,
+    role: 'agent' as const,
+    avatarUrl: a.avatarUrl || undefined,
+    description: a.description || undefined,
+    archived: a.archived,
+    workingDir: a.workingDir || undefined,
+    status: a.online ? ('online' as const) : ('offline' as const),
+    cliId: a.cliId || undefined,
+    adapterType: a.adapterType,
+    capabilities: a.capabilities,
+  }));
+  return c.json({ agents });
+});
+
+app.post('/api/agents/provision', async (c) => {
+  const userId = getRequestUserId(c);
+  const body = await c.req.json<{
+    agentId?: string;
+    adapterType?: 'botmux' | 'gateway' | 'webhook';
+    externalId?: string;
+    name?: string;
+    description?: string;
+    systemPrompt?: string;
+    avatarUrl?: string;
+    cliId?: string;
+    workingDir?: string;
+    capabilities?: string[];
+    webhookUrl?: string;
+    webhookSecret?: string;
+    channelId?: string;
+    channelName?: string;
+    autoReply?: boolean;
+    issueKey?: boolean;
+    keyScope?: 'bot' | 'bot-server';
+  }>().catch(() => null);
+
+  const name = body?.name?.trim();
+  if (!name) return c.json({ error: 'name is required' }, 400);
+
+  const adapterType = body?.adapterType ?? (body?.webhookUrl ? 'webhook' : 'gateway');
+  const externalId = body?.externalId?.trim() || body?.agentId?.trim() || undefined;
+
+  // Idempotent lookup by agentId or (adapterType, externalId)
+  const existingRows = await db.select().from(agentProfiles);
+  const existing = existingRows.find(
+    (row) =>
+      (body?.agentId?.trim() && row.agentId === body.agentId.trim()) ||
+      (externalId && row.adapterType === adapterType && row.externalId === externalId),
+  );
+
+  const agentId =
+    existing?.agentId ||
+    body?.agentId?.trim() ||
+    `agent_${name.toLowerCase().replace(/[^a-z0-9_-]+/g, '-').replace(/^-+|-+$/g, '') || 'bot'}_${randomUUID().slice(0, 6)}`;
+
+  await dispatcher.upsertAgents([
+    {
+      agentId,
+      adapterType,
+      externalId: externalId ?? agentId,
+      defaultName: name,
+      description: body?.description,
+      systemPrompt: body?.systemPrompt,
+      avatarUrl: body?.avatarUrl,
+      cliId: body?.cliId,
+      workingDir: body?.workingDir,
+      capabilities: body?.capabilities,
+      webhookUrl: body?.webhookUrl,
+      webhookSecret: body?.webhookSecret,
+    },
+  ]);
+
+  let apiKey: string | undefined;
+  const authUserId = c.get('authUserId');
+  const authOrgId = c.get('authOrgId');
+  if (authUserId) {
+    const botEmail = `${agentId.replace(/[^a-zA-Z0-9._-]+/g, '_').toLowerCase()}@bot.bubai.local`;
+    try {
+      await auth.api.createBotUser({
+        body: { id: agentId, name, email: botEmail, createdByUserId: authUserId },
+      });
+    } catch {
+      // Already exists — idempotent
+    }
+
+    if (authOrgId) {
+      const existingOrgMember = await db
+        .select({ id: authSchema.member.id })
+        .from(authSchema.member)
+        .where(
+          and(
+            eq(authSchema.member.organizationId, authOrgId),
+            eq(authSchema.member.userId, agentId),
+          ),
+        )
+        .limit(1);
+      if (existingOrgMember.length === 0) {
+        try {
+          await db.insert(authSchema.member).values({
+            id: randomUUID(),
+            organizationId: authOrgId,
+            userId: agentId,
+            role: 'member',
+            createdAt: new Date(),
+          });
+        } catch {
+          // Ignore duplicate membership race
+        }
+      }
+    }
+
+    if (body?.issueKey) {
+      try {
+        const scope = body.keyScope === 'bot-server' ? 'bot-server' : 'bot';
+        const issued = await botCredentials(auth.api, scope).issueBotKey(agentId, {
+          name: `cli-${adapterType}`,
+        });
+        apiKey = issued.key;
+      } catch {
+        // Ignore if Better Auth user doesn't exist in dev mode
+      }
+    }
+  }
+
+  let joinedChannelId: string | undefined;
+  const rawChannelId = body?.channelId?.trim();
+  const rawChannelName = body?.channelName?.trim().replace(/^#/, '');
+  if (rawChannelId || rawChannelName) {
+    const [ch] = rawChannelId
+      ? await db.select().from(channels).where(eq(channels.id, rawChannelId))
+      : await db.select().from(channels).where(eq(channels.name, rawChannelName!));
+    if (ch) {
+      joinedChannelId = ch.id;
+      const existingMember = await db
+        .select()
+        .from(channelMembers)
+        .where(and(eq(channelMembers.channelId, ch.id), eq(channelMembers.agentId, agentId)));
+      if (existingMember.length > 0) {
+        if (body?.autoReply !== undefined) {
+          await db
+            .update(channelMembers)
+            .set({ autoReply: Boolean(body.autoReply) })
+            .where(eq(channelMembers.id, existingMember[0].id));
+        }
+      } else {
+        await db.insert(channelMembers).values({
+          channelId: ch.id,
+          agentId,
+          autoReply: Boolean(body?.autoReply),
+        });
+      }
+      await broadcastChannelMembers(ch.id);
+    }
+  }
+
+  const participants = await listParticipants();
+  broadcast({ type: 'presence.updated', payload: { participants } });
+  const agent = participants.find((p) => p.id === agentId && p.role === 'agent');
+  return c.json(
+    {
+      ok: true,
+      created: !existing,
+      agent: agent ?? {
+        id: agentId,
+        name,
+        role: 'agent' as const,
+        status: 'offline' as const,
+        adapterType,
+        capabilities: body?.capabilities ?? [],
+      },
+      ...(joinedChannelId ? { channelId: joinedChannelId } : {}),
+      ...(apiKey ? { apiKey } : {}),
+      provisionedBy: userId,
+    },
+    existing ? 200 : 201,
+  );
 });
 
 app.get('/api/agents/:agentId', async (c) => {
@@ -2509,12 +3080,12 @@ app.patch('/api/agents/:agentId', async (c) => {
 
 await syncBotmuxAndSeedDefaults();
 
-botmux.subscribeEvents((eventName, data) => {
+botmuxAdapter.subscribeEvents((eventName, data) => {
   if (eventName === 'sessions' || eventName === 'session' || eventName === 'message') {
-    void botmux.getSessions().then((sessions) => {
+    void dispatcher.getSessions().then((sessions) => {
       broadcast({ type: 'sessions.updated', payload: { sessions } });
     });
-    void botmux.getPendingAsks().then((asks) => {
+    void dispatcher.getPendingAsks().then((asks) => {
       broadcast({ type: 'asks.updated', payload: { asks } });
     });
     void runBotmuxTurnPoll();
@@ -2526,6 +3097,32 @@ Bun.serve<WsClientData>({
   port: PORT,
   async fetch(req, server) {
     const url = new URL(req.url);
+    if (url.pathname === '/ws/bot') {
+      const botAuth = await verifyBotRequest(
+        auth,
+        req.headers,
+        BUZZ_BOT_TOKEN,
+        url.searchParams.get('token'),
+        AUTH_REQUIRED,
+      );
+      if (!botAuth.ok) {
+        return new Response('Unauthorized', { status: 401 });
+      }
+      if (
+        server.upgrade(req, {
+          data: {
+            kind: 'bot-gateway',
+            connectionId: `gw_${randomUUID()}`,
+            botUserId: botAuth.botUserId,
+            isServerKey: botAuth.method !== 'bot-key',
+            boundAgentIds: new Set<string>(),
+          },
+        })
+      ) {
+        return undefined;
+      }
+      return new Response('Bot Gateway WebSocket upgrade failed', { status: 400 });
+    }
     if (url.pathname === '/ws') {
       const wsHeaders = buildSessionHeaders(req.headers, url.searchParams.get('token'));
       const identity = await resolveRequestIdentity({
@@ -2610,6 +3207,10 @@ Bun.serve<WsClientData>({
     idleTimeout: 960,
     sendPings: true,
     open(ws) {
+      if (ws.data.kind === 'bot-gateway') {
+        gatewayAdapter.handleOpen(ws as unknown as ServerWebSocket<BotGatewayWsData>);
+        return;
+      }
       if (ws.data.kind === 'terminal-proxy' && ws.data.upstreamWsUrl) {
         const upstream = new WebSocket(ws.data.upstreamWsUrl);
         upstream.binaryType = 'arraybuffer';
@@ -2649,6 +3250,10 @@ Bun.serve<WsClientData>({
       clients.add(ws);
     },
     async message(ws, raw) {
+      if (ws.data.kind === 'bot-gateway') {
+        await gatewayAdapter.handleMessage(ws as unknown as ServerWebSocket<BotGatewayWsData>, raw);
+        return;
+      }
       if (ws.data.kind === 'terminal-proxy') {
         const upstream = ws.data.upstreamWs;
         const payload = typeof raw === 'string' ? raw : new Uint8Array(raw);
@@ -2690,10 +3295,13 @@ Bun.serve<WsClientData>({
           if (!ws.data.authenticated) {
             ws.data.userId = event.payload.userId;
           }
-          broadcast({
-            type: 'presence.updated',
-            payload: { participants: await listParticipants() },
-          });
+          broadcast(
+            {
+              type: 'presence.updated',
+              payload: { participants: await listParticipants(ws.data.organizationId) },
+            },
+            ws.data.organizationId,
+          );
           return;
         }
 
@@ -2755,11 +3363,7 @@ Bun.serve<WsClientData>({
             failSend?.('This channel no longer exists.');
             return;
           }
-          if (
-            ws.data.organizationId &&
-            channelRow.organizationId &&
-            channelRow.organizationId !== ws.data.organizationId
-          ) {
+          if (!channelBelongsToOrg(channelRow, ws.data.organizationId)) {
             failSend?.('Forbidden: channel belongs to another organization.');
             return;
           }
@@ -2849,19 +3453,13 @@ Bun.serve<WsClientData>({
               });
           }
 
-          if (cachedBots.length === 0) {
-            cachedBots = await botmux.getBots();
+          let knownAgents = await dispatcher.listAgents();
+          if (knownAgents.length === 0 && botmuxAdapter.isEnabled()) {
+            await dispatcher.syncBotmuxAgents();
+            knownAgents = await dispatcher.listAgents();
           }
 
-          const allProfiles = await db.select().from(agentProfiles);
-          const profileByAgentId = new Map(allProfiles.map((p) => [p.agentId, p]));
-          const profileNameMap = new Map(
-            allProfiles
-              .filter((p) => Boolean(p.displayName?.trim()))
-              .map((p) => [p.agentId, p.displayName!.trim()])
-          );
-
-          const mentioned = findMentionedBots(trimmed, profileNameMap);
+          const mentioned = dispatcher.findMentionedAgents(trimmed, knownAgents);
           const autoReplyMembers = await db
             .select()
             .from(channelMembers)
@@ -2872,13 +3470,13 @@ Bun.serve<WsClientData>({
             autoReplyMembers.map((m) => m.agentId).filter((id): id is string => Boolean(id))
           );
 
-          const targetBotMap = new Map<string, BotmuxBot>();
-          for (const b of mentioned) targetBotMap.set(b.larkAppId, b);
-          for (const b of cachedBots) {
-            if (autoReplyBotIds.has(b.larkAppId)) targetBotMap.set(b.larkAppId, b);
+          const targetAgentMap = new Map<string, ResolvedAgent>();
+          for (const a of mentioned) targetAgentMap.set(a.id, a);
+          for (const a of knownAgents) {
+            if (!a.archived && autoReplyBotIds.has(a.id)) targetAgentMap.set(a.id, a);
           }
 
-          if (targetBotMap.size === 0) return;
+          if (targetAgentMap.size === 0) return;
 
           const [senderUser] = await db.select().from(users).where(eq(users.id, senderId));
 
@@ -2886,7 +3484,7 @@ Bun.serve<WsClientData>({
             ? `\n\n[附件]\n${attachments!.map((a) => `- ${a.name} (${a.mimeType}, http://localhost:${PORT}${a.url})`).join('\n')}`
             : '';
 
-          // Build recent conversation history context for Botmux turns
+          // Build recent conversation history context for agent turns
           const historyWhere = threadId
             ? and(
                 eq(messages.channelId, channelId),
@@ -2916,9 +3514,7 @@ Bun.serve<WsClientData>({
           ]);
 
           const userNameMap = new Map(allUsers.map((u) => [u.id, u.name]));
-          const botNameMap = new Map(
-            cachedBots.map((b) => [b.larkAppId, profileNameMap.get(b.larkAppId) || b.botName])
-          );
+          const botNameMap = new Map(knownAgents.map((a) => [a.id, a.name]));
 
           const rawHistoryRows = [
             ...threadRootRows,
@@ -2947,48 +3543,7 @@ Bun.serve<WsClientData>({
 
           const channelReplyMode = parseReplyMode(channelRow?.replyMode, DEFAULT_REPLY_MODE);
 
-          const liveSessions = await botmux.getSessions().catch(() => [] as BotmuxSession[]);
-          const liveSessionById = new Map(liveSessions.map((s) => [s.sessionId, s]));
-          const BUSY_SESSION_STATES = new Set(['running', 'working', 'busy', 'thinking', 'starting']);
-
-          for (const bot of targetBotMap.values()) {
-            const [binding] = await db
-              .select()
-              .from(botmuxBindings)
-              .where(
-                and(eq(botmuxBindings.channelId, channelId), eq(botmuxBindings.botId, bot.larkAppId))
-              );
-
-            let existingSessionId: string | undefined = binding?.sessionId;
-            let isOverflowParallel = false;
-
-            if (existingSessionId) {
-              const [runningOnSession] = await db
-                .select({ id: messages.id })
-                .from(messages)
-                .where(
-                  and(
-                    eq(messages.botmuxSessionId, existingSessionId),
-                    isNull(messages.deletedAt),
-                    sql`${messages.card}->>'status' = 'running'`
-                  )
-                )
-                .limit(1);
-
-              const liveSession = liveSessionById.get(existingSessionId);
-              const liveState = (liveSession?.state || liveSession?.status || '').toLowerCase();
-              const sessionBusy =
-                Boolean(runningOnSession) ||
-                Boolean(liveSession?.queued) ||
-                BUSY_SESSION_STATES.has(liveState);
-
-              if (sessionBusy) {
-                // Primary session is busy: overflow into a fresh parallel session so turns run concurrently.
-                existingSessionId = undefined;
-                isOverflowParallel = true;
-              }
-            }
-
+          for (const agent of targetAgentMap.values()) {
             const replyThreadId = resolveReplyThreadId(
               channelReplyMode,
               channelRow?.kind,
@@ -3002,21 +3557,21 @@ Bun.serve<WsClientData>({
               .values({
                 channelId,
                 threadId: replyThreadId,
-                senderAgentId: bot.larkAppId,
+                senderAgentId: agent.id,
                 content: '',
-                botmuxSessionId: existingSessionId,
                 card: {
-                  title: bot.botName,
+                  title: agent.name,
                   status: 'running',
                   phase: 'connecting',
-                  ...(isOverflowParallel ? { parallel: true } : {}),
                   startedAt: turnStartedAt,
                 },
               })
               .returning();
             broadcast({ type: 'message.created', payload: formatMessageRow(placeholder) });
 
-            const turnContext: BuzzTurnContext = {
+            const dispatched = await dispatcher.dispatchTurn({
+              agent,
+              turnId: placeholder.id,
               channel: {
                 id: channelId,
                 name: channelRow?.name || channelId,
@@ -3025,49 +3580,38 @@ Bun.serve<WsClientData>({
                 replyMode: channelReplyMode,
               },
               ...(threadId ? { threadId } : {}),
+              replyThreadId,
+              triggerMessage: {
+                id: saved.id,
+                senderId,
+                senderName: senderUser?.name || senderId,
+                content: trimmed,
+                attachments: attachments ?? [],
+              },
+              promptWithAttachments: `${trimmed}${attachmentNote}`,
+              history: historyMessages,
               outboundApi: {
                 endpoint: `http://127.0.0.1:${PORT}/api/bot/messages`,
+                progressEndpoint: `http://127.0.0.1:${PORT}/api/bot/messages/${placeholder.id}/progress`,
                 cliScriptPath: BUZZ_SEND_CLI_PATH,
-                botId: bot.larkAppId,
+                botId: agent.id,
                 channelId,
                 ...(replyThreadId ? { threadId: replyThreadId } : {}),
                 placeholderMessageId: placeholder.id,
               },
-              messages: historyMessages,
-            };
+              turnStartedAt,
+            });
 
-            const botSystemPrompt = profileByAgentId.get(bot.larkAppId)?.systemPrompt?.trim();
-            const triggerTurn = (sessionId?: string) => botmux.triggerTurn({
-              botId: bot.larkAppId,
-              cliId: bot.cliId,
-              sessionId,
-              prompt: `${trimmed}${attachmentNote}`,
-              senderName: senderUser?.name || senderId,
-              systemPrompt: botSystemPrompt || undefined,
-              context: turnContext,
-            }).catch((err: unknown): TriggerResponse => ({
-              ok: false,
-              error: err instanceof Error ? err.message : String(err),
-            }));
-
-            let triggered = await triggerTurn(existingSessionId);
-            if (existingSessionId && !triggered.ok && triggered.errorCode === 'session_not_found') {
-              // Botmux rejects a closed session before dispatching the turn.
-              existingSessionId = undefined;
-              triggered = await triggerTurn();
-            }
-
-            const sessionId = triggered.target?.sessionId || existingSessionId;
-            if (!triggered.ok || !sessionId || !triggered.triggerId) {
-              const errMsg = triggered.error || 'Botmux 未返回本轮派发信息';
+            if (!dispatched.ok) {
+              const errMsg = dispatched.error || 'Agent 派发失败';
               const [failed] = await db
                 .update(messages)
                 .set({
                   content: errMsg,
                   card: {
-                    title: bot.botName,
+                    title: agent.name,
                     status: 'dispatch_failed',
-                    ...(isOverflowParallel ? { parallel: true } : {}),
+                    ...(dispatched.parallel ? { parallel: true } : {}),
                     startedAt: turnStartedAt,
                     finishedAt: Date.now(),
                     summary: errMsg,
@@ -3079,38 +3623,35 @@ Bun.serve<WsClientData>({
               continue;
             }
 
-            if (!isOverflowParallel) {
-              await db
-                .insert(botmuxBindings)
-                .values({ channelId, botId: bot.larkAppId, sessionId, updatedAt: new Date() })
-                .onConflictDoUpdate({
-                  target: [botmuxBindings.channelId, botmuxBindings.botId],
-                  set: { sessionId, updatedAt: new Date() },
-                });
-            }
+            const summary = dispatched.triggerId
+              ? `${BOTMUX_TRIGGER_SUMMARY_PREFIX}${dispatched.triggerId}`
+              : `adapter: ${dispatched.adapterType}`;
 
             const [running] = await db
               .update(messages)
               .set({
-                botmuxSessionId: sessionId,
+                botmuxSessionId: dispatched.sessionId || null,
+                adapterMeta: dispatched.adapterMeta || null,
                 content: '',
                 updatedAt: new Date(),
                 card: {
-                  title: bot.botName,
+                  title: agent.name,
                   status: 'running',
                   phase: 'thinking',
-                  ...(isOverflowParallel ? { parallel: true } : {}),
+                  ...(dispatched.parallel ? { parallel: true } : {}),
                   startedAt: turnStartedAt,
-                  summary: `${BOTMUX_TRIGGER_SUMMARY_PREFIX}${triggered.triggerId}`,
+                  summary,
                 },
               })
               .where(eq(messages.id, placeholder.id))
               .returning();
             if (running) broadcast({ type: 'message.updated', payload: formatMessageRow(running) });
 
-            void botmux.getSessions().then((sessions) => {
-              broadcast({ type: 'sessions.updated', payload: { sessions } });
-            });
+            if (dispatched.adapterType === 'botmux') {
+              void dispatcher.getSessions().then((sessions) => {
+                broadcast({ type: 'sessions.updated', payload: { sessions } });
+              });
+            }
           }
         }
       } catch (err) {
@@ -3119,6 +3660,10 @@ Bun.serve<WsClientData>({
       }
     },
     async close(ws) {
+      if (ws.data.kind === 'bot-gateway') {
+        await gatewayAdapter.handleClose(ws as unknown as ServerWebSocket<BotGatewayWsData>);
+        return;
+      }
       if (ws.data.kind === 'terminal-proxy') {
         try {
           ws.data.upstreamWs?.close();
@@ -3141,4 +3686,6 @@ scheduleBotmuxResultPoll();
 
 console.log(`[Server] Bun + Hono server listening on http://0.0.0.0:${PORT} (db=${dbDriver}, storage=${uploadStorage.driver}: ${uploadStorage.detail})`);
 if (STATIC_DIR) console.log(`[Server] Serving static frontend from ${STATIC_DIR}`);
-console.log(`[Server] Connected to Botmux at ${BOTMUX_ENDPOINT} (${cachedBots.length} real bots)`);
+console.log(
+  `[Server] Bot Gateway WS enabled at /ws/bot; Botmux direct adapter ${botmuxAdapter.isEnabled() ? `connected to ${BOTMUX_ENDPOINT} (${botmuxAdapter.getCachedBots().length} bots)` : 'disabled'}`,
+);

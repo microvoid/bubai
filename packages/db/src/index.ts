@@ -161,6 +161,7 @@ CREATE TABLE IF NOT EXISTS messages (
 ALTER TABLE messages ADD COLUMN IF NOT EXISTS deleted_at timestamptz;
 ALTER TABLE messages ADD COLUMN IF NOT EXISTS attachments jsonb;
 ALTER TABLE messages ADD COLUMN IF NOT EXISTS reply_to_id uuid;
+ALTER TABLE messages ADD COLUMN IF NOT EXISTS adapter_meta jsonb;
 
 CREATE INDEX IF NOT EXISTS messages_channel_created_idx ON messages (channel_id, created_at);
 CREATE INDEX IF NOT EXISTS messages_thread_created_idx ON messages (thread_id, created_at);
@@ -191,14 +192,33 @@ CREATE TABLE IF NOT EXISTS botmux_bindings (
 
 CREATE TABLE IF NOT EXISTS agent_profiles (
   agent_id text PRIMARY KEY,
+  adapter_type text NOT NULL DEFAULT 'botmux',
+  external_id text,
+  default_name text,
   display_name text,
   description text,
   system_prompt text,
   avatar_url text,
+  cli_id text,
+  working_dir text,
+  capabilities jsonb,
+  webhook_url text,
+  webhook_secret text,
   archived boolean NOT NULL DEFAULT false,
+  last_seen_at timestamptz,
   created_at timestamptz NOT NULL DEFAULT now(),
   updated_at timestamptz NOT NULL DEFAULT now()
 );
+
+ALTER TABLE agent_profiles ADD COLUMN IF NOT EXISTS adapter_type text NOT NULL DEFAULT 'botmux';
+ALTER TABLE agent_profiles ADD COLUMN IF NOT EXISTS external_id text;
+ALTER TABLE agent_profiles ADD COLUMN IF NOT EXISTS default_name text;
+ALTER TABLE agent_profiles ADD COLUMN IF NOT EXISTS cli_id text;
+ALTER TABLE agent_profiles ADD COLUMN IF NOT EXISTS working_dir text;
+ALTER TABLE agent_profiles ADD COLUMN IF NOT EXISTS capabilities jsonb;
+ALTER TABLE agent_profiles ADD COLUMN IF NOT EXISTS webhook_url text;
+ALTER TABLE agent_profiles ADD COLUMN IF NOT EXISTS webhook_secret text;
+ALTER TABLE agent_profiles ADD COLUMN IF NOT EXISTS last_seen_at timestamptz;
 `;
 
 export interface OpenChatDatabaseOptions {

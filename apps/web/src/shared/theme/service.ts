@@ -43,7 +43,7 @@ export function parseFontScale(value: unknown): number {
 export const parseColorModePreference = (
   value: unknown,
 ): ColorModePreference =>
-  value === 'light' || value === 'dark' || value === 'system' ? value : 'dark';
+  value === 'light' || value === 'dark' || value === 'system' ? value : 'system';
 
 export type MessageDensity = 'default' | 'compact';
 export const DENSITY_KEY = 'buzz-message-density.v1';

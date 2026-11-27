@@ -268,3 +268,34 @@ export async function mobileInviteDecision(server: string, token: string, invita
     token, body: { invitationId },
   });
 }
+
+export interface CommunityRoster {
+  members: { id: string; userId: string; role: string; user: MobileAuthUser }[];
+  invitations: { id: string; email: string; status: string }[];
+}
+
+export async function mobileCommunityRoster(server: string, token: string, organizationId: string) {
+  const { data } = await authRequest<CommunityRoster>(
+    server, '/api/auth/organization/get-full-organization?organizationId=' + encodeURIComponent(organizationId), { token },
+  );
+  return data;
+}
+
+export async function mobileInviteMember(server: string, token: string, organizationId: string, email: string) {
+  const { data } = await authRequest<{ id: string }>(server, '/api/auth/organization/invite-member', {
+    token, body: { organizationId, email: email.trim(), role: 'member' },
+  });
+  return data;
+}
+
+export async function mobileCancelInvitation(server: string, token: string, invitationId: string) {
+  await authRequest(server, '/api/auth/organization/cancel-invitation', { token, body: { invitationId } });
+}
+
+export async function mobileRemoveMember(server: string, token: string, organizationId: string, memberId: string) {
+  await authRequest(server, '/api/auth/organization/remove-member', { token, body: { organizationId, memberIdOrEmail: memberId } });
+}
+
+export async function mobileSetMemberRole(server: string, token: string, organizationId: string, memberId: string, role: 'admin' | 'member') {
+  await authRequest(server, '/api/auth/organization/update-member-role', { token, body: { organizationId, memberId, role } });
+}

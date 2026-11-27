@@ -41,7 +41,6 @@ import {
 } from '@/services/auth';
 
 const SERVER_URL_KEY = 'bubai.server.url';
-const USER_ID_KEY = 'bubai.user.id';
 const AUTH_TOKEN_KEY = 'bubai.auth.token';
 function tokenKey(url: string) {
   const encoded = Array.from(normalizeServerUrl(url), c => c.codePointAt(0)!.toString(16)).join('.');
@@ -71,7 +70,7 @@ interface BubaiContextValue {
   botmuxConnected: boolean;
   isLoading: boolean;
   error: string | null;
-  connectToServer: (rawUrl: string) => Promise<InstanceInfo>;
+  connectToServer: (rawUrl: string) => Promise<InstanceInfo & { signedIn: boolean }>;
   disconnectServer: () => Promise<void>;
   sendEmailOtp: (email: string) => Promise<void>;
   signInWithOtp: (email: string, otp: string) => Promise<void>;
@@ -81,7 +80,6 @@ interface BubaiContextValue {
   switchOrganization: (orgId: string) => Promise<void>;
   enableNotifications: () => Promise<void>;
   signOut: () => Promise<void>;
-  setCurrentUserId: (userId: string) => void;
   refreshBootstrap: () => Promise<void>;
   answerAsk: (ask: BotmuxPendingAsk, optionKey: string) => Promise<void>;
   sendTyping: (channelId: string) => void;
@@ -106,7 +104,6 @@ export function BubaiProvider({ children }: { children: React.ReactNode }) {
   const [authUser, setAuthUser] = useState<MobileAuthUser | null>(null);
   const [organizations, setOrganizations] = useState<MobileAuthOrg[]>([]);
   const [activeOrgId, setActiveOrgId] = useState<string | null>(null);
-  const [currentUserIdState, setCurrentUserIdState] = useState<string>('u-owner');
   const [instance, setInstance] = useState<InstanceInfo | null>(null);
   const [wsState, setWsState] = useState<WsConnectionState>('closed');
   const wsHandleRef = useRef<ReturnType<BubaiClient['connectWebSocket']> | null>(null);
@@ -117,6 +114,8 @@ export function BubaiProvider({ children }: { children: React.ReactNode }) {
   const activeCredentials = useRef({ serverUrl, authToken });
   activeCredentials.current = { serverUrl, authToken };
   const [sessionError, setSessionError] = useState<string | null>(null);
+  const retrySession = useRef(false);
+  retrySession.current = Boolean(sessionError);
   const hydrateSessionAndOrgs = useCallback(async (url: string, token: string) => {
     if (selectedUrl.current !== url) return null;
     const revision = ++authRevision.current;
@@ -133,7 +132,6 @@ export function BubaiProvider({ children }: { children: React.ReactNode }) {
     }
     setAuthToken(token);
     setAuthUser(session.user);
-    setCurrentUserIdState(session.user.id);
     let orgs = await mobileListOrganizations(url, token);
     if (revision !== authRevision.current) return null;
     let resolvedOrgId = session.activeOrganizationId;
@@ -154,10 +152,7 @@ export function BubaiProvider({ children }: { children: React.ReactNode }) {
   }, []);
 
   useEffect(() => {
-    void Promise.all([
-      SecureStore.getItemAsync(SERVER_URL_KEY).catch(() => null),
-      SecureStore.getItemAsync(USER_ID_KEY).catch(() => null),
-    ]).then(async ([savedUrl, savedUser]) => {
+    void SecureStore.getItemAsync(SERVER_URL_KEY).catch(() => null).then(async (savedUrl) => {
       let resolvedUrl = DEFAULT_SERVER_URL;
       if (savedUrl) {
         try {
@@ -168,7 +163,6 @@ export function BubaiProvider({ children }: { children: React.ReactNode }) {
       }
       selectedUrl.current = resolvedUrl;
       setServerUrl(resolvedUrl);
-      if (savedUser) setCurrentUserIdState(savedUser);
       const savedToken = await SecureStore.getItemAsync(tokenKey(resolvedUrl));
       if (savedToken) {
         setAuthToken(savedToken);
@@ -177,7 +171,7 @@ export function BubaiProvider({ children }: { children: React.ReactNode }) {
     }).catch(error => setSessionError(String(error))).finally(() => setHydrated(true));
   }, [hydrateSessionAndOrgs]);
 
-  const currentUserId = authUser?.id || (instance?.authRequired ? '' : currentUserIdState);
+  const currentUserId = authUser?.id || (instance?.authRequired ? '' : 'u-owner');
   const authRequired = Boolean(instance?.authRequired);
   const canQueryWorkspace = hydrated && Boolean(instance) && Boolean(serverUrl) && (!authRequired || Boolean(authToken));
 
@@ -281,7 +275,7 @@ export function BubaiProvider({ children }: { children: React.ReactNode }) {
         setWsState(state);
         if (state === 'open') {
           void queryClient.invalidateQueries({ queryKey: bootstrapQueryKey });
-          if (authToken && !authUser) void hydrateSessionAndOrgs(client.baseUrl, authToken).catch(error => setSessionError(String(error)));
+          if (authToken && retrySession.current) void hydrateSessionAndOrgs(client.baseUrl, authToken).catch(error => setSessionError(String(error)));
         }
       },
     });
@@ -314,7 +308,7 @@ export function BubaiProvider({ children }: { children: React.ReactNode }) {
     };
   }, [bootstrapQueryKey, canQueryWorkspace, client, currentUserId, queryClient, authToken, authUser, hydrateSessionAndOrgs]);
 
-  const connectToServer = useCallback(async (rawUrl: string): Promise<InstanceInfo> => {
+  const connectToServer = useCallback(async (rawUrl: string): Promise<InstanceInfo & { signedIn: boolean }> => {
     const normalized = normalizeServerUrl(rawUrl);
     const revision = ++authRevision.current;
     const probeClient = new BubaiClient({ baseUrl: normalized });
@@ -330,10 +324,8 @@ export function BubaiProvider({ children }: { children: React.ReactNode }) {
     setSessionError(null);
     setInstance(info);
     setServerUrl(normalized);
-    if (token) {
-      await hydrateSessionAndOrgs(normalized, token);
-    }
-    return info;
+    const session = token ? await hydrateSessionAndOrgs(normalized, token) : null;
+    return { ...info, signedIn: Boolean(session) };
   }, [hydrateSessionAndOrgs]);
 
   const disconnectServer = useCallback(async () => {
@@ -430,11 +422,6 @@ export function BubaiProvider({ children }: { children: React.ReactNode }) {
     setActiveOrgId(null);
     queryClient.clear();
   }, [authToken, queryClient, serverUrl]);
-
-  const setCurrentUserId = useCallback((userId: string) => {
-    setCurrentUserIdState(userId);
-    void SecureStore.setItemAsync(USER_ID_KEY, userId).catch(() => {});
-  }, []);
 
   const refreshBootstrap = useCallback(async () => {
     await queryClient.invalidateQueries({ queryKey: bootstrapQueryKey });
@@ -540,7 +527,6 @@ export function BubaiProvider({ children }: { children: React.ReactNode }) {
       switchOrganization,
       enableNotifications,
       signOut,
-      setCurrentUserId,
       refreshBootstrap,
       answerAsk,
       sendTyping,
@@ -573,7 +559,6 @@ export function BubaiProvider({ children }: { children: React.ReactNode }) {
       sendTyping,
       sendWsMessage,
       serverUrl,
-      setCurrentUserId,
       signInWithOtp,
       signInWithPassword,
       enableNotifications,

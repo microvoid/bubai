@@ -1,3 +1,4 @@
+import { CommunityMembers } from '@/components/CommunityMembers';
 import { buzzAccentChoices, buzzGrid, buzzRadii, buzzTypography } from '@buzz-botmux/design-tokens';
 import { Ionicons } from '@expo/vector-icons';
 import * as Haptics from 'expo-haptics';
@@ -23,20 +24,16 @@ export default function SettingsScreen() {
   const {
     serverUrl,
     authUser,
-    authRequired, authToken, reloadAccount,
+    authToken, reloadAccount,
     organizations,
     activeOrgId,
     switchOrganization,
     signOut, enableNotifications,
     wsState,
     botmuxConnected,
-    participants,
-    currentUserId,
-    setCurrentUserId,
   } = useBubai();
 
   const [communityName, setCommunityName] = useState('');
-  const humans = participants.filter((p) => p.role === 'human');
 
   return (
     <SafeAreaView style={[styles.root, { backgroundColor: colors.surface }]} edges={['top']}>
@@ -172,7 +169,7 @@ export default function SettingsScreen() {
             </View>
             <Pressable
               onPress={() => {
-                void signOut().then(() => router.push('/connect'));
+                void signOut().then(() => router.replace('/connect')).catch(error => Alert.alert('退出失败', String(error)));
               }}
               style={[
                 styles.row,
@@ -202,6 +199,7 @@ export default function SettingsScreen() {
                 setCommunityName('');
               } catch (error) { Alert.alert('创建失败', String(error)); }
             }} />
+            <CommunityMembers />
             <Button title="CLI 设备授权" onPress={() => router.push('/device')} />
             {organizations.map((org, idx) => {
               const selected = org.id === activeOrgId;
@@ -236,46 +234,6 @@ export default function SettingsScreen() {
           </BuzzSectionGroup>
         )}
 
-        {!authRequired && !authUser && humans.length > 0 && (
-          <BuzzSectionGroup title="Active Identity">
-            {humans.map((human, idx) => {
-              const selected = human.id === currentUserId;
-              return (
-                <Pressable
-                  key={human.id}
-                  onPress={() => {
-                    void Haptics.selectionAsync();
-                    setCurrentUserId(human.id);
-                  }}
-                  style={[
-                    styles.row,
-                    idx > 0 && {
-                      borderTopWidth: StyleSheet.hairlineWidth,
-                      borderTopColor: colors.outline,
-                    },
-                  ]}
-                >
-                  <BuzzAvatar
-                    name={human.name}
-                    uri={human.avatarUrl}
-                    size={34}
-                    status={human.status}
-                    ringColor={colors.surfaceContainerLow}
-                  />
-                  <Text
-                    style={[buzzTypography.titleSmall, { color: colors.onSurface, flex: 1 }]}
-                    numberOfLines={1}
-                  >
-                    {human.name}
-                  </Text>
-                  {selected && (
-                    <Ionicons name="checkmark-circle" size={20} color={colors.success} />
-                  )}
-                </Pressable>
-              );
-            })}
-          </BuzzSectionGroup>
-        )}
         <BuzzSectionGroup title="Notifications">
           <Pressable
             onPress={async () => {

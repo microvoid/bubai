@@ -26,7 +26,7 @@ export default function ConnectScreen() {
   const insets = useSafeAreaInsets();
   const { colors } = useBuzzTheme();
   const {
-    serverUrl,
+    serverUrl, authRequired, authToken,
     instance,
     signUpWithPassword,
     connectToServer,
@@ -37,7 +37,7 @@ export default function ConnectScreen() {
   const defaultFallbackUrl =
     Platform.OS === 'android' ? 'http://10.0.2.2:4000' : 'http://127.0.0.1:4000';
   const [inputUrl, setInputUrl] = useState(serverUrl || defaultFallbackUrl);
-  const [step, setStep] = useState<ConnectStep>('server');
+  const [step, setStep] = useState<ConnectStep>(authRequired && !authToken ? 'email' : 'server');
   const [email, setEmail] = useState('');
   const [name, setName] = useState('');
   const [otp, setOtp] = useState('');
@@ -51,7 +51,7 @@ export default function ConnectScreen() {
     try {
       const info = await connectToServer(inputUrl);
       void Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
-      if (info.authRequired) {
+      if (info.authRequired && !info.signedIn) {
         setStep('email');
       } else {
         finish();
@@ -121,7 +121,7 @@ export default function ConnectScreen() {
         styles.root,
         {
           backgroundColor: colors.surface,
-          paddingTop: Platform.OS === 'android' ? insets.top : 12,
+          paddingTop: Math.max(insets.top, 12),
           paddingBottom: Math.max(insets.bottom, 16),
         },
       ]}
@@ -133,6 +133,8 @@ export default function ConnectScreen() {
         <View style={styles.header}>
           {step !== 'server' ? (
             <Pressable
+              accessibilityLabel="更换服务器"
+              testID="change-server"
               onPress={() => {
                 setError(null);
                 setStep(step === 'otp' ? 'email' : 'server');
@@ -179,6 +181,7 @@ export default function ConnectScreen() {
               SERVER URL
             </Text>
             <TextInput
+              testID="server-url"
               value={inputUrl}
               onChangeText={setInputUrl}
               autoCapitalize="none"
@@ -230,6 +233,7 @@ export default function ConnectScreen() {
           <View style={styles.form}>
             <Text style={[buzzTypography.caption, { color: colors.onSurfaceVariant }]}>EMAIL</Text>
             <TextInput
+              testID="auth-email"
               value={email}
               onChangeText={setEmail}
               autoCapitalize="none"
@@ -341,6 +345,7 @@ export default function ConnectScreen() {
           <View style={styles.form}>
             <Text style={[buzzTypography.caption, { color: colors.onSurfaceVariant }]}>EMAIL</Text>
             <TextInput
+              testID="auth-email"
               value={email}
               onChangeText={setEmail}
               autoCapitalize="none"
@@ -364,8 +369,10 @@ export default function ConnectScreen() {
             </Text>
             {step === 'signup' && <TextInput placeholder="名字" value={name} onChangeText={setName} style={[styles.input, { color: colors.onSurface }]} />}
             <TextInput
+              testID="auth-password"
               value={password}
               onChangeText={setPassword}
+              returnKeyType="go"
               secureTextEntry
               placeholder="输入密码"
               placeholderTextColor={colors.onSurfaceVariant}

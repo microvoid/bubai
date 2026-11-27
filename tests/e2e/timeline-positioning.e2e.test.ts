@@ -723,17 +723,22 @@ describe('Timeline & Thread Message Positioning E2E', () => {
 
     // Reopen the same thread normally by clicking the replies count button on threadRootId
     const reopenTrigger = await cdp!.waitFor(async () => {
-      return cdp!.eval<{ x: number; y: number } | null>(`(() => {
+      return cdp!.eval<{ x: number; y: number } | null>(`(async () => {
         const root = document.querySelector('[data-message-id="${threadRootId}"]');
         if (!root) return null;
         const btn = Array.from(root.querySelectorAll('button')).find((b) =>
           /\\d+\\s+repl/i.test((b.textContent || '').trim()),
         );
         if (!btn) return null;
-        btn.scrollIntoView({ block: 'center' });
+        btn.scrollIntoView({ block: 'center', behavior: 'instant' });
+        const first = btn.getBoundingClientRect();
+        await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
         const r = btn.getBoundingClientRect();
-        if (r.width === 0 || r.height === 0) return null;
-        return { x: r.left + r.width / 2, y: r.top + r.height / 2 };
+        const x = r.left + r.width / 2;
+        const y = r.top + r.height / 2;
+        if (!r.width || !r.height || Math.abs(first.top - r.top) > 1 ||
+            !btn.contains(document.elementFromPoint(x, y))) return null;
+        return { x, y };
       })()`);
     }, 6000);
     await cdp!.clickAt(reopenTrigger.x, reopenTrigger.y);

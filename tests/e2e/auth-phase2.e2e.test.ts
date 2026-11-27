@@ -48,6 +48,7 @@ class CdpSession {
   private ws: WebSocket;
   private reqId = 0;
   private pending = new Map<number, { resolve: (v: any) => void; reject: (e: Error) => void }>();
+  private eventListeners = new Map<string, (params: any) => void>();
   readonly consoleErrors: string[] = [];
 
   private constructor(ws: WebSocket) {
@@ -68,6 +69,7 @@ class CdpSession {
           this.consoleErrors.push(text);
         }
       }
+      this.eventListeners.get(msg.method)?.(msg.params);
     };
   }
 
@@ -98,6 +100,21 @@ class CdpSession {
       const id = ++this.reqId;
       this.pending.set(id, { resolve, reject });
       this.ws.send(JSON.stringify({ id, method, params }));
+    });
+  }
+
+  nextEvent<T>(method: string, matches: (params: T) => boolean = () => true): Promise<T> {
+    return new Promise((resolve, reject) => {
+      const timeout = setTimeout(() => {
+        this.eventListeners.delete(method);
+        reject(new Error(`Timed out waiting for CDP event ${method}`));
+      }, 10000);
+      this.eventListeners.set(method, (params) => {
+        if (!matches(params)) return;
+        clearTimeout(timeout);
+        this.eventListeners.delete(method);
+        resolve(params);
+      });
     });
   }
 
@@ -228,6 +245,7 @@ describe('Phase 2 Web Auth UI & Buzz Alignment E2E (real headless Chrome)', () =
       [
         '--headless=new',
         `--remote-debugging-port=${CDP_PORT}`,
+        `--user-data-dir=${path.join(tempDir, 'chrome')}`,
         '--no-first-run',
         '--no-default-browser-check',
         '--window-size=1440,900',
@@ -539,6 +557,48 @@ describe('Phase 2 Web Auth UI & Buzz Alignment E2E (real headless Chrome)', () =
       () => cdp!.eval<boolean>(`Boolean(document.querySelector('[data-auth-step="otp-verify"]'))`),
       'OTP verification step',
     );
+
+    const readOtpForm = () => cdp!.eval<{ label: string; cooldown: number }>(`(() => {
+      const form = document.querySelector('[data-auth-step="otp-verify"]');
+      return {
+        label: form?.querySelector('label')?.textContent || '',
+        cooldown: parseInt(form?.querySelector('[data-auth-action="resend-otp"]')?.textContent || '', 10) || 0,
+      };
+    })()`);
+    const initialOtpForm = await readOtpForm();
+    assert.ok(initialOtpForm.cooldown > 0, 'Expected a resend countdown after sending the code');
+
+    const { targetId: otherTab } = await cdp.send('Target.createTarget', { url: 'about:blank' });
+    try {
+      await cdp.send('Target.activateTarget', { targetId: otherTab });
+      await cdp.waitFor(() => cdp!.eval<boolean>(`document.hidden`), 'login tab hidden');
+      await new Promise((resolve) => setTimeout(resolve, 2200));
+      await cdp.send('Fetch.enable', {
+        patterns: [{ urlPattern: `${SERVER_URL}/api/auth/get-session` }],
+      });
+      const [{ requestId, networkId }] = await Promise.all([
+        cdp.nextEvent<{ requestId: string; networkId: string }>('Fetch.requestPaused'),
+        cdp.send('Page.bringToFront'),
+      ]);
+      assert.ok(networkId, 'Expected a network request for the session refresh');
+      await cdp.eval('new Promise((resolve) => requestAnimationFrame(resolve))');
+      const pendingOtpForm = await readOtpForm();
+      assert.ok(pendingOtpForm.label.includes('bob@example.com'), 'Expected the OTP step to stay open during session refresh');
+      await Promise.all([
+        cdp.nextEvent<{ requestId: string }>('Network.loadingFinished', (event) => event.requestId === networkId),
+        cdp.send('Fetch.continueRequest', { requestId }),
+      ]);
+      const returnedOtpForm = await readOtpForm();
+      assert.ok(returnedOtpForm.label.includes('bob@example.com'), 'Expected the OTP step to retain the email');
+      assert.ok(
+        returnedOtpForm.cooldown > 0 && returnedOtpForm.cooldown < initialOtpForm.cooldown,
+        'Expected the resend countdown to keep progressing across the tab switch',
+      );
+    } finally {
+      await cdp.send('Fetch.disable');
+      await cdp.send('Target.closeTarget', { targetId: otherTab });
+    }
+
     const bobOtp = await cdp
       .waitFor(
         async () => {

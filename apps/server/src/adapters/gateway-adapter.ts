@@ -96,13 +96,20 @@ export class BotGatewayAdapter implements AgentAdapter {
     return this.nativeAsks.has(askId);
   }
 
-  async createNativeAsk(input: Omit<BotmuxPendingAsk, 'askId'> & { askId?: string }): Promise<BotmuxPendingAsk> {
+  async createNativeAsk(input: Omit<BotmuxPendingAsk, 'askId'> & { askId?: string }, expiresAt?: number): Promise<BotmuxPendingAsk> {
     const ask: BotmuxPendingAsk = {
       ...input,
       askId: input.askId?.trim() || `ask_${randomUUID()}`,
       createdAt: input.createdAt ?? Date.now(),
     };
     this.nativeAsks.set(ask.askId, ask);
+    if (expiresAt !== undefined) {
+      setTimeout(() => {
+        if (this.nativeAsks.get(ask.askId) !== ask) return;
+        this.nativeAsks.delete(ask.askId);
+        void this.callbacks.onAsksChanged();
+      }, Math.min(2_147_483_647, Math.max(1, expiresAt - Date.now()))).unref();
+    }
     await this.callbacks.onAsksChanged();
     return ask;
   }

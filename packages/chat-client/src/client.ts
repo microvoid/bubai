@@ -618,9 +618,9 @@ export class BubaiClient {
     messageId?: string | null;
     attachments?: MessageAttachment[];
     adapterMeta?: Record<string, unknown>;
-  }): Promise<{ message: ChatMessage; settledPlaceholder?: boolean }> {
+  }, signal?: AbortSignal): Promise<{ message: ChatMessage; settledPlaceholder?: boolean }> {
     return this.requestJson('/api/bot/messages', {
-      method: 'POST',
+      method: 'POST', signal,
       body: JSON.stringify(input),
     });
   }
@@ -662,24 +662,26 @@ export class BubaiClient {
   sendBotProgress(
     messageId: string,
     progress: AgentProgressSnapshot,
+    signal?: AbortSignal,
   ): Promise<{ ok: boolean; updated: boolean; message: ChatMessage }> {
     return this.requestJson(`/api/bot/messages/${encodeURIComponent(messageId)}/progress`, {
-      method: 'POST',
+      method: 'POST', signal,
       body: JSON.stringify({ progress }),
     });
   }
 
   createBotAsk(input: {
     askId?: string;
+    expiresAt?: number;
     agentId?: string;
     botName?: string;
     sessionId?: string;
     title?: string;
     prompt?: string;
     questions?: BotmuxPendingAskQuestion[];
-  }): Promise<{ ok: boolean; ask: Record<string, unknown> }> {
+  }, signal?: AbortSignal): Promise<{ ok: boolean; ask: Record<string, unknown> }> {
     return this.requestJson('/api/bot/asks', {
-      method: 'POST',
+      method: 'POST', signal,
       body: JSON.stringify(input),
     });
   }

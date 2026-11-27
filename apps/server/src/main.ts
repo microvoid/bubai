@@ -95,7 +95,7 @@ const BOTMUX_RESULT_GRACE_MS = 10_000;
 const configuredBotTurnTimeoutMs = Number(process.env.BUBAI_BOT_TURN_TIMEOUT_MS);
 const BOT_TURN_TIMEOUT_MS = Number.isSafeInteger(configuredBotTurnTimeoutMs) && configuredBotTurnTimeoutMs > 0
   ? configuredBotTurnTimeoutMs
-  : 30 * 60_000;
+  : undefined;
 const BOTMUX_TRIGGER_SUMMARY_PREFIX = 'triggerId: ';
 const isLocalBotmux = isLocalBotmuxEndpoint(BOTMUX_ENDPOINT);
 const BOT_TURN_TERMINAL_STATUSES = ['completed', 'failed', 'interrupted', 'timeout', 'dispatch_failed'] as const;
@@ -1381,7 +1381,7 @@ async function reconcileBotmuxTurn(
     }
   }
 
-  if (!settled && Date.now() - row.createdAt.getTime() >= BOT_TURN_TIMEOUT_MS) {
+  if (!settled && BOT_TURN_TIMEOUT_MS !== undefined && Date.now() - row.createdAt.getTime() >= BOT_TURN_TIMEOUT_MS) {
     content = '等待回复超时';
     status = 'timeout';
     settled = true;
@@ -1455,6 +1455,7 @@ async function pollBotmuxTurns() {
 }
 
 async function expireUntrackedBotTurns() {
+  if (BOT_TURN_TIMEOUT_MS === undefined) return;
   const expired = await db.select().from(messages).where(and(
     isNotNull(messages.senderAgentId),
     isNull(messages.deletedAt),
@@ -3214,6 +3215,7 @@ app.post('/api/bot/asks', async (c) => {
 
   const body = await c.req.json<{
     askId?: string;
+    expiresAt?: number;
     agentId?: string;
     botName?: string;
     sessionId?: string;
@@ -3229,6 +3231,11 @@ app.post('/api/bot/asks', async (c) => {
   const agentId = body?.agentId?.trim() || botAuth.botUserId;
   if (!agentId) return c.json({ error: 'agentId is required' }, 400);
 
+  if (botAuth.method === 'bot-key' && agentId !== botAuth.botUserId) return c.json({ error: 'Forbidden' }, 403);
+  if (body?.expiresAt !== undefined && (!Number.isSafeInteger(body.expiresAt) || body.expiresAt <= Date.now())) {
+    return c.json({error:'Invalid ask expiry'}, 400);
+  }
+
   const ask = await gatewayAdapter.createNativeAsk({
     askId: body?.askId,
     larkAppId: agentId,
@@ -3237,7 +3244,7 @@ app.post('/api/bot/asks', async (c) => {
     title: body?.title,
     prompt: body?.prompt,
     questions: body?.questions,
-  });
+  }, body?.expiresAt);
   return c.json({ ok: true, ask }, 201);
 });
 

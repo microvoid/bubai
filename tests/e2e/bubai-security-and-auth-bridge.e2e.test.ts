@@ -4,6 +4,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { BubaiClient } from '../../packages/chat-client/src/index.ts';
+import { startBotmuxBridge } from '../../apps/cli/src/bridge-botmux.ts';
 
 const SERVER_ENTRY = path.resolve(import.meta.dir, '../../apps/server/src/main.ts');
 const CLI_ENTRY = path.resolve(import.meta.dir, '../../apps/cli/src/index.ts');
@@ -85,7 +86,15 @@ describe('E2E: Security boundaries, strict auth bridge & idempotency regressions
   let fakeBotmuxUrl = '';
   let bridgeProc: ReturnType<typeof Bun.spawn> | null = null;
 
-  const triggerRecords: Array<{ triggerId: string; sessionId: string; botId: string; prompt: string }> = [];
+  const triggerRecords: Array<{
+    triggerId: string;
+    sessionId: string;
+    botId: string;
+    prompt: string;
+    instruction: string;
+    replyTarget?: { endpoint?: string; placeholderMessageId?: string };
+    polled: boolean;
+  }> = [];
 
   beforeAll(async () => {
     tmpDataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'bubai-sec-e2e-db-'));
@@ -101,9 +110,15 @@ describe('E2E: Security boundaries, strict auth bridge & idempotency regressions
               {
                 larkAppId: 'sec_botmux_agent_1',
                 botName: 'Secure Botmux Agent',
-                cliId: 'claude',
+                cliId: 'antigravity',
                 online: true,
                 workingDir: '/tmp/sec-repo',
+              },
+              {
+                larkAppId: 'unselected_botmux_agent',
+                botName: 'Unselected Botmux Agent',
+                cliId: 'codex',
+                online: true,
               },
             ],
           });
@@ -113,14 +128,29 @@ describe('E2E: Security boundaries, strict auth bridge & idempotency regressions
         }
         if (url.pathname === '/api/trigger' && req.method === 'POST') {
           const body = (await req.json()) as {
-            target?: { larkAppId?: string; sessionId?: string };
-            envelope?: { payload?: { message?: string } };
+            target?: { botId?: string; sessionId?: string };
+            instruction?: string;
+            envelope?: { payload?: {
+              message?: string;
+              conversation?: { outboundApi?: { endpoint?: string; placeholderMessageId?: string } };
+            } };
           };
-          const botId = body.target?.larkAppId || 'sec_botmux_agent_1';
+          const botId = body.target?.botId;
+          if (botId !== 'sec_botmux_agent_1' && botId !== 'unselected_botmux_agent') {
+            return Response.json({ ok: false, error: 'unexpected bot ID' }, { status: 400 });
+          }
           const sessionId = body.target?.sessionId || `sess_sec_${triggerRecords.length + 1}`;
           const triggerId = `trg_sec_${triggerRecords.length + 1}`;
           const prompt = body.envelope?.payload?.message || '';
-          triggerRecords.push({ triggerId, sessionId, botId, prompt });
+          triggerRecords.push({
+            triggerId,
+            sessionId,
+            botId,
+            prompt,
+            instruction: body.instruction ?? '',
+            replyTarget: body.envelope?.payload?.conversation?.outboundApi,
+            polled: false,
+          });
           return Response.json({
             ok: true,
             accepted: true,
@@ -136,6 +166,10 @@ describe('E2E: Security boundaries, strict auth bridge & idempotency regressions
             (r) => r.sessionId === sessionId && (!triggerId || r.triggerId === triggerId),
           );
           if (!rec) return Response.json({ ok: false, error: 'unknown_session' }, { status: 404 });
+          if (!rec.polled || rec.botId === 'unselected_botmux_agent') {
+            rec.polled = true;
+            return Response.json({ ok: true, state: 'running', triggerId: rec.triggerId });
+          }
           return Response.json({
             ok: true,
             state: 'completed',
@@ -310,6 +344,8 @@ describe('E2E: Security boundaries, strict auth bridge & idempotency regressions
         fakeBotmuxUrl,
         '--botmux-token',
         'fake-sec-botmux-token',
+        '--bots',
+        'sec_botmux_agent_1',
         '--channel',
         channel.id,
         '--poll-ms',
@@ -331,6 +367,9 @@ describe('E2E: Security boundaries, strict auth bridge & idempotency regressions
       );
     }, 'Secure Botmux Agent online under BUBAI_AUTH_REQUIRED=true');
     expect(onlineAgent.name).toBe('Secure Botmux Agent');
+    expect((await bobSdk.listAgents()).agents.some((agent) => agent.id === 'unselected_botmux_agent')).toBe(false);
+    const { members } = await bobSdk.getChannelMembers(channel.id);
+    expect(members.flatMap((member) => member.agentId ?? [])).toEqual(['sec_botmux_agent_1']);
 
     let wsOpen = false;
     const ws = bobSdk.connectWebSocket({
@@ -344,31 +383,84 @@ describe('E2E: Security boundaries, strict auth bridge & idempotency regressions
     try {
       await waitForCondition(async () => wsOpen, 'Bob WS open');
 
-      // Pure @mention test (autoReply was NOT enabled!)
-      ws.send({
-        type: 'message.send',
-        payload: {
-          channelId: channel.id,
-          senderId: bob.userId,
-          content: '@Secure Botmux Agent hello under strict auth',
-        },
-      });
-
-      const reply = await waitForCondition(async () => {
-        const { messages } = await bobSdk.getChannelMessages(channel.id);
-        return messages.find(
-          (m) =>
-            m.senderRole === 'agent' &&
-            m.senderId === 'sec_botmux_agent_1' &&
-            m.card?.status === 'completed' &&
-            m.content.includes('Secure reply: @Secure Botmux Agent hello under strict auth'),
-        );
-      }, 'Completed Botmux reply under strict auth');
-      expect(reply.card?.status).toBe('completed');
+      const replyIDs: string[] = [];
+      for (const turn of ['first', 'second']) {
+        const mention = '@Secure Botmux Agent ' + turn + ' under strict auth';
+        ws.send({
+          type: 'message.send',
+          payload: { channelId: channel.id, senderId: bob.userId, content: mention },
+        });
+        const reply = await waitForCondition(async () => {
+          const { messages } = await bobSdk.getChannelMessages(channel.id);
+          return messages.find(
+            (message) =>
+              message.senderId === 'sec_botmux_agent_1' &&
+              message.card?.status === 'completed' &&
+              message.content === 'Secure reply: ' + mention,
+          );
+        }, 'Completed Botmux reply for ' + turn);
+        replyIDs.push(reply.id);
+        const record = triggerRecords.find((item) => item.prompt === mention);
+        expect(record?.polled).toBe(true);
+        expect(record?.instruction).not.toContain('/api/bot/messages');
+        expect(record?.replyTarget?.endpoint).toBeUndefined();
+        expect(record?.replyTarget?.placeholderMessageId).toBe(reply.id);
+      }
+      expect(new Set(replyIDs).size).toBe(2);
+      expect(new Set(triggerRecords.map((record) => record.sessionId)).size).toBe(1);
     } finally {
       ws.close();
       bridgeProc.kill('SIGTERM');
       bridgeProc = null;
+    }
+  });
+
+  test('rejects unknown selections before provisioning and settles a stalled bridge turn as timeout', async () => {
+    const user = await signUpAndGetToken(serverUrl, 'timeout-bridge@example.com', 'Timeout Bridge');
+    const sdk = new BubaiClient({ baseUrl: serverUrl, token: user.token });
+    const { channel } = await sdk.createChannel({ name: 'bridge-timeout-room' });
+    const options = {
+      serverUrl,
+      token: user.token,
+      botmuxEndpoint: fakeBotmuxUrl,
+      botmuxToken: 'fake-sec-botmux-token',
+      channelRef: channel.id,
+      pollMs: 50,
+      turnTimeoutMs: 400,
+    };
+
+    await expect(startBotmuxBridge({
+      ...options,
+      botIds: ['unselected_botmux_agent', 'unknown_botmux_agent'],
+    })).rejects.toThrow('unknown_botmux_agent');
+    expect((await sdk.listAgents()).agents.some((agent) => agent.id === 'unselected_botmux_agent')).toBe(false);
+
+    let bridgeReady = false;
+    const bridge = await startBotmuxBridge({
+      ...options,
+      botIds: ['unselected_botmux_agent'],
+      onReady: () => { bridgeReady = true; },
+    });
+    let wsOpen = false;
+    const ws = sdk.connectWebSocket({
+      userId: user.userId,
+      onStateChange: (state) => { wsOpen = state === 'open'; },
+      onEvent: () => {},
+    });
+    try {
+      await waitForCondition(async () => bridgeReady && wsOpen, 'timeout-test connections');
+      const mention = '@Unselected Botmux Agent keep running';
+      ws.send({ type: 'message.send', payload: { channelId: channel.id, senderId: user.userId, content: mention } });
+      const reply = await waitForCondition(async () => {
+        const { messages } = await sdk.getChannelMessages(channel.id);
+        return messages.find((item) => item.senderId === 'unselected_botmux_agent' && item.card?.status === 'timeout');
+      }, 'stalled Botmux turn settles as timeout');
+      const record = triggerRecords.find((item) => item.prompt === mention);
+      expect(record?.replyTarget?.placeholderMessageId).toBe(reply.id);
+      expect(reply.adapterMeta?.triggerId).toBe(record?.triggerId);
+    } finally {
+      ws.close();
+      bridge.stop();
     }
   });
 

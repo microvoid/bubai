@@ -88,6 +88,14 @@ const LOCAL_BOTMUX_HOSTS = new Set(['localhost', '127.0.0.1', '[::1]']);
 const LOCAL_BOTMUX_BACKENDS = new Set(['pty', 'tmux', 'herdr', 'zellij', 'zmx']);
 const isLocalBotmux = URL.canParse(BOTMUX_ENDPOINT) &&
   LOCAL_BOTMUX_HOSTS.has(new URL(BOTMUX_ENDPOINT).hostname);
+const BOT_TURN_TERMINAL_STATUSES = ['completed', 'failed', 'interrupted', 'timeout', 'dispatch_failed'] as const;
+const MESSAGE_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+type BotTurnCompletion = {
+  content: string;
+  status: (typeof BOT_TURN_TERMINAL_STATUSES)[number];
+  adapterMeta?: Record<string, unknown>;
+};
 
 const REPLY_MODES = [
   'follow_source',
@@ -161,48 +169,10 @@ const gatewayAdapter = new BotGatewayAdapter({
     }
   },
   onTurnComplete: async ({ botId, messageId, content, status, adapterMeta }) => {
-    const [row] = await db
-      .select()
-      .from(messages)
-      .where(and(eq(messages.id, messageId), isNull(messages.deletedAt)))
-      .limit(1);
-    if (!row || row.senderAgentId !== botId || row.card?.status !== 'running') return;
-    const finalStatus = status ?? 'completed';
-    const settledProgress = finalizeProgressSnapshot(
-      row.card.progress,
-      finalStatus === 'completed' ? 'completed' : 'failed',
-    );
-    const finishedAt = Date.now();
-    const startedAt = row.card.startedAt ?? row.createdAt.getTime();
-    const [settled] = await db
-      .update(messages)
-      .set({
-        content: content.trim() || (finalStatus === 'completed' ? '' : `Agent turn ${finalStatus}`),
-        adapterMeta: adapterMeta ?? row.adapterMeta,
-        updatedAt: new Date(),
-        card: {
-          title: row.card.title || botId,
-          status: finalStatus,
-          ...(row.card.parallel ? { parallel: true } : {}),
-          startedAt,
-          finishedAt,
-          summary: finalStatus === 'completed' ? 'Agent turn completed (gateway)' : content || finalStatus,
-          ...(settledProgress ? { progress: settledProgress } : {}),
-        },
-      })
-      .where(and(eq(messages.id, row.id), sql`${messages.card}->>'status' = 'running'`))
-      .returning();
-    if (settled) {
-      const reactions = (await getReactionsForMessages([settled.id])).get(settled.id) || [];
-      const orgId = await getChannelOrgId(settled.channelId);
-      broadcast(
-        {
-          type: 'message.updated',
-          payload: { ...formatMessageRow(settled, 0, reactions), justCompleted: true },
-        },
-        orgId,
-      );
-    }
+    if (!MESSAGE_ID_PATTERN.test(messageId)) return;
+    const row = await findBotTurnMessage(messageId);
+    if (!row || row.senderAgentId !== botId) return;
+    await settleBotTurn(row, { content, status: status ?? 'completed', adapterMeta });
   },
 });
 const dispatcher = new AgentDispatcher({
@@ -2471,6 +2441,105 @@ app.post('/api/bot/messages/:messageId/progress', async (c) => {
     updated: Boolean(updated),
     message: formatMessageRow(effective, 0, reactions),
   });
+});
+
+async function findBotTurnMessage(messageId: string) {
+  const [row] = await db
+    .select()
+    .from(messages)
+    .where(and(eq(messages.id, messageId), isNull(messages.deletedAt)))
+    .limit(1);
+  return row;
+}
+
+async function settleBotTurn(
+  row: typeof messages.$inferSelect,
+  { content, status, adapterMeta }: BotTurnCompletion,
+  options?: { requireChannelMembership: boolean },
+) {
+  if (!row.senderAgentId || row.card?.status !== 'running') return;
+  const progress = finalizeProgressSnapshot(row.card.progress, status === 'completed' ? 'completed' : 'failed');
+  const finishedAt = Date.now();
+  const [settled] = await db
+    .update(messages)
+    .set({
+      content: content.trim() || (status === 'completed' ? '' : `Agent turn ${status}`),
+      adapterMeta: adapterMeta ?? row.adapterMeta,
+      updatedAt: new Date(finishedAt),
+      card: {
+        title: row.card.title || row.senderAgentId,
+        status,
+        ...(row.card.parallel ? { parallel: true } : {}),
+        startedAt: row.card.startedAt ?? row.createdAt.getTime(),
+        finishedAt,
+        summary: status === 'completed' ? 'Agent turn completed (gateway)' : content || status,
+        ...(progress ? { progress } : {}),
+      },
+    })
+    .where(and(
+      eq(messages.id, row.id),
+      eq(messages.senderAgentId, row.senderAgentId),
+      isNull(messages.deletedAt),
+      sql`${messages.card}->>'status' = 'running'`,
+      options?.requireChannelMembership ? sql`exists (
+        select 1 from ${channelMembers}
+        where ${channelMembers.channelId} = ${row.channelId}
+          and ${channelMembers.agentId} = ${row.senderAgentId}
+      )` : undefined,
+    ))
+    .returning();
+  if (!settled) return;
+
+  const reactions = (await getReactionsForMessages([settled.id])).get(settled.id) || [];
+  const orgId = await getChannelOrgId(settled.channelId);
+  const message = { ...formatMessageRow(settled, 0, reactions), justCompleted: true };
+  broadcast({ type: 'message.updated', payload: message }, orgId);
+  return message;
+}
+
+app.post('/api/bot/messages/:messageId/complete', async (c) => {
+  const botAuth = await verifyBotRequest(auth, c.req.raw.headers, BUZZ_BOT_TOKEN, null, AUTH_REQUIRED);
+  if (!botAuth.ok) return c.json({ error: 'Unauthorized' }, 401);
+
+  const messageId = c.req.param('messageId');
+  if (!MESSAGE_ID_PATTERN.test(messageId)) return c.json({ error: 'Invalid message ID' }, 400);
+
+  const body = await c.req.json<{ content?: unknown; status?: unknown; adapterMeta?: unknown }>().catch(() => null);
+  const status = BOT_TURN_TERMINAL_STATUSES.find((value) => value === body?.status);
+  if (!status || typeof body?.content !== 'string') {
+    return c.json({ error: 'Expected content and a terminal turn status' }, 400);
+  }
+  const { content, adapterMeta } = body;
+  if (adapterMeta !== undefined && (!adapterMeta || typeof adapterMeta !== 'object' || Array.isArray(adapterMeta))) {
+    return c.json({ error: 'adapterMeta must be an object' }, 400);
+  }
+
+  const row = await findBotTurnMessage(messageId);
+  if (!row) return c.json({ error: 'Message not found' }, 404);
+  if (!row.senderAgentId) return c.json({ error: 'Forbidden: bots cannot update human messages' }, 403);
+  const requireChannelMembership = botAuth.method === 'bot-key';
+  if (requireChannelMembership && row.senderAgentId !== botAuth.botUserId) {
+    return c.json({ error: 'Forbidden: message belongs to another agent' }, 403);
+  }
+
+  const message = await settleBotTurn(row, {
+    content,
+    status,
+    adapterMeta: adapterMeta as Record<string, unknown> | undefined,
+  }, { requireChannelMembership });
+  if (message) return c.json({ ok: true, settled: true, message });
+
+  // Match the exact placeholder even after an earlier attempt already settled it.
+  const effective = row.card?.status === 'running' ? await findBotTurnMessage(messageId) : row;
+  if (!effective) return c.json({ error: 'Message not found' }, 404);
+  if (requireChannelMembership && !(await isBotChannelMember(row.channelId, row.senderAgentId))) {
+    return c.json({ error: 'Forbidden: agent is not a member of this channel' }, 403);
+  }
+  if (!BOT_TURN_TERMINAL_STATUSES.some((value) => value === effective.card?.status)) {
+    return c.json({ error: 'Message is not an active or settled turn' }, 409);
+  }
+  const reactions = (await getReactionsForMessages([effective.id])).get(effective.id) || [];
+  return c.json({ ok: true, settled: false, message: formatMessageRow(effective, 0, reactions) });
 });
 
 /** Standard Bot Protocol: update a bot message / turn card status, content, progress, or adapterMeta. */

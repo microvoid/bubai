@@ -1,5 +1,6 @@
-#!/usr/bin/env bun
+#!/usr/bin/env node
 import { BubaiClient } from '@buzz-botmux/chat-client';
+import { version } from '../package.json';
 import { loadCliConfig, saveCliConfig } from './config';
 import { startBotmuxBridge } from './bridge-botmux';
 
@@ -40,7 +41,7 @@ function resolveConnection(flags: Record<string, string | boolean>) {
     getStringFlag(flags, 'server') ||
     process.env.BUBAI_URL ||
     saved.serverUrl ||
-    'http://127.0.0.1:4000';
+    'https://bubai.app/';
   const token =
     getStringFlag(flags, 'token') ||
     process.env.BUBAI_TOKEN ||
@@ -54,14 +55,15 @@ function printHelp() {
   console.log(`BubaiCLI — Unified BubAI client & Agent Adapter bridge
 
 Usage:
-  bubai login [--server <url>] [--client-id <id>] [--json]
-  bubai config set --server <url> [--token <token>]
-  bubai status [--server <url>] [--token <token>]
-  bubai agent create --name <name> [--id <id>] [--external-id <ext>] [--channel <name|id>] [--auto-reply] [--issue-key]
-  bubai agent list [--server <url>]
-  bubai agent join --agent <id> --channel <name|id> [--auto-reply]
-  bubai bridge botmux [--server <url>] [--token <token>] [--botmux <url>] [--channel <name|id>] [--auto-reply]
-  bubai chat send --channel <name|id> --text <text> [--bot <agentId>] [--thread <threadId>]
+  bub --version
+  bub login [--server <url>] [--client-id <id>] [--json]
+  bub config set --server <url> [--token <token>]
+  bub status [--server <url>] [--token <token>]
+  bub agent create --name <name> [--id <id>] [--external-id <ext>] [--channel <name|id>] [--auto-reply] [--issue-key]
+  bub agent list [--server <url>]
+  bub agent join --agent <id> --channel <name|id> [--auto-reply]
+  bub bridge botmux [--server <url>] [--token <token>] [--botmux <url>] [--bots <id,id>] [--channel <name|id>] [--auto-reply]
+  bub chat send --channel <name|id> --text <text> [--bot <agentId>] [--thread <threadId>]
 `);
 }
 
@@ -179,6 +181,11 @@ async function resolveChannelId(sdk: BubaiClient, channelRef: string): Promise<s
 async function main() {
   const { positionals, flags } = parseArgs(process.argv.slice(2));
   const [cmd, sub] = positionals;
+
+  if (flags.version || cmd === '-V') {
+    console.log(version);
+    return;
+  }
 
   if (!cmd || cmd === 'help' || flags.help) {
     printHelp();
@@ -300,6 +307,10 @@ async function main() {
       getStringFlag(flags, 'botmux') || process.env.BOTMUX_ENDPOINT || 'http://127.0.0.1:7891';
     const botmuxToken = getStringFlag(flags, 'botmux-token') || process.env.BOTMUX_TOKEN;
     const botToken = getStringFlag(flags, 'bot-token');
+    const botIds = getStringFlag(flags, 'bots')?.split(',').map((id) => id.trim());
+    if (flags.bots !== undefined && (!botIds || botIds.some((id) => !id))) {
+      throw new Error('--bots requires a comma-separated list of Botmux bot IDs');
+    }
     const channelRef = getStringFlag(flags, 'channel');
     const pollMsRaw = getStringFlag(flags, 'poll-ms');
     const pollMs = pollMsRaw ? Number(pollMsRaw) : undefined;
@@ -310,6 +321,7 @@ async function main() {
       botToken,
       botmuxEndpoint,
       botmuxToken,
+      botIds,
       channelRef,
       autoReply: flags['auto-reply'] !== undefined ? Boolean(flags['auto-reply']) : undefined,
       pollMs,

@@ -283,8 +283,8 @@ export class BubaiClient {
     );
   }
 
-  getThreadPreview(channelId: string, rootId: string): Promise<{ replyCount: number; replyPreviews: ChatMessage[] }> {
-    return this.requestJson(`/api/channels/${encodeURIComponent(channelId)}/threads/${encodeURIComponent(rootId)}/preview`);
+  getThreadPreview(channelId: string, rootId: string, userId?: string): Promise<{ replyCount: number; replyPreviews: ChatMessage[]; unreadReplyCount?: number }> {
+    return this.requestJson(`/api/channels/${encodeURIComponent(channelId)}/threads/${encodeURIComponent(rootId)}/preview${userId ? `?userId=${encodeURIComponent(userId)}` : ''}`);
   }
 
   getThread(channelId: string, rootMessageId: string): Promise<ThreadPayload> {

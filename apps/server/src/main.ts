@@ -2091,8 +2091,9 @@ app.get('/api/channels/:channelId/threads/:rootMessageId/preview', async (c) => 
     ));
   if (!root) return c.json({ error: 'Thread root not found' }, 404);
 
-  const [{ replyCount, replyPreviews }] = await formatMessagesWithReplyPreviews(channelId, [root]);
-  return c.json({ replyCount, replyPreviews });
+  const userId = getRequestUserId(c, c.req.query('userId'));
+  const [{ replyCount, replyPreviews, unreadReplyCount }] = await formatMessagesWithReplyPreviews(channelId, [root], userId);
+  return c.json({ replyCount, replyPreviews, unreadReplyCount: unreadReplyCount ?? 0 });
 });
 
 /** Thread detail */

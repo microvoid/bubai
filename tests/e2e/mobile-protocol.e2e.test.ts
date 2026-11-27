@@ -168,7 +168,9 @@ test('mobile roster, mentions, thread activity and file messages use the same se
     expect(
       (await client.getChannelMessages(channel.id, { userId })).messages[0].unreadReplyCount,
     ).toBeGreaterThan(0);
+    expect((await client.getThreadPreview(channel.id, root.message.id, userId)).unreadReplyCount).toBeGreaterThan(0);
     await client.markThreadRead(channel.id, root.message.id, userId);
+    expect((await client.getThreadPreview(channel.id, root.message.id, userId)).unreadReplyCount).toBe(0);
     expect(
       (await client.getChannelMessages(channel.id, { userId })).messages[0].unreadReplyCount ?? 0,
     ).toBe(0);

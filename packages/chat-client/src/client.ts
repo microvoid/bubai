@@ -1,4 +1,5 @@
 import type {
+  ActivityItem,
   AgentDetail,
   AgentProgressSnapshot,
   AgentProvisionInput,
@@ -49,7 +50,18 @@ export interface BubaiClientOptions {
   fetchImpl?: typeof fetch;
 }
 
+export interface OutgoingChatMessage {
+  messageId: string;
+  channelId: string;
+  senderId: string;
+  content: string;
+  threadId?: string;
+  replyToId?: string;
+  attachments?: MessageAttachment[];
+}
+
 export interface WsHandle {
+  sendMessage(payload: OutgoingChatMessage): Promise<void>;
   send(payload: Record<string, unknown>): boolean;
   reconnectNow(): void;
   close(): void;
@@ -109,6 +121,14 @@ export class BubaiClient {
     return parsed as T;
   }
 
+  registerPush(token: string, platform: 'ios' | 'android'): Promise<{ ok: boolean }> {
+    return this.requestJson('/api/push/register', { method: 'POST', body: JSON.stringify({ token, platform }) });
+  }
+
+  unregisterPush(token: string): Promise<{ ok: boolean }> {
+    return this.requestJson('/api/push/register', { method: 'DELETE', body: JSON.stringify({ token }) });
+  }
+
   getInstance(): Promise<InstanceInfo> {
     return this.requestJson<InstanceInfo>('/api/instance');
   }
@@ -121,15 +141,80 @@ export class BubaiClient {
 
   getChannelMessages(
     channelId: string,
-    opts?: { before?: number; limit?: number },
-  ): Promise<{ messages: ChatMessage[]; hasMore: boolean; nextCursor: number | null }> {
+    opts?: { before?: number; beforeId?: string; userId?: string; limit?: number },
+  ): Promise<{ messages: ChatMessage[]; hasMore: boolean; nextCursor: number | null; nextCursorId?: string }> {
     const params = new URLSearchParams();
+    if (opts?.userId) params.set('userId', opts.userId);
+    if (opts?.beforeId) params.set('beforeId', opts.beforeId);
     if (opts?.before !== undefined) params.set('before', String(opts.before));
     if (opts?.limit !== undefined) params.set('limit', String(opts.limit));
     const qs = params.toString();
     return this.requestJson(
       `/api/channels/${encodeURIComponent(channelId)}/messages${qs ? `?${qs}` : ''}`,
     );
+  }
+
+
+  getActivity(userId: string): Promise<{ items: ActivityItem[] }> {
+    return this.requestJson(`/api/activity?userId=${encodeURIComponent(userId)}`);
+  }
+
+  updateChannelSettings(channelId: string, input: { userId: string; name?: string; topic?: string; replyMode?: string }): Promise<{ channel: Channel }> {
+    return this.requestJson(`/api/channels/${encodeURIComponent(channelId)}/settings`, {
+      method: 'PATCH', body: JSON.stringify(input),
+    });
+  }
+
+  archiveChannel(channelId: string, input: { userId: string; archived: boolean }): Promise<{ channel: Channel }> {
+    return this.requestJson(`/api/channels/${encodeURIComponent(channelId)}/archive`, {
+      method: 'PATCH', body: JSON.stringify(input),
+    });
+  }
+
+  muteChannel(channelId: string, input: { userId: string; muted: boolean }): Promise<{ muted: boolean }> {
+    return this.requestJson(`/api/channels/${encodeURIComponent(channelId)}/mute`, {
+      method: 'POST', body: JSON.stringify(input),
+    });
+  }
+
+  hideChannel(channelId: string, input: { userId: string; hidden: boolean }): Promise<{ hidden: boolean }> {
+    return this.requestJson(`/api/channels/${encodeURIComponent(channelId)}/hide`, {
+      method: 'POST', body: JSON.stringify(input),
+    });
+  }
+
+  placeChannel(channelId: string, input: { userId: string; starred?: boolean; groupId?: string | null }): Promise<{ starred: boolean; groupId: string | null }> {
+    return this.requestJson(`/api/channels/${encodeURIComponent(channelId)}/placement`, {
+      method: 'POST', body: JSON.stringify(input),
+    });
+  }
+
+  markChannelUnread(channelId: string, input: { userId: string }): Promise<{ markedUnread: boolean }> {
+    return this.requestJson(`/api/channels/${encodeURIComponent(channelId)}/unread`, {
+      method: 'POST', body: JSON.stringify(input),
+    });
+  }
+
+  deleteChannel(channelId: string, userId: string): Promise<{ ok: boolean }> {
+    return this.requestJson(`/api/channels/${encodeURIComponent(channelId)}?userId=${encodeURIComponent(userId)}`, { method: 'DELETE' });
+  }
+
+  markThreadRead(channelId: string, rootId: string, userId: string): Promise<{ lastReadAt: number }> {
+    return this.requestJson(`/api/channels/${encodeURIComponent(channelId)}/threads/${encodeURIComponent(rootId)}/read`, {
+      method: 'POST', body: JSON.stringify({ userId }),
+    });
+  }
+
+  createSidebarGroup(name: string, userId: string): Promise<{ group: { id: string; name: string } }> {
+    return this.requestJson('/api/sidebar-groups', { method: 'POST', body: JSON.stringify({ userId, name }) });
+  }
+
+  renameSidebarGroup(id: string, name: string, userId: string): Promise<{ group: { id: string; name: string } }> {
+    return this.requestJson(`/api/sidebar-groups/${encodeURIComponent(id)}`, { method: 'PATCH', body: JSON.stringify({ userId, name }) });
+  }
+
+  deleteSidebarGroup(id: string, userId: string): Promise<{ ok: boolean }> {
+    return this.requestJson(`/api/sidebar-groups/${encodeURIComponent(id)}?userId=${encodeURIComponent(userId)}`, { method: 'DELETE' });
   }
 
   createChannel(input: { name: string; topic?: string; userId?: string }): Promise<{ channel: Channel }> {
@@ -307,6 +392,7 @@ export class BubaiClient {
     userId: string;
     onEvent: (event: ServerWsEvent) => void;
     onStateChange?: (state: WsConnectionState) => void;
+    heartbeatMs?: number;
     WebSocketImpl?: new (url: string) => WsLike;
   }): WsHandle {
     const WS =
@@ -317,9 +403,16 @@ export class BubaiClient {
     let closed = false;
     let socket: WsLike | null = null;
     let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+    const pending = new Map<string, (error?: string) => void>();
+    const cancelPending = () => {
+      for (const finish of pending.values()) finish('连接中断，消息尚未确认');
+    };
     let attempt = 0;
+    let heartbeat: ReturnType<typeof setInterval> | undefined;
 
     const clearTimer = () => {
+      cancelPending();
+      clearInterval(heartbeat);
       if (reconnectTimer !== null) {
         clearTimeout(reconnectTimer);
         reconnectTimer = null;
@@ -334,9 +427,16 @@ export class BubaiClient {
       const ws = new WS(wsUrl);
       socket = ws;
 
+      let waitingForPong = false;
       ws.onopen = () => {
         if (closed || socket !== ws) return;
         attempt = 0;
+        heartbeat = setInterval(() => {
+          if (socket !== ws || closed) return;
+          if (waitingForPong) return ws.close();
+          waitingForPong = true;
+          try { ws.send(JSON.stringify({ type: 'ping' })); } catch { ws.close(); }
+        }, params.heartbeatMs ?? 25_000);
         params.onStateChange?.('open');
         ws.send(
           JSON.stringify({
@@ -351,6 +451,9 @@ export class BubaiClient {
         try {
           const parsed = JSON.parse(String(evt.data)) as ServerWsEvent;
           if (parsed && typeof parsed.type === 'string') {
+            if (parsed.type === 'message.created') pending.get(parsed.payload.id)?.();
+            if (parsed.type === 'message.send_failed') pending.get(parsed.payload.messageId)?.(parsed.payload.message);
+            if (parsed.type === 'pong') waitingForPong = false;
             params.onEvent(parsed);
           }
         } catch {
@@ -360,6 +463,7 @@ export class BubaiClient {
 
       ws.onclose = () => {
         if (closed || socket !== ws) return;
+        clearTimer();
         socket = null;
         attempt += 1;
         params.onStateChange?.('reconnecting');
@@ -375,6 +479,25 @@ export class BubaiClient {
     connect();
 
     return {
+      sendMessage(payload) {
+        return new Promise<void>((resolve, reject) => {
+          if (!socket || socket.readyState !== 1) return reject(new Error('尚未连接'));
+          if (pending.has(payload.messageId)) return reject(new Error('正在等待发送回执'));
+          const finish = (error?: string) => {
+            clearTimeout(timer);
+            pending.delete(payload.messageId);
+            if (error) reject(new Error(error));
+            else resolve();
+          };
+          const timer = setTimeout(() => finish('未收到发送回执，请重试'), 15_000);
+          pending.set(payload.messageId, finish);
+          try {
+            socket.send(JSON.stringify({ type: 'message.send', payload }));
+          } catch (error) {
+            finish(String(error));
+          }
+        });
+      },
       send(payload) {
         if (!socket || socket.readyState !== 1) return false;
         socket.send(JSON.stringify(payload));

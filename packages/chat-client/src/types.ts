@@ -2,6 +2,7 @@ export interface InstanceInfo {
   name: string;
   version: string;
   authRequired: boolean;
+  emailAndPasswordEnabled?: boolean;
   publicUrl?: string;
   botmux: {
     connected: boolean;
@@ -22,6 +23,15 @@ export interface Channel {
   dmKey?: string;
   replyMode?: string;
   archived?: boolean;
+  threadUnreadCount?: number;
+  mentionCount?: number;
+  muted?: boolean;
+  starred?: boolean;
+  groupId?: string | null;
+  markedUnread?: boolean;
+  memberIds?: string[];
+  organizationId?: string | null;
+  lastReadAt?: number | null;
   unreadCount: number;
   createdAt: number;
 }
@@ -112,6 +122,9 @@ export interface ChatMessage {
   botmuxSessionId?: string;
   adapterMeta?: Record<string, unknown>;
   replyCount?: number;
+  replyPreviews?: ChatMessage[];
+  unreadReplyCount?: number;
+  justCompleted?: boolean;
   reactions?: ReactionGroup[];
   pinned?: boolean;
   createdAt: number;
@@ -166,7 +179,24 @@ export interface BotmuxStatus {
   detail: string;
 }
 
+export interface ActivityItem {
+  id: string;
+  kind: 'mention' | 'thread' | 'dm';
+  channelId: string;
+  channelName: string;
+  channelKind: 'channel' | 'dm';
+  threadId?: string;
+  messageId: string;
+  senderName: string;
+  excerpt: string;
+  unreadCount: number;
+  createdAt: number;
+  message: ChatMessage;
+}
+
 export interface BootstrapPayload {
+  sidebarGroups?: { id: string; name: string }[];
+  auth?: { required: boolean; authenticated: boolean; userId: string; organizationId?: string | null };
   channels: Channel[];
   participants: Participant[];
   sessions: BotmuxSession[];
@@ -242,7 +272,11 @@ export type ServerWsEvent =
   | { type: 'presence.updated'; payload: { participants: Participant[] } }
   | { type: 'sessions.updated'; payload: { sessions: BotmuxSession[] } }
   | { type: 'asks.updated'; payload: { asks: BotmuxPendingAsk[] } }
-  | { type: 'typing.start'; payload: { channelId: string; userId: string } }
+  | { type: 'typing.updated'; payload: { channelId: string; userId: string; typing: boolean } }
+  | { type: 'channel.deleted'; payload: { id: string } }
+  | { type: 'message.send_failed'; payload: { messageId: string; message: string } }
+  | { type: 'channel.members.updated'; payload: { channelId: string; members: ChannelMemberRow[]; ownerId?: string } }
+  | { type: 'pong'; payload: { ts: number } }
   | { type: 'botmux.event'; payload: { eventName: string; data: unknown } };
 
 export type WsConnectionState = 'connecting' | 'open' | 'reconnecting' | 'closed';

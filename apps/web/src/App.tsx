@@ -2,7 +2,6 @@ import { useCallback, useEffect, useId, useMemo, useRef, useState } from 'react'
 import { ActivityPanel, type ActivityItem } from './features/activity/ActivityPanel';
 import { AgentProfilePanel } from './features/agent-profile/AgentProfilePanel';
 import { TerminalPane } from './features/terminal/TerminalPane';
-import { AppearanceControls } from './features/appearance/AppearanceControls';
 import { ResizableSidebar } from './features/channel-navigation/ResizableSidebar';
 import { SidebarFrame } from './features/channel-navigation/SidebarFrame';
 import {
@@ -90,7 +89,6 @@ import {
   LinkIcon,
   NotificationFilledIcon,
   NotificationIcon,
-  PaletteIcon,
   PencilSimpleIcon,
   PlusIcon,
   SignOutIcon,
@@ -565,7 +563,6 @@ export default function App() {
   }, [auth.user?.id, currentUserId]);
 
   // Appearance popover
-  const [showAppearance, setShowAppearance] = useState(false);
 
   // Paginated root messages
   const [messages, setMessages] = useState<Message[]>([]);
@@ -2423,6 +2420,33 @@ export default function App() {
             else void handleOpenDm(participant);
           }}
         />
+        <div>
+          <NavigationItem
+            data-activity-nav="true"
+            label="Activity"
+            selected={showActivityPanel}
+            unread={totalUnreadCount > 0 && !showActivityPanel}
+            icon={<BellIcon size={16} aria-hidden="true" />}
+            trailing={
+              totalUnreadCount > 0 ? (
+                <CountBadge
+                  count={totalUnreadCount}
+                  label={`${totalUnreadCount} unread items`}
+                />
+              ) : undefined
+            }
+            onClick={() => {
+              if (showActivityPanel) {
+                setShowActivityPanel(false);
+              } else {
+                setShowPinsPanel(false);
+                setSelectedAgentProfileId(null);
+                setTerminalSessionId(null);
+                setShowActivityPanel(true);
+              }
+            }}
+          />
+        </div>
       </header>
       <div className={workspaceStyles.workspace}>
         <Panel as="div" joined>
@@ -2493,49 +2517,12 @@ export default function App() {
                             }
                             onClick={() => setUnreadOnly((v) => !v)}
                           />
-                          <IconButton
-                            hint="familiar"
-                            size="sm"
-                            aria-label="Appearance"
-                            aria-expanded={showAppearance}
-                            title="Appearance (Theme, Accent & Vibe level)"
-                            icon={<PaletteIcon size={16} />}
-                            onClick={() => setShowAppearance((v) => !v)}
-                          />
                         </div>
                       }
                     />
-                    {showAppearance && <AppearanceControls />}
                   </div>
                 }
               >
-                <div style={{ padding: '4px 6px 2px' }}>
-                  <NavigationItem
-                    data-activity-nav="true"
-                    label="Activity"
-                    selected={showActivityPanel}
-                    unread={totalUnreadCount > 0 && !showActivityPanel}
-                    icon={<BellIcon size={16} aria-hidden="true" />}
-                    trailing={
-                      totalUnreadCount > 0 ? (
-                        <CountBadge
-                          count={totalUnreadCount}
-                          label={`${totalUnreadCount} unread items`}
-                        />
-                      ) : undefined
-                    }
-                    onClick={() => {
-                      if (showActivityPanel) {
-                        setShowActivityPanel(false);
-                      } else {
-                        setShowPinsPanel(false);
-                        setSelectedAgentProfileId(null);
-                        setTerminalSessionId(null);
-                        setShowActivityPanel(true);
-                      }
-                    }}
-                  />
-                </div>
                   {starredChannels.length > 0 && (
                     <NavigationSection label="Starred">
                       {starredChannels.map((ch) => (

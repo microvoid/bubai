@@ -15,8 +15,6 @@ export function AppearanceControls() {
   return (
     <div
       style={{
-        padding: '10px 10px 12px',
-        borderBottom: '1px solid var(--border-standard)',
         display: 'flex',
         flexDirection: 'column',
         gap: 'var(--space-3)',

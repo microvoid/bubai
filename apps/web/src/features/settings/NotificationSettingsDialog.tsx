@@ -1,3 +1,4 @@
+import { AppearanceControls } from '../appearance/AppearanceControls';
 import { useEffect, useState, type RefObject } from 'react';
 import { Button } from '../../design-system/ui/Button';
 import { Dialog } from '../../design-system/ui/Dialog';
@@ -73,7 +74,11 @@ export function NotificationSettingsDialog({
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange} title="Settings" finalFocus={triggerRef}>
-      <section aria-labelledby="notification-settings-title">
+      <section aria-labelledby="appearance-settings-title">
+        <Header id="appearance-settings-title" title="Appearance" />
+        <AppearanceControls />
+      </section>
+      <section aria-labelledby="notification-settings-title" style={{ marginBlockStart: 'var(--space-6)' }}>
         <Header id="notification-settings-title" title="Notifications" />
         <section aria-labelledby="notification-delivery-title">
           <InlineHeader id="notification-delivery-title" title="Delivery" />

@@ -1190,16 +1190,14 @@ html[data-keyboard-navigation] .attachmentImage:focus-visible {
 }
 
 .threadPreviews {
-  inline-size: fit-content;
-  max-inline-size: min(calc(100% - var(--space-4)), 32rem);
-  align-self: flex-start;
+  align-self: stretch;
+  min-inline-size: 0;
   margin: var(--space-1) var(--space-4) 0;
   padding: 0 var(--space-1);
   border-inline-start: 2px solid var(--border-message-thread);
   list-style: none;
 }
 .message[data-viewer-message] > .messageBody > .threadPreviews {
-  align-self: flex-end;
   border-inline-start: 0;
   border-inline-end: 2px solid var(--border-message-thread);
 }

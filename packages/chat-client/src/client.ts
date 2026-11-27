@@ -574,22 +574,27 @@ export class BubaiClient {
       (globalThis.WebSocket as unknown as new (url: string) => WsLike);
     const wsUrl = toBotGatewayWebSocketUrl(this.baseUrl, this.token);
     const heartbeatMs = params.heartbeatMs ?? 25_000;
+    const responseTimeoutMs = heartbeatMs * 2;
 
     let closed = false;
     let socket: WsLike | null = null;
     let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
-    let heartbeatTimer: ReturnType<typeof setInterval> | null = null;
+    let healthTimer: ReturnType<typeof setTimeout> | null = null;
     let attempt = 0;
+
+    const clearHealthTimer = () => {
+      if (healthTimer !== null) {
+        clearTimeout(healthTimer);
+        healthTimer = null;
+      }
+    };
 
     const clearTimers = () => {
       if (reconnectTimer !== null) {
         clearTimeout(reconnectTimer);
         reconnectTimer = null;
       }
-      if (heartbeatTimer !== null) {
-        clearInterval(heartbeatTimer);
-        heartbeatTimer = null;
-      }
+      clearHealthTimer();
     };
 
     const sendRaw = (payload: Record<string, unknown>): boolean => {
@@ -605,25 +610,58 @@ export class BubaiClient {
 
       const ws = new WS(wsUrl);
       socket = ws;
+      let waitingForPong = false;
+
+      const reconnect = () => {
+        if (closed || socket !== ws) return;
+        socket = null;
+        clearTimers();
+        try {
+          ws.close();
+        } catch {
+          // Reconnect even if the previous socket cannot close cleanly.
+        }
+        attempt += 1;
+        const delayMs = Math.min(1000 * 2 ** Math.min(attempt - 1, 4), 15_000);
+        reconnectTimer = setTimeout(connect, delayMs);
+        params.onStateChange?.('reconnecting');
+      };
+
+      const scheduleHeartbeat = () => {
+        clearHealthTimer();
+        waitingForPong = false;
+        healthTimer = setTimeout(() => {
+          waitingForPong = true;
+          healthTimer = setTimeout(reconnect, responseTimeoutMs);
+          try {
+            ws.send(JSON.stringify({ type: 'bot.ping' }));
+          } catch {
+            reconnect();
+          }
+        }, heartbeatMs);
+      };
+
+      // The transport can open without the gateway completing registration.
+      healthTimer = setTimeout(reconnect, responseTimeoutMs);
 
       ws.onopen = () => {
         if (closed || socket !== ws) return;
-        attempt = 0;
         params.onStateChange?.('open');
-        ws.send(
-          JSON.stringify({
-            type: 'bot.hello',
-            payload: {
-              adapterType: 'gateway',
-              agents: params.agents,
-            },
-          }),
-        );
-        heartbeatTimer = setInterval(() => {
-          if (socket === ws && ws.readyState === 1) {
-            ws.send(JSON.stringify({ type: 'bot.ping' }));
-          }
-        }, heartbeatMs);
+        if (closed || socket !== ws) return;
+
+        try {
+          ws.send(
+            JSON.stringify({
+              type: 'bot.hello',
+              payload: {
+                adapterType: 'gateway',
+                agents: params.agents,
+              },
+            }),
+          );
+        } catch {
+          reconnect();
+        }
       };
 
       ws.onmessage = (evt) => {
@@ -631,7 +669,11 @@ export class BubaiClient {
         try {
           const parsed = JSON.parse(String(evt.data)) as { type?: string; payload?: unknown };
           if (parsed.type === 'bot.welcome' && parsed.payload) {
+            attempt = 0;
+            scheduleHeartbeat();
             params.onWelcome?.(parsed.payload as { connectionId: string; agentIds: string[] });
+          } else if (parsed.type === 'bot.pong' && waitingForPong) {
+            scheduleHeartbeat();
           } else if (parsed.type === 'turn.requested') {
             params.onTurnRequested?.(parsed as unknown as BotTurnRequestedEvent);
           } else if (parsed.type === 'ask.answered' && parsed.payload) {
@@ -649,15 +691,7 @@ export class BubaiClient {
         }
       };
 
-      ws.onclose = () => {
-        if (closed || socket !== ws) return;
-        socket = null;
-        clearTimers();
-        attempt += 1;
-        params.onStateChange?.('reconnecting');
-        const delayMs = Math.min(1000 * 2 ** Math.min(attempt - 1, 4), 15_000);
-        reconnectTimer = setTimeout(connect, delayMs);
-      };
+      ws.onclose = reconnect;
 
       ws.onerror = () => {
         // onclose handles reconnect

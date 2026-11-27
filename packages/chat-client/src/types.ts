@@ -262,6 +262,8 @@ export interface AgentProvisionInput {
   webhookSecret?: string;
   channelId?: string;
   channelName?: string;
+  organizationId?: string;
+  community?: string;
   autoReply?: boolean;
   issueKey?: boolean;
   keyScope?: 'bot' | 'bot-server';
@@ -271,6 +273,7 @@ export interface AgentProvisionResult {
   ok: boolean;
   created: boolean;
   agent: Participant;
+  organizationId?: string;
   channelId?: string;
   apiKey?: string;
 }

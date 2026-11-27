@@ -2,6 +2,47 @@ import { describe, expect, test } from 'bun:test';
 import { BubaiClient, normalizeServerUrl, toWebSocketUrl } from './client';
 import type { ServerWsEvent, WsConnectionState } from './types';
 
+function createWebSocketHarness() {
+  const instances: FakeWs[] = [];
+  class FakeWs {
+    readyState = 0;
+    sent: string[] = [];
+    onopen: ((ev: unknown) => void) | null = null;
+    onmessage: ((ev: { data: unknown }) => void) | null = null;
+    onclose: ((ev: unknown) => void) | null = null;
+    onerror: ((ev: unknown) => void) | null = null;
+    onSend?: (data: string) => void;
+
+    constructor(public url: string) {
+      instances.push(this);
+    }
+    send(data: string) {
+      this.sent.push(data);
+      this.onSend?.(data);
+    }
+    close() {
+      this.readyState = 3;
+    }
+    emitOpen() {
+      this.readyState = 1;
+      this.onopen?.({});
+    }
+    emitMessage(data: unknown) {
+      this.onmessage?.({ data: JSON.stringify(data) });
+    }
+  }
+  return { instances, FakeWs };
+}
+
+async function waitFor(predicate: () => boolean) {
+  const deadline = Date.now() + 3_000;
+  while (Date.now() < deadline) {
+    if (predicate()) return;
+    await Bun.sleep(10);
+  }
+  throw new Error('Timed out waiting for WebSocket state');
+}
+
 describe('URL normalization', () => {
   test('normalizes bare host, trailing slash, and converts to ws/wss', () => {
     expect(normalizeServerUrl('localhost:4000/')).toBe('http://localhost:4000');
@@ -81,32 +122,7 @@ describe('BubaiClient REST', () => {
 
 describe('BubaiClient WebSocket', () => {
   test('identifies on open, dispatches parsed events, and supports reconnectNow', () => {
-    const instances: FakeWs[] = [];
-    class FakeWs {
-      readyState = 0;
-      sent: string[] = [];
-      onopen: ((ev: unknown) => void) | null = null;
-      onmessage: ((ev: { data: unknown }) => void) | null = null;
-      onclose: ((ev: unknown) => void) | null = null;
-      onerror: ((ev: unknown) => void) | null = null;
-      constructor(public url: string) {
-        instances.push(this);
-      }
-      send(data: string) {
-        this.sent.push(data);
-      }
-      close() {
-        this.readyState = 3;
-      }
-      emitOpen() {
-        this.readyState = 1;
-        this.onopen?.({});
-      }
-      emitMessage(data: unknown) {
-        this.onmessage?.({ data: JSON.stringify(data) });
-      }
-    }
-
+    const { instances, FakeWs } = createWebSocketHarness();
     const events: ServerWsEvent[] = [];
     const states: WsConnectionState[] = [];
     const client = new BubaiClient({ baseUrl: 'http://localhost:4000' });
@@ -170,5 +186,72 @@ describe('BubaiClient WebSocket', () => {
     expect(searchRes.results.length).toBe(1);
     expect(searchRes.results[0].content).toBe('hello');
     expect(calls.length).toBe(2);
+  });
+});
+
+describe('BubaiClient bot gateway', () => {
+  const welcome = {
+    type: 'bot.welcome',
+    payload: { connectionId: 'gw-test', agentIds: ['a-1'] },
+  };
+
+  test('reconnects when the socket opens without a welcome', async () => {
+    const { instances, FakeWs } = createWebSocketHarness();
+    const welcomes: string[] = [];
+    const client = new BubaiClient({ baseUrl: 'http://localhost:4000' });
+    const handle = client.connectBotGateway({
+      agents: [{ id: 'a-1', name: 'Agent 1' }],
+      heartbeatMs: 30,
+      WebSocketImpl: FakeWs,
+      onWelcome: ({ connectionId }) => welcomes.push(connectionId),
+    });
+
+    try {
+      const stale = instances[0];
+      stale.emitOpen();
+      expect(JSON.parse(stale.sent[0]).type).toBe('bot.hello');
+      stale.emitMessage({ type: 'bot.pong' });
+
+      await waitFor(() => instances.length === 2);
+      expect(stale.readyState).toBe(3);
+      stale.emitMessage(welcome);
+      expect(welcomes).toEqual([]);
+
+      const replacement = instances[1];
+      replacement.emitOpen();
+      expect(JSON.parse(replacement.sent[0]).type).toBe('bot.hello');
+      replacement.emitMessage(welcome);
+      expect(welcomes).toEqual(['gw-test']);
+    } finally {
+      handle.close();
+    }
+  });
+
+  test('keeps a responding gateway open and reconnects when heartbeat replies stop', async () => {
+    const { instances, FakeWs } = createWebSocketHarness();
+    const client = new BubaiClient({ baseUrl: 'http://localhost:4000' });
+    const handle = client.connectBotGateway({ agents: [], heartbeatMs: 30, WebSocketImpl: FakeWs });
+
+    try {
+      const active = instances[0];
+      let pingCount = 0;
+      active.onSend = (data) => {
+        if (JSON.parse(data).type !== 'bot.ping') return;
+        pingCount += 1;
+        active.emitMessage({ type: 'bot.pong' });
+      };
+      active.emitOpen();
+      active.emitMessage(welcome);
+
+      await waitFor(() => pingCount >= 3);
+      expect(active.readyState).toBe(1);
+      expect(instances.length).toBe(1);
+
+      active.onSend = undefined;
+      await waitFor(() => instances.length === 2);
+      expect(active.readyState).toBe(3);
+    } finally {
+      handle.close();
+    }
   });
 });

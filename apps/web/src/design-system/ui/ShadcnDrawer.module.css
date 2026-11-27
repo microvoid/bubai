@@ -1,0 +1,240 @@
+@reference "../styles/globals.css";
+
+.backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: var(--layer-dialog-backdrop, 1000);
+  background: rgba(0, 0, 0, 0.24);
+  backdrop-filter: blur(4px);
+  -webkit-backdrop-filter: blur(4px);
+  opacity: calc(1 - var(--drawer-swipe-progress, 0));
+  transition: opacity 450ms cubic-bezier(0.32, 0.72, 0, 1);
+}
+
+:global(html[data-color-mode="dark"]) .backdrop {
+  background: rgba(0, 0, 0, 0.56);
+}
+
+.backdrop[data-starting-style],
+.backdrop[data-ending-style] {
+  opacity: 0;
+}
+
+.backdrop[data-swiping] {
+  transition-duration: 0ms;
+}
+
+.viewport {
+  position: fixed;
+  inset: 0;
+  z-index: var(--layer-dialog, 1001);
+  display: flex;
+  align-items: flex-end;
+  justify-content: center;
+  padding-inline: 1rem;
+  pointer-events: none;
+  overflow: hidden;
+}
+
+.popup {
+  --bleed: 3rem;
+  pointer-events: auto;
+  position: relative;
+  box-sizing: border-box;
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+  max-width: 42rem;
+  height: calc(100dvh - 2rem + var(--bleed));
+  margin-bottom: calc(-1 * var(--bleed));
+  padding-bottom: calc(var(--bleed) + var(--drawer-snap-point-offset, 0px));
+  border-radius: 1rem 1rem 0 0;
+  border: 1px solid var(--border-standard);
+  border-bottom: 0;
+  background: var(--surface-popover);
+  color: var(--text-standard);
+  box-shadow:
+    0 -12px 40px -8px rgba(0, 0, 0, 0.16),
+    0 0 0 1px rgba(0, 0, 0, 0.04);
+  outline: none;
+  overflow: hidden;
+  touch-action: none;
+  transform: translateY(
+    calc(var(--drawer-snap-point-offset, 0px) + var(--drawer-swipe-movement-y, 0px))
+  );
+  transition:
+    transform 450ms cubic-bezier(0.32, 0.72, 0, 1),
+    padding-bottom 450ms cubic-bezier(0.32, 0.72, 0, 1),
+    border-radius 300ms cubic-bezier(0.32, 0.72, 0, 1),
+    box-shadow 300ms ease-out;
+  will-change: transform;
+}
+
+:global(html[data-color-mode="dark"]) .popup {
+  box-shadow:
+    0 -16px 48px -8px rgba(0, 0, 0, 0.58),
+    0 0 0 1px rgba(255, 255, 255, 0.08);
+}
+
+.popup[data-swiping] {
+  user-select: none;
+  transition: none;
+}
+
+.popup[data-starting-style],
+.popup[data-ending-style] {
+  transform: translateY(calc(100% - var(--bleed) + 16px));
+}
+
+.popup[data-ending-style] {
+  transition-duration: calc(var(--drawer-swipe-strength, 1) * 320ms);
+}
+
+/* At the full snap point (snapPoint === 1), Base UI sets data-expanded */
+.popup[data-expanded] {
+  border-top-left-radius: 0.75rem;
+  border-top-right-radius: 0.75rem;
+}
+
+.handleRow {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  padding: 0.625rem 0 0.25rem;
+  cursor: grab;
+  touch-action: none;
+}
+
+.handleRow:active {
+  cursor: grabbing;
+}
+
+.handleBar {
+  display: block;
+  width: 3rem;
+  height: 0.3125rem;
+  border-radius: 9999px;
+  background: var(--border-strong, var(--border-standard));
+  opacity: 0.75;
+  transition:
+    opacity 150ms ease-out,
+    width 180ms ease-out;
+}
+
+.handleRow:hover .handleBar {
+  opacity: 1;
+  width: 3.5rem;
+}
+
+.innerContent {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+  width: 100%;
+  overflow: hidden;
+}
+
+.header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  flex-shrink: 0;
+  padding: 0.375rem 1.25rem 0.75rem;
+  border-bottom: 1px solid var(--border-standard);
+  cursor: grab;
+  touch-action: none;
+}
+
+.header:active {
+  cursor: grabbing;
+}
+
+.headerMeta {
+  display: flex;
+  align-items: baseline;
+  gap: 0.5rem;
+  min-width: 0;
+}
+
+.headerActions {
+  display: flex;
+  align-items: center;
+  gap: 0.25rem;
+  flex-shrink: 0;
+}
+
+.title {
+  margin: 0;
+  font-size: 0.9375rem;
+  font-weight: 600;
+  line-height: 1.35;
+  letter-spacing: -0.01em;
+  color: var(--text-primary, var(--text-standard));
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.description {
+  margin: 0;
+  font-size: 0.8125rem;
+  line-height: 1.35;
+  color: var(--text-subtle);
+  white-space: nowrap;
+}
+
+.closeButton {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  width: 2rem;
+  height: 2rem;
+  border: 0;
+  border-radius: 0.5rem;
+  background: transparent;
+  color: var(--text-subtle);
+  cursor: pointer;
+  transition:
+    background-color 150ms ease-out,
+    color 150ms ease-out;
+}
+
+.closeButton:hover {
+  background: var(--surface-hover, var(--neutral-2));
+  color: var(--text-primary, var(--text-standard));
+}
+
+.closeButton:focus-visible {
+  outline: 2px solid var(--accent-standard, var(--border-focus));
+  outline-offset: 1px;
+}
+
+.footer {
+  display: flex;
+  flex-direction: column-reverse;
+  gap: 0.5rem;
+}
+
+/* Thread drawer variant: preserves the exact current thread sheet width */
+.threadPopup {
+  --surface-message: var(--surface-message-raised);
+  --surface-message-hover: var(--surface-message-raised-hover);
+  width: min(calc(100% - 2rem), calc(var(--buzz-message-width, 52rem) + 1rem));
+  max-width: none;
+}
+
+.threadComposerFooter {
+  flex-shrink: 0;
+  padding: var(--space-3) var(--space-4) var(--space-4);
+  border-top: 1px solid var(--border-subtle, var(--border-standard));
+  background: var(--surface-popover);
+}
+
+.threadComposerFooter [data-composer-dock] {
+  width: 100%;
+  margin: 0;
+}

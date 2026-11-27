@@ -24,6 +24,22 @@ export interface InstanceAuthInfo {
   emailAndPasswordEnabled: boolean;
 }
 
+export function resolveDisplayName(
+  name?: string | null,
+  email?: string | null,
+  fallback = 'User',
+): string {
+  const trimmedName = name?.trim();
+  if (trimmedName) return trimmedName;
+  const trimmedEmail = email?.trim();
+  if (trimmedEmail) {
+    const localPart = trimmedEmail.split('@')[0]?.trim();
+    if (localPart) return localPart;
+    return trimmedEmail;
+  }
+  return fallback;
+}
+
 export function notifyUnauthorized(): void {
   window.dispatchEvent(new CustomEvent('bubai:unauthorized'));
 }

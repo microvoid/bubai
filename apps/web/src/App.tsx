@@ -521,11 +521,6 @@ export default function App() {
   const [runningMessageChannelMap, setRunningMessageChannelMap] = useState<Record<string, string>>({});
   const [deleteMessageTarget, setDeleteMessageTarget] = useState<Message | null>(null);
   const [deleteMessagePending, setDeleteMessagePending] = useState(false);
-  const [editHumanTarget, setEditHumanTarget] = useState<Participant | null>(null);
-  const [editHumanName, setEditHumanName] = useState('');
-  const [editHumanAvatar, setEditHumanAvatar] = useState('');
-  const [editHumanPending, setEditHumanPending] = useState(false);
-  const [editHumanError, setEditHumanError] = useState<string | null>(null);
   const [desktopNotifications, setDesktopNotifications] = useState<boolean>(() => {
     try {
       return localStorage.getItem(DESKTOP_NOTIFICATIONS_KEY) === 'true';
@@ -644,8 +639,6 @@ export default function App() {
   const [newChannelName, setNewChannelName] = useState('');
   const [createChannelError, setCreateChannelError] = useState<string | null>(null);
   const [creatingChannelPending, setCreatingChannelPending] = useState(false);
-  const [addingHuman, setAddingHuman] = useState(false);
-  const [newHumanName, setNewHumanName] = useState('');
 
   // Botmux Web Terminal & History
   const [terminalSessionId, setTerminalSessionId] = useState<string | null>(null);
@@ -1699,39 +1692,6 @@ export default function App() {
     }
   };
 
-  const openEditHuman = (human: Participant) => {
-    setEditHumanTarget(human);
-    setEditHumanName(human.name);
-    setEditHumanAvatar(human.avatarUrl || '');
-    setEditHumanError(null);
-  };
-
-  const handleSaveHumanProfile = async () => {
-    if (!editHumanTarget || editHumanPending) return;
-    const name = editHumanName.trim();
-    if (!name) {
-      setEditHumanError('Name is required');
-      return;
-    }
-    setEditHumanPending(true);
-    setEditHumanError(null);
-    try {
-      const res = await apiFetch(`${SERVER_HTTP}/api/humans/${encodeURIComponent(editHumanTarget.id)}`, {
-        method: 'PATCH',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ name, avatarUrl: editHumanAvatar.trim() || null }),
-      });
-      if (!res.ok) {
-        const err = (await res.json().catch(() => null)) as { error?: string } | null;
-        setEditHumanError(err?.error || 'Could not update profile');
-        return;
-      }
-      setEditHumanTarget(null);
-    } finally {
-      setEditHumanPending(false);
-    }
-  };
-
   const requestDeleteMessage = (messageId: string) => {
     const target =
       messages.find((m) => m.id === messageId) ||
@@ -2376,22 +2336,6 @@ export default function App() {
     }
   };
 
-  const handleAddHuman = async () => {
-    const name = newHumanName.trim();
-    if (!name) return;
-    const res = await apiFetch(`${SERVER_HTTP}/api/humans`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ name }),
-    });
-    if (res.ok) {
-      const data = (await res.json()) as { human: Participant };
-      setCurrentUserId(data.human.id);
-      setNewHumanName('');
-      setAddingHuman(false);
-    }
-  };
-
   const unreadThreadsInChannel = useMemo(
     () => messages.filter((m) => (m.unreadReplyCount ?? 0) > 0),
     [messages],
@@ -2941,87 +2885,6 @@ export default function App() {
                     </div>
                   )}
                 </NavigationSection>
-
-                {!auth.authRequired && (
-                <NavigationSection
-                  label="Members (切换身份)"
-                  action={
-                    <IconButton
-                      hint="familiar"
-                      size="sm"
-                      aria-label="Add member"
-                      icon={<PlusIcon size={16} />}
-                      onClick={() => setAddingHuman((v) => !v)}
-                    />
-                  }
-                >
-                  {addingHuman && (
-                    <form
-                      onSubmit={(e) => {
-                        e.preventDefault();
-                        void handleAddHuman();
-                      }}
-                      style={{ padding: '4px 6px' }}
-                    >
-                      <Input
-                        value={newHumanName}
-                        onChange={(e) => setNewHumanName(e.target.value)}
-                        placeholder="成员昵称"
-                        autoFocus
-                      />
-                    </form>
-                  )}
-                  {humans.map((h) => (
-                    <div key={h.id} className={sidebarRowStyles.row}>
-                      <NavigationItem
-                        label={h.name}
-                        selected={h.id === currentUserId}
-                        icon={
-                          <Avatar
-                            src={h.avatarUrl}
-                            alt={h.name}
-                            fallback={h.name}
-                            size="tiny"
-                            statusBadge={h.status === 'online' ? 'online' : 'offline'}
-                          />
-                        }
-                        onClick={() => setCurrentUserId(h.id)}
-                      />
-                      <div
-                        className={sidebarRowStyles.menuTrigger}
-                        style={{ display: 'flex', alignItems: 'center', gap: 2 }}
-                      >
-                        <IconButton
-                          hint="familiar"
-                          size="xs"
-                          variant="ghost"
-                          aria-label={`Edit profile for ${h.name}`}
-                          title={`Edit ${h.name}`}
-                          icon={<PencilSimpleIcon size={13} aria-hidden="true" />}
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            openEditHuman(h);
-                          }}
-                        />
-                        {h.id !== currentUserId && (
-                          <IconButton
-                            hint="familiar"
-                            size="xs"
-                            variant="ghost"
-                            aria-label={`Message ${h.name}`}
-                            title={`Direct message ${h.name}`}
-                            icon={<ChatCircleIcon size={14} aria-hidden="true" />}
-                            onClick={(e) => {
-                              e.stopPropagation();
-                              void handleOpenDm(h);
-                            }}
-                          />
-                        )}
-                      </div>
-                    </div>
-                  ))}
-                </NavigationSection>
-                )}
               </SidebarFrame>
             </ResizableSidebar>
 
@@ -3825,104 +3688,6 @@ export default function App() {
           >
             {deleteMessageTarget.content.trim().slice(0, 160) || '[Attachment]'}
           </div>
-        </AlertDialog>
-      )}
-
-      {/* Edit Human Member Profile Dialog */}
-      {editHumanTarget && (
-        <AlertDialog
-          title={`Edit profile · ${editHumanTarget.name}`}
-          description="修改成员显示名称与头像。"
-          pending={editHumanPending}
-          onClose={() => {
-            setEditHumanTarget(null);
-            setEditHumanError(null);
-          }}
-          actions={
-            <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end' }}>
-              <Button
-                variant="quiet"
-                size="sm"
-                disabled={editHumanPending}
-                onClick={() => {
-                  setEditHumanTarget(null);
-                  setEditHumanError(null);
-                }}
-              >
-                Cancel
-              </Button>
-              <Button
-                variant="primary"
-                size="sm"
-                loading={editHumanPending}
-                disabled={!editHumanName.trim()}
-                onClick={() => void handleSaveHumanProfile()}
-              >
-                Save profile
-              </Button>
-            </div>
-          }
-        >
-          <form
-            onSubmit={(e) => {
-              e.preventDefault();
-              void handleSaveHumanProfile();
-            }}
-            style={{ display: 'flex', flexDirection: 'column', gap: 12 }}
-          >
-            <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
-              <Avatar
-                src={editHumanAvatar.trim() || undefined}
-                alt={editHumanName || editHumanTarget.name}
-                fallback={editHumanName || editHumanTarget.name}
-                size="large"
-              />
-              <label style={{ cursor: 'pointer' }}>
-                <input
-                  type="file"
-                  accept="image/*"
-                  style={{ display: 'none' }}
-                  onChange={(e) => {
-                    const file = e.target.files?.[0];
-                    if (!file) return;
-                    void handleUploadFile(file).then((uploaded) => {
-                      if (uploaded?.url) {
-                        const fullUrl = uploaded.url.startsWith('http')
-                          ? uploaded.url
-                          : `${SERVER_HTTP}${uploaded.url}`;
-                        setEditHumanAvatar(fullUrl);
-                      }
-                    });
-                  }}
-                />
-                <span className="text-caption" style={{ textDecoration: 'underline' }}>
-                  Upload avatar image
-                </span>
-              </label>
-            </div>
-            <label style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
-              <span className="text-caption text-subtle">Display name</span>
-              <Input
-                value={editHumanName}
-                onChange={(e) => setEditHumanName(e.target.value)}
-                placeholder="Member name"
-                autoFocus
-              />
-            </label>
-            <label style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
-              <span className="text-caption text-subtle">Avatar URL (optional)</span>
-              <Input
-                value={editHumanAvatar}
-                onChange={(e) => setEditHumanAvatar(e.target.value)}
-                placeholder="https://… or leave empty"
-              />
-            </label>
-            {editHumanError && (
-              <div className="text-caption" style={{ color: 'var(--text-danger, #e5484d)' }} role="alert">
-                {editHumanError}
-              </div>
-            )}
-          </form>
         </AlertDialog>
       )}
 

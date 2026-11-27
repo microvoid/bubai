@@ -24,7 +24,8 @@ import {
   MenuTrigger,
 } from '../../design-system/ui/Menu';
 import type { ColorModePreference } from '../../shared/theme/service';
-import type { AuthOrgSummary, AuthUserSummary } from './AuthGate';
+import type { AuthOrgSummary, AuthUserSummary } from './AuthContext';
+import { resolveDisplayName } from './auth-client';
 import styles from './ProfileButton.module.css';
 
 const COLOR_MODES: Array<{ value: ColorModePreference; label: string; Icon: typeof SunIcon }> = [
@@ -67,7 +68,7 @@ export function ProfileButton({
   onSignOut,
 }: ProfileButtonProps) {
   const displayName = user
-    ? user.name.trim() || user.email.split('@')[0] || user.email
+    ? resolveDisplayName(user.name, user.email, fallbackName)
     : fallbackName;
   const displayEmail = user?.email || '';
   const avatarUrl = user?.image || fallbackAvatarUrl;

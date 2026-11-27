@@ -5,8 +5,8 @@ import { Button } from '../../design-system/ui/Button';
 import { Dialog } from '../../design-system/ui/Dialog';
 import { Input } from '../../design-system/ui/Input';
 import { writeClipboardText } from '../../shared/clipboard';
-import type { AuthOrgSummary, AuthUserSummary } from './AuthGate';
-import { AUTH_SERVER_HTTP, apiFetch, authClient } from './auth-client';
+import type { AuthOrgSummary, AuthUserSummary } from './AuthContext';
+import { AUTH_SERVER_HTTP, apiFetch, authClient, resolveDisplayName } from './auth-client';
 import styles from './IdentitySetup.module.css';
 
 export function ProfileSettingsDialog({
@@ -29,7 +29,7 @@ export function ProfileSettingsDialog({
 
   useEffect(() => {
     if (open && user) {
-      setName(user.name.trim() || user.email.split('@')[0] || '');
+      setName(resolveDisplayName(user.name, user.email, ''));
       setImage(user.image || '');
       setError(null);
     }

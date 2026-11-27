@@ -91,6 +91,7 @@ import {
   NotificationIcon,
   PencilSimpleIcon,
   PlusIcon,
+  SidebarIcon,
   SignOutIcon,
   SparklesIcon,
   TerminalWindowIcon,
@@ -632,6 +633,7 @@ export default function App() {
   const [mediaViewer, setMediaViewer] = useState<MediaViewerSelection | null>(null);
 
   // Activity / Unreads Panel
+  const [mobileNavOpen, setMobileNavOpen] = useState(false);
   const [showActivityPanel, setShowActivityPanel] = useState(false);
   const [activityItems, setActivityItems] = useState<ActivityItem[]>([]);
   const [activityLoading, setActivityLoading] = useState(false);
@@ -2008,6 +2010,7 @@ export default function App() {
   };
 
   const openChannel = (channelId: string, options?: { syncUrl?: boolean }) => {
+    setMobileNavOpen(false);
     setJumpTarget(null);
     setMessageFocus(null);
     setNavigationError(null);
@@ -2022,6 +2025,7 @@ export default function App() {
   };
 
   const openMessage = (message: Message) => {
+    setMobileNavOpen(false);
     olderRequest.current?.abort();
     setNavigationError(null);
     setShowPinsPanel(false);
@@ -2035,6 +2039,7 @@ export default function App() {
   };
 
   const openAgentProfile = (agentId: string) => {
+    setMobileNavOpen(false);
     setTerminalSessionId(null);
     setTerminalReturnAgentId(null);
     setShowPinsPanel(false);
@@ -2407,6 +2412,23 @@ export default function App() {
   return (
     <div className={workspaceStyles.shell}>
       <header className={workspaceStyles.titleBar}>
+        <div className={workspaceStyles.mobileNavToggle}>
+          <IconButton
+            aria-label="Workspace navigation"
+            aria-expanded={mobileNavOpen}
+            aria-controls="workspace-navigation"
+            icon={mobileNavOpen ? <XIcon size={20} /> : <SidebarIcon size={20} />}
+            onClick={() => {
+              if (!mobileNavOpen) {
+                setShowActivityPanel(false);
+                setShowPinsPanel(false);
+                setSelectedAgentProfileId(null);
+                setTerminalSessionId(null);
+              }
+              setMobileNavOpen(!mobileNavOpen);
+            }}
+          />
+        </div>
         <BuzzPageSearch
           serverHttp={SERVER_HTTP}
           activeChannelId={activeChannelId}
@@ -2436,6 +2458,7 @@ export default function App() {
               ) : undefined
             }
             onClick={() => {
+              setMobileNavOpen(false);
               if (showActivityPanel) {
                 setShowActivityPanel(false);
               } else {
@@ -2450,8 +2473,8 @@ export default function App() {
       </header>
       <div className={workspaceStyles.workspace}>
         <Panel as="div" joined>
-          <div className={workspaceStyles.columns}>
-            <ResizableSidebar scope="buzz-botmux-workspace">
+          <div className={workspaceStyles.columns} data-mobile-nav-open={mobileNavOpen}>
+            <ResizableSidebar id="workspace-navigation" scope="buzz-botmux-workspace">
               <SidebarFrame
                 label="Workspace navigation"
                 footer={

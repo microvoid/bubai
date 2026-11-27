@@ -105,7 +105,32 @@
   }
 }
 
+.mobileNavToggle {
+  display: none;
+}
+
 @media (max-width: 650px) {
+  .titleBar {
+    grid-template-columns: auto minmax(0, 1fr) auto;
+    padding-inline: var(--space-2);
+  }
+
+  .mobileNavToggle {
+    display: flex;
+  }
+
+  .mobileNavToggle button {
+    min-width: 44px;
+    min-height: 44px;
+  }
+
+  .columns[data-mobile-nav-open="true"] > .conversationLayout {
+    display: none;
+  }
+
+  .details {
+    width: 100%;
+  }
   .columns {
     container: workspace-conversation / inline-size;
   }

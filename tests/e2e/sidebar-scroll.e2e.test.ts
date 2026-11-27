@@ -37,8 +37,11 @@ function startFixtureApi() {
     ['/api/instance', { name: 'Bubai', authRequired: false }],
     ['/api/auth/get-session', { user, session: { activeOrganizationId: organization.id } }],
     ['/api/auth/organization/list', [organization]],
+    ['/api/channels/general/messages', { messages: [], hasMore: false }],
+    ['/api/channels/general/members', { members: [] }],
+    ['/api/activity', { items: [] }],
     ['/api/bootstrap', {
-      channels: [],
+      channels: [{ id: "general", name: "general", kind: "channel", topic: "", unreadCount: 0, createdAt: 1 }],
       participants: [...agents, { id: 'archived-agent', name: 'Old Sidebar Agent', role: 'agent', archived: true }],
       sessions: [],
       asks: [],
@@ -213,6 +216,25 @@ test('workspace sidebar scrolls above the account footer and keeps archived agen
     width: 1024, height: 450, deviceScaleFactor: 1, mobile: false,
   });
   await page.send('Page.navigate', { url: address });
+
+  const toggle = 'button[aria-controls="workspace-navigation"]';
+  for (const width of [320, 390]) {
+    await page.send('Emulation.setDeviceMetricsOverride', {
+      width, height: 844, deviceScaleFactor: 1, mobile: true,
+    });
+    await waitFor(() => page.evaluate<boolean>(`document.querySelector('main')?.clientWidth >= ${width} - 24`), 'full-width conversation');
+    assert.equal(await page.evaluate<number>("document.getElementById('workspace-navigation').clientWidth"), 0);
+    await page.evaluate(`document.querySelector('${toggle}').click()`);
+    await waitFor(() => page.evaluate<boolean>(`document.getElementById('workspace-navigation').clientWidth >= ${width} - 24`), 'full-width channel list');
+    await page.evaluate(`document.querySelector('[data-channel-id="general"] button').click()`);
+    await waitFor(() => page.evaluate<boolean>(`document.querySelector('${toggle}').getAttribute('aria-expanded') === 'false'`), 'channel selection to return to chat');
+    await page.evaluate(`document.querySelector('[data-activity-nav]').click()`);
+    await waitFor(() => page.evaluate<boolean>(`document.querySelector('[data-pane="activity"]')?.clientWidth >= ${width} - 24`), 'full-width Activity');
+    await page.evaluate(`document.querySelector('[data-activity-nav]').click()`);
+  }
+  await page.send('Emulation.setDeviceMetricsOverride', {
+    width: 1024, height: 450, deviceScaleFactor: 1, mobile: false,
+  });
 
   const read = () => page.evaluate<SidebarGeometry | null>(geometry);
   const initial = await waitFor(read, 'sidebar fixture rows');

@@ -4,7 +4,7 @@ import {
   filterMentionCandidates,
   findMentionedNonMemberAgents,
   type MentionSourceParticipant,
-} from '../../apps/web/src/features/conversation/mention-candidates';
+} from '../../packages/chat-client/src/mention-candidates';
 
 const PARTICIPANTS: MentionSourceParticipant[] = [
   { id: 'u-owner', name: '许星', role: 'human', status: 'online' },

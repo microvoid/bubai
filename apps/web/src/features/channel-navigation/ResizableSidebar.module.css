@@ -18,7 +18,14 @@
 }
 @media (max-width: 650px) {
   .sidebar {
-    max-width: 50%;
+    flex: 1;
+    max-width: 100%;
+    min-width: 0;
+    border-inline-end: 0;
+  }
+
+  [data-mobile-nav-open="false"] > .sidebar {
+    display: none;
   }
 
   .handle[aria-orientation="vertical"] {

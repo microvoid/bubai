@@ -9,7 +9,7 @@ import styles from './Completions.module.css';
 import {
   filterMentionCandidates,
   type MentionCandidate,
-} from './mention-candidates';
+} from '@buzz-botmux/chat-client';
 
 export {
   buildMentionCandidates,
@@ -20,7 +20,7 @@ export {
   type MentionActivityMessage,
   type MentionCandidate,
   type MentionSourceParticipant,
-} from './mention-candidates';
+} from '@buzz-botmux/chat-client';
 
 export function extractMentionQuery(draft: string): { query: string; startIndex: number } | null {
   const match = draft.match(/(?:^|\s)@([^\s@]*)$/);

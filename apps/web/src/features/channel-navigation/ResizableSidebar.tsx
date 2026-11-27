@@ -62,9 +62,11 @@ function saveSidebarWidth(scope: string, width: number) {
  * contents; width, bounds, persistence and the handle live only here.
  */
 export function ResizableSidebar({
+  id,
   scope,
   children,
 }: {
+  id?: string;
   scope: string;
   children: ReactNode;
 }) {
@@ -97,7 +99,7 @@ export function ResizableSidebar({
   };
   return (
     <>
-      <div className={styles.sidebar} style={{ width }}>
+      <div id={id} className={styles.sidebar} style={{ width }}>
         {children}
       </div>
       <ResizeHandle

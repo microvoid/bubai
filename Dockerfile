@@ -7,6 +7,8 @@ RUN npm install --global pnpm@11.13.0
 
 # Copy workspace manifests first for layer caching
 COPY package.json pnpm-workspace.yaml pnpm-lock.yaml tsconfig.json turbo.json ./
+COPY packages/auth/package.json ./packages/auth/
+COPY packages/better-auth-bot/package.json ./packages/better-auth-bot/
 COPY packages/db/package.json ./packages/db/
 COPY packages/botmux-client/package.json ./packages/botmux-client/
 COPY packages/chat-client/package.json ./packages/chat-client/
@@ -21,6 +23,8 @@ COPY packages ./packages
 COPY apps/server ./apps/server
 COPY apps/web ./apps/web
 COPY scripts ./scripts
+
+RUN pnpm --filter @bubai/auth... run build
 
 # Build web frontend (defaults to window.location.origin in production)
 ARG VITE_SERVER_URL=""

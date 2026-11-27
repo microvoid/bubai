@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useId, useMemo, useRef, useState } from 'react';
 import { ActivityPanel, type ActivityItem } from './features/activity/ActivityPanel';
 import { AgentProfilePanel } from './features/agent-profile/AgentProfilePanel';
 import { TerminalPane } from './features/terminal/TerminalPane';
@@ -80,6 +80,8 @@ import {
   ArchiveOffIcon,
   BellIcon,
   BellSlashIcon,
+  CaretDownIcon,
+  CaretRightIcon,
   ChatCircleIcon,
   ClockIcon,
   DotsThreeIcon,
@@ -640,6 +642,7 @@ export default function App() {
   // Agent Profile Panel
   const [selectedAgentProfileId, setSelectedAgentProfileId] = useState<string | null>(null);
   const [showArchivedAgents, setShowArchivedAgents] = useState(false);
+  const archivedAgentsListId = useId();
   const [terminalReturnAgentId, setTerminalReturnAgentId] = useState<string | null>(null);
   const [terminalExpanded, setTerminalExpanded] = useState(false);
 
@@ -2905,22 +2908,33 @@ export default function App() {
                     );
                   })}
                   {archivedAgents.length > 0 && (
-                    <div style={{ padding: '4px 6px' }}>
-                      <Button
-                        variant="quiet"
-                        size="xs"
+                    <>
+                      <NavigationItem
+                        label="已归档"
+                        icon={
+                          showArchivedAgents ? (
+                            <CaretDownIcon size={16} aria-hidden="true" />
+                          ) : (
+                            <CaretRightIcon size={16} aria-hidden="true" />
+                          )
+                        }
+                        trailing={
+                          <CountBadge
+                            count={archivedAgents.length}
+                            label={`${archivedAgents.length} 个`}
+                          />
+                        }
+                        aria-expanded={showArchivedAgents}
+                        aria-controls={archivedAgentsListId}
                         onClick={() => setShowArchivedAgents((v) => !v)}
-                      >
-                        {showArchivedAgents
-                          ? `隐藏已归档 (${archivedAgents.length})`
-                          : `已归档 (${archivedAgents.length})`}
-                      </Button>
-                      {showArchivedAgents &&
-                        archivedAgents.map((agent) => (
+                      />
+                      <div id={archivedAgentsListId} hidden={!showArchivedAgents}>
+                        {showArchivedAgents && archivedAgents.map((agent) => (
                           <NavigationItem
                             key={agent.id}
                             label={agent.name}
                             selected={selectedAgentProfileId === agent.id}
+                            inset
                             icon={
                               <Avatar
                                 src={agent.avatarUrl}
@@ -2935,7 +2949,8 @@ export default function App() {
                             onClick={() => openAgentProfile(agent.id)}
                           />
                         ))}
-                    </div>
+                      </div>
+                    </>
                   )}
                 </NavigationSection>
               </SidebarFrame>

@@ -3,7 +3,7 @@ import type { ReactNode } from "react";
 import { Panel } from "../../design-system/ui/Panel";
 import styles from "./SidebarFrame.module.css";
 
-/** Shared sidebar surface; callers own its contents, data and scroll behavior. */
+/** Shared sidebar surface with a scrollable list between the header and footer. */
 export function SidebarFrame({
   label,
   busy,
@@ -15,7 +15,7 @@ export function SidebarFrame({
 }: {
   label: string;
   header?: ReactNode;
-  /** Floats over the list's end and follows it in tab order. */
+  /** Sits below the scrollport and follows it in tab order. */
   footer?: ReactNode;
   panelId?: string | undefined;
   busy?: boolean | undefined;
@@ -39,7 +39,11 @@ export function SidebarFrame({
               ? { role: "tabpanel", "aria-labelledby": `${panelId}-tab` }
               : {})}
           >
-            {children}
+            <div className={styles.channelListFrame}>
+              <div className={styles.channelList} data-sidebar-scrollport="">
+                <div className={styles.channelListContent}>{children}</div>
+              </div>
+            </div>
           </div>
         </SidebarNavigation>
         {footer}

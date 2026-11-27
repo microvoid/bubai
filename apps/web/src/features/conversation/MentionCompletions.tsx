@@ -2,32 +2,24 @@
  * @ mention completion popover aligned with references/buzz-app/src/features/conversation/ComposerCompletions.tsx
  * and Completions.module.css (.popup, .list, .option, .preview, .label, .nameRow, .name, .agentMark).
  */
-import { useEffect, useId, useRef } from 'react';
+import { Fragment, useEffect, useId, useRef } from 'react';
 import { Avatar } from '../../design-system/ui/Avatar';
 import { RobotIcon } from '../../design-system/icons/index';
 import styles from './Completions.module.css';
+import {
+  filterMentionCandidates,
+  type MentionCandidate,
+} from './mention-candidates';
 
-export interface MentionCandidate {
-  id: string;
-  name: string;
-  role: 'human' | 'agent';
-  avatarUrl?: string;
-  cliId?: string;
-  status: 'online' | 'offline';
-}
-
-export function filterMentionCandidates(
-  candidates: readonly MentionCandidate[],
-  query: string,
-): MentionCandidate[] {
-  const q = query.trim().toLowerCase();
-  if (!q) return [...candidates];
-  return candidates.filter(
-    (c) =>
-      c.name.toLowerCase().includes(q) ||
-      (c.cliId && c.cliId.toLowerCase().includes(q)),
-  );
-}
+export {
+  buildMentionCandidates,
+  filterMentionCandidates,
+  type BuildMentionCandidatesInput,
+  type ChannelMembersState,
+  type MentionActivityMessage,
+  type MentionCandidate,
+  type MentionSourceParticipant,
+} from './mention-candidates';
 
 export function extractMentionQuery(draft: string): { query: string; startIndex: number } | null {
   const match = draft.match(/(?:^|\s)@([^\s@]*)$/);
@@ -63,6 +55,8 @@ export function MentionCompletions({
 
   if (filtered.length === 0) return null;
 
+  const showGroups = filtered.some((item) => item.inChannel === false);
+
   return (
     <section
       className={styles.popup}
@@ -85,48 +79,62 @@ export function MentionCompletions({
       >
         {filtered.map((item, idx) => {
           const selected = idx === clampedIndex;
+          const isOutside = item.inChannel === false;
+          const prevOutside = idx > 0 ? filtered[idx - 1].inChannel === false : null;
+          const showGroupHeader = showGroups && (idx === 0 || isOutside !== prevOutside);
           return (
-            <div
-              key={item.id}
-              id={`${listId}-${idx}`}
-              role="option"
-              tabIndex={-1}
-              aria-selected={selected}
-              data-completion-id={item.id}
-              className={styles.option}
-              onPointerDown={(e) => {
-                if (e.button === 0) e.preventDefault();
-              }}
-              onPointerMove={() => {
-                if (idx !== clampedIndex) onActiveIndexChange?.(idx);
-              }}
-              onClick={() => onSelect(item)}
-            >
-              <span aria-hidden="true" className={styles.preview}>
-                <Avatar
-                  src={item.avatarUrl}
-                  alt=""
-                  fallback={item.name}
-                  size="small"
-                  shape={item.role === 'agent' ? 'squircle' : 'circle'}
-                  statusBadge={item.status === 'online' ? 'online' : 'offline'}
-                />
-              </span>
-              <span className={styles.label} data-completion-label="">
-                <span className={styles.nameRow}>
-                  <span className={styles.name}>{item.name}</span>
-                  {item.role === 'agent' && (
-                    <>
-                      <span aria-hidden="true" className={styles.agentMark}>
-                        <RobotIcon />
-                      </span>
-                      <span className="sr-only"> Agent</span>
-                    </>
-                  )}
+            <Fragment key={item.id}>
+              {showGroupHeader && (
+                <div
+                  className={styles.group}
+                  role="presentation"
+                  data-mention-group={isOutside ? 'outside' : 'in-channel'}
+                >
+                  {isOutside ? '不在本频道' : '本频道'}
+                </div>
+              )}
+              <div
+                id={`${listId}-${idx}`}
+                role="option"
+                tabIndex={-1}
+                aria-selected={selected}
+                data-completion-id={item.id}
+                data-outside-channel={isOutside ? '' : undefined}
+                className={styles.option}
+                onPointerDown={(e) => {
+                  if (e.button === 0) e.preventDefault();
+                }}
+                onPointerMove={() => {
+                  if (idx !== clampedIndex) onActiveIndexChange?.(idx);
+                }}
+                onClick={() => onSelect(item)}
+              >
+                <span aria-hidden="true" className={styles.preview}>
+                  <Avatar
+                    src={item.avatarUrl}
+                    alt=""
+                    fallback={item.name}
+                    size="small"
+                    shape={item.role === 'agent' ? 'squircle' : 'circle'}
+                    statusBadge={item.status === 'online' ? 'online' : 'offline'}
+                  />
                 </span>
-                {item.cliId && <small>{item.cliId}</small>}
-              </span>
-            </div>
+                <span className={styles.label} data-completion-label="">
+                  <span className={styles.nameRow}>
+                    <span className={styles.name}>{item.name}</span>
+                    {item.role === 'agent' && (
+                      <>
+                        <span aria-hidden="true" className={styles.agentMark}>
+                          <RobotIcon />
+                        </span>
+                        <span className="sr-only"> Agent</span>
+                      </>
+                    )}
+                  </span>
+                  {item.cliId && <small>{item.cliId}</small>}
+                </span>
+              </div>
+            </Fragment>
           );
         })}
       </div>

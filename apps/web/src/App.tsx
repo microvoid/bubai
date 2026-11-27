@@ -1,4 +1,5 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { ActivityPanel, type ActivityItem } from './features/activity/ActivityPanel';
 import { AgentProfilePanel } from './features/agent-profile/AgentProfilePanel';
 import { TerminalPane } from './features/terminal/TerminalPane';
 import { AppearanceControls } from './features/appearance/AppearanceControls';
@@ -43,6 +44,10 @@ import {
   type ProseMirrorComposerHandle,
   type UploadedAttachment,
 } from './features/messages/ProseMirrorComposer';
+import {
+  buildMentionCandidates,
+  type ChannelMembersState,
+} from './features/conversation/MentionCompletions';
 import type { ChatMessage as Message, MessageFocus, Participant } from './features/messages/types';
 import { BuzzPageSearch } from './features/search/BuzzPageSearch';
 import { NotificationSettingsDialog } from './features/settings/NotificationSettingsDialog';
@@ -56,6 +61,7 @@ import { Panel } from './design-system/ui/Panel';
 import { PanelHeader } from './design-system/ui/PanelHeader';
 import { Avatar } from './design-system/ui/Avatar';
 import { Badge } from './design-system/ui/Badge';
+import { CountBadge } from './design-system/ui/CountBadge';
 import { Button } from './design-system/ui/Button';
 import { IconButton } from './design-system/ui/IconButton';
 import { EmptyState } from './design-system/ui/EmptyState';
@@ -92,7 +98,10 @@ interface Channel {
   archived?: boolean;
   createdByUserId?: string;
   dmKey?: string;
+  memberIds?: string[];
   unreadCount: number;
+  threadUnreadCount?: number;
+  mentionCount?: number;
   lastReadAt?: number;
   muted?: boolean;
   markedUnread?: boolean;
@@ -156,8 +165,10 @@ async function fetchMessagePage(
   signal: AbortSignal,
   cursor?: Pick<HistoryPage, 'nextCursor' | 'nextCursorId'>,
   limit = 50,
+  userId?: string,
 ): Promise<HistoryPage> {
   const query = new URLSearchParams({ limit: String(limit) });
+  if (userId) query.set('userId', userId);
   if (cursor?.nextCursor != null) {
     query.set('before', String(cursor.nextCursor));
     if (cursor.nextCursorId) query.set('beforeId', cursor.nextCursorId);
@@ -174,6 +185,8 @@ function ConversationSurface({
   activeChannel,
   messages,
   participants,
+  channelMembers,
+  channelMembersState,
   currentUserId,
   hasMore,
   loadingMore,
@@ -209,6 +222,8 @@ function ConversationSurface({
   activeChannel: Channel | undefined;
   messages: readonly Message[];
   participants: readonly Participant[];
+  channelMembers: readonly ChannelMember[];
+  channelMembersState: ChannelMembersState;
   currentUserId: string;
   hasMore: boolean;
   loadingMore: boolean;
@@ -248,6 +263,74 @@ function ConversationSurface({
 }) {
   const dockRef = useComposerDockRef();
   const composerRef = useRef<ProseMirrorComposerHandle | null>(null);
+
+  const channelMemberIds = useMemo(() => {
+    const ids = new Set<string>();
+    if (channelMembersState === 'ready') {
+      for (const m of channelMembers) {
+        if (m.userId) ids.add(m.userId);
+        if (m.agentId) ids.add(m.agentId);
+      }
+      return ids;
+    }
+    if (activeChannel?.memberIds) {
+      for (const id of activeChannel.memberIds) {
+        if (id) ids.add(id);
+      }
+    }
+    return ids;
+  }, [channelMembers, channelMembersState, activeChannel?.memberIds]);
+
+  const effectiveMembersState: ChannelMembersState =
+    channelMembersState === 'ready' || activeChannel?.memberIds !== undefined
+      ? 'ready'
+      : channelMembersState;
+
+  const channelMentionCandidates = useMemo(
+    () =>
+      buildMentionCandidates({
+        participants,
+        currentUserId,
+        channelKind: activeChannel?.kind,
+        dmKey: activeChannel?.dmKey,
+        channelMemberIds: effectiveMembersState === 'ready' ? channelMemberIds : undefined,
+        channelMembersState: effectiveMembersState,
+        channelMessages: messages,
+      }),
+    [
+      participants,
+      currentUserId,
+      activeChannel?.kind,
+      activeChannel?.dmKey,
+      channelMemberIds,
+      effectiveMembersState,
+      messages,
+    ],
+  );
+
+  const threadMentionCandidates = useMemo(() => {
+    const threadMsgs = threadRoot ? [threadRoot, ...threadReplies] : threadReplies;
+    return buildMentionCandidates({
+      participants,
+      currentUserId,
+      channelKind: activeChannel?.kind,
+      dmKey: activeChannel?.dmKey,
+      channelMemberIds: effectiveMembersState === 'ready' ? channelMemberIds : undefined,
+      channelMembersState: effectiveMembersState,
+      channelMessages: messages,
+      threadMessages: threadMsgs,
+    });
+  }, [
+    participants,
+    currentUserId,
+    activeChannel?.kind,
+    activeChannel?.dmKey,
+    channelMemberIds,
+    effectiveMembersState,
+    messages,
+    threadRoot,
+    threadReplies,
+  ]);
   const isArchived = Boolean(activeChannel?.archived);
   const canUnarchive = Boolean(
     activeChannel &&
@@ -349,7 +432,7 @@ function ConversationSurface({
         dockRef={dockRef}
         composerRef={composerRef}
         draftScope={JSON.stringify([currentUserId, activeChannel?.id])}
-        candidates={participants}
+        candidates={channelMentionCandidates}
         disabled={!activeChannel || isArchived}
         serverHttp={SERVER_HTTP}
         onUploadFile={onUploadFile}
@@ -373,6 +456,7 @@ function ConversationSurface({
         replies={threadReplies}
         messageFocus={replyFocus}
         participants={participants}
+        mentionCandidates={threadMentionCandidates}
         currentUserId={currentUserId}
         serverHttp={SERVER_HTTP}
         editingMessageId={editingMessageId}
@@ -495,6 +579,9 @@ export default function App() {
   // Channel members & autoReply
   const [showMembersPanel, setShowMembersPanel] = useState(false);
   const [channelMembersList, setChannelMembersList] = useState<ChannelMember[]>([]);
+  const [membersLoadedChannelId, setMembersLoadedChannelId] = useState('');
+  const membersLoadedChannelIdRef = useRef(membersLoadedChannelId);
+  membersLoadedChannelIdRef.current = membersLoadedChannelId;
   const [channelOwnerId, setChannelOwnerId] = useState<string>();
   const [membersLoading, setMembersLoading] = useState(false);
   const [membersError, setMembersError] = useState<string | null>(null);
@@ -523,14 +610,21 @@ export default function App() {
   // In-app Media Viewer
   const [mediaViewer, setMediaViewer] = useState<MediaViewerSelection | null>(null);
 
+  // Activity / Unreads Panel
+  const [showActivityPanel, setShowActivityPanel] = useState(false);
+  const [activityItems, setActivityItems] = useState<ActivityItem[]>([]);
+  const [activityLoading, setActivityLoading] = useState(false);
+
   // Agent Profile Panel
   const [selectedAgentProfileId, setSelectedAgentProfileId] = useState<string | null>(null);
   const [showArchivedAgents, setShowArchivedAgents] = useState(false);
   const [terminalReturnAgentId, setTerminalReturnAgentId] = useState<string | null>(null);
   const [terminalExpanded, setTerminalExpanded] = useState(false);
 
-  const [creatingChannel, setCreatingChannel] = useState(false);
+  const [creatingChannelTarget, setCreatingChannelTarget] = useState<string | null>(null);
   const [newChannelName, setNewChannelName] = useState('');
+  const [createChannelError, setCreateChannelError] = useState<string | null>(null);
+  const [creatingChannelPending, setCreatingChannelPending] = useState(false);
   const [addingHuman, setAddingHuman] = useState(false);
   const [newHumanName, setNewHumanName] = useState('');
 
@@ -547,20 +641,111 @@ export default function App() {
   const wsOpenWaitersRef = useRef<Set<(ws: WebSocket) => void>>(new Set());
   const pendingSends = useRef(new Map<string, (error?: Error) => void>());
 
-  const markChannelRead = (channelId: string, userId: string) => {
+  const contentMentionsCurrentUser = useCallback((content: string) => {
+    if (!content) return false;
+    if (/(?:^|[\s([{"'，。！？、])@(?:all|channel|here)(?=$|[\s)\]}"'，。！？、:：,.;!?])/i.test(content)) {
+      return true;
+    }
+    const me = participantsRef.current.find((p) => p.id === currentUserIdRef.current);
+    const cleanName = me?.name?.trim();
+    if (!cleanName) return false;
+    const escaped = cleanName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    return new RegExp(
+      `(?:^|[\\s([{"'，。！？、])@${escaped}(?=$|[\\s)\\]}"'，。！？、:：,.;!?])`,
+      'i',
+    ).test(content);
+  }, []);
+
+  const loadActivity = useCallback(async () => {
+    setActivityLoading(true);
+    try {
+      const res = await fetch(
+        `${SERVER_HTTP}/api/activity?userId=${encodeURIComponent(currentUserIdRef.current)}`,
+      );
+      if (!res.ok) return;
+      const data = (await res.json()) as { items?: ActivityItem[] };
+      setActivityItems(data.items || []);
+    } catch {
+      // ignore transient network error
+    } finally {
+      setActivityLoading(false);
+    }
+  }, []);
+
+  const totalUnreadCount = useMemo(
+    () =>
+      channels.reduce((sum, ch) => {
+        if (ch.archived || ch.muted) return sum;
+        return sum + (ch.unreadCount || 0) + (ch.threadUnreadCount || 0);
+      }, 0),
+    [channels],
+  );
+
+  useEffect(() => {
+    if (showActivityPanel) {
+      void loadActivity();
+    }
+  }, [showActivityPanel, totalUnreadCount, loadActivity]);
+
+  const markChannelRead = (channelId: string, userId: string, includeThreads = false) => {
     setChannels((prev) =>
       prev.map((c) =>
         c.id === channelId
-          ? { ...c, unreadCount: 0, markedUnread: false, lastReadAt: Date.now() }
+          ? {
+              ...c,
+              unreadCount: 0,
+              ...(includeThreads ? { threadUnreadCount: 0, mentionCount: 0 } : c.threadUnreadCount ? {} : { mentionCount: 0 }),
+              markedUnread: false,
+              lastReadAt: Date.now(),
+            }
           : c,
       ),
     );
+    if (includeThreads && channelRef.current === channelId) {
+      setMessages((prev) =>
+        prev.map((m) => (m.unreadReplyCount ? { ...m, unreadReplyCount: 0 } : m)),
+      );
+    }
     void fetch(`${SERVER_HTTP}/api/channels/${encodeURIComponent(channelId)}/read`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ userId }),
+      body: JSON.stringify({ userId, includeThreads }),
     }).catch(() => undefined);
   };
+
+  const markThreadRead = useCallback((channelId: string, rootMessageId: string, userId: string) => {
+    let clearedCount = 0;
+    setMessages((prev) =>
+      prev.map((m) => {
+        if (m.id !== rootMessageId || !m.unreadReplyCount) return m;
+        clearedCount = m.unreadReplyCount;
+        return { ...m, unreadReplyCount: 0 };
+      }),
+    );
+    setChannels((prev) =>
+      prev.map((c) => {
+        if (c.id !== channelId || !c.threadUnreadCount) return c;
+        const nextCount = Math.max(0, c.threadUnreadCount - Math.max(clearedCount, 1));
+        return { ...c, threadUnreadCount: nextCount };
+      }),
+    );
+    void fetch(
+      `${SERVER_HTTP}/api/channels/${encodeURIComponent(channelId)}/threads/${encodeURIComponent(rootMessageId)}/read`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ userId }),
+      },
+    ).catch(() => undefined);
+  }, []);
+
+  useEffect(() => {
+    const totalUnread = channels.reduce((sum, ch) => {
+      if (ch.archived || ch.muted) return sum;
+      return sum + (ch.unreadCount || 0) + (ch.threadUnreadCount || 0);
+    }, 0);
+    document.title = totalUnread > 0 ? `(${totalUnread}) BubAI` : 'BubAI';
+  }, [channels]);
 
   useEffect(() => {
     fetch(`${SERVER_HTTP}/api/bootstrap?userId=${encodeURIComponent(currentUserId)}`)
@@ -629,7 +814,7 @@ export default function App() {
       setUnreadDivider(null);
     }
 
-    fetchMessagePage(activeChannelId, controller.signal)
+    fetchMessagePage(activeChannelId, controller.signal, undefined, 50, currentUserId)
       .then((page) => {
         if (controller.signal.aborted) return;
         setMessages((current) => {
@@ -676,11 +861,22 @@ export default function App() {
   }, [activeChannelId, pinsRevision]);
 
   useEffect(() => {
-    if (!activeChannelId) return;
+    if (!activeChannelId) {
+      setChannelMembersList([]);
+      setChannelOwnerId(undefined);
+      setMembersLoadedChannelId('');
+      setMembersLoading(false);
+      setMembersError(null);
+      return;
+    }
     const controller = new AbortController();
-    setChannelMembersList([]);
-    setChannelOwnerId(undefined);
-    setMembersLoading(true);
+    const isSameLoadedChannel = membersLoadedChannelIdRef.current === activeChannelId;
+    if (!isSameLoadedChannel) {
+      setChannelMembersList([]);
+      setChannelOwnerId(undefined);
+      setMembersLoadedChannelId('');
+      setMembersLoading(true);
+    }
     setMembersError(null);
     fetch(`${SERVER_HTTP}/api/channels/${encodeURIComponent(activeChannelId)}/members`, {
       signal: controller.signal,
@@ -691,6 +887,8 @@ export default function App() {
         if (controller.signal.aborted) return;
         setChannelMembersList(data.members);
         setChannelOwnerId(data.ownerId ?? undefined);
+        setMembersLoadedChannelId(activeChannelId);
+        setMembersError(null);
       })
       .catch(() => {
         if (!controller.signal.aborted) setMembersError('Could not load channel members');
@@ -714,7 +912,7 @@ export default function App() {
       let older: Message[] = [];
       while (!found && page.hasMore && page.nextCursor !== null) {
         const cursor = page;
-        page = await fetchMessagePage(activeChannelId, controller.signal, cursor, 100);
+        page = await fetchMessagePage(activeChannelId, controller.signal, cursor, 100, currentUserId);
         older = [...page.messages, ...older];
         found = page.messages.some((row) => row.id === rootId);
         if (page.nextCursor === cursor.nextCursor && page.nextCursorId === cursor.nextCursorId) break;
@@ -759,9 +957,17 @@ export default function App() {
     }
     const belongsToThread = (message: Message) =>
       message.channelId === activeChannelId && message.threadId === activeThreadRootId;
-    setThreadRoot((current) => current?.channelId === activeChannelId &&
-      current.id === activeThreadRootId ? current : null);
+    const cachedRoot =
+      history.current.messages.find(
+        (m) => m.channelId === activeChannelId && m.id === activeThreadRootId,
+      ) ?? null;
+    setThreadRoot((current) =>
+      current?.channelId === activeChannelId && current.id === activeThreadRootId
+        ? current
+        : cachedRoot,
+    );
     setThreadReplies((current) => current.filter(belongsToThread));
+    markThreadRead(activeChannelId, activeThreadRootId, currentUserId);
     let cancelled = false;
     fetch(
       `${SERVER_HTTP}/api/channels/${encodeURIComponent(activeChannelId)}/threads/${encodeURIComponent(activeThreadRootId)}`,
@@ -817,6 +1023,7 @@ export default function App() {
     };
 
     let heartbeatTimer: ReturnType<typeof setInterval> | null = null;
+    let hasConnectedOnce = false;
     const stopHeartbeat = () => {
       if (heartbeatTimer) {
         clearInterval(heartbeatTimer);
@@ -846,9 +1053,14 @@ export default function App() {
           ws.close();
           return;
         }
+        const isReconnect = hasConnectedOnce;
+        hasConnectedOnce = true;
         ws.send(
           JSON.stringify({ type: 'presence.identify', payload: { userId: currentUserIdRef.current } }),
         );
+        if (isReconnect && channelRef.current) {
+          setMembersRevision((revision) => revision + 1);
+        }
         for (const waiter of wsOpenWaitersRef.current) waiter(ws);
         wsOpenWaitersRef.current.clear();
         stopHeartbeat();
@@ -897,7 +1109,25 @@ export default function App() {
                 };
               }
             }
+            const isOwnHumanMessage =
+              msg.senderRole === 'human' && msg.senderId === currentUserIdRef.current;
+            const mentionsMe = !isOwnHumanMessage && contentMentionsCurrentUser(msg.content);
             if (msg.threadId) {
+              const isViewingThisThread =
+                msg.channelId === activeChannelId && msg.threadId === activeThreadRootRef.current;
+              if (!isOwnHumanMessage && !isViewingThisThread) {
+                setChannels((prev) =>
+                  prev.map((c) =>
+                    c.id === msg.channelId
+                      ? {
+                          ...c,
+                          threadUnreadCount: (c.threadUnreadCount || 0) + 1,
+                          ...(mentionsMe ? { mentionCount: (c.mentionCount || 0) + 1 } : {}),
+                        }
+                      : c,
+                  ),
+                );
+              }
               if (msg.channelId !== activeChannelId) return;
               setMessages((prev) => prev.map((root) => {
                 const previews = root.replyPreviews ?? [];
@@ -907,16 +1137,23 @@ export default function App() {
                 return {
                   ...root,
                   replyCount: (root.replyCount ?? 0) + 1,
+                  unreadReplyCount:
+                    !isOwnHumanMessage && !isViewingThisThread
+                      ? (root.unreadReplyCount ?? 0) + 1
+                      : root.unreadReplyCount ?? 0,
                   replyPreviews: [...previews, msg]
                     .sort((a, b) => a.createdAt - b.createdAt || a.id.localeCompare(b.id))
                     .slice(-THREAD_REPLY_PREVIEW_LIMIT),
                 };
               }));
               if (previewRequests.has(msg.threadId)) void refreshThreadPreview(msg.threadId);
-              if (msg.threadId === activeThreadRootRef.current) {
+              if (isViewingThisThread) {
                 setThreadReplies((prev) =>
                   prev.some((r) => r.id === msg.id) ? prev : [...prev, msg],
                 );
+                if (!isOwnHumanMessage) {
+                  markThreadRead(msg.channelId, msg.threadId, currentUserIdRef.current);
+                }
               }
             } else {
               setMessages((prev) => {
@@ -924,19 +1161,26 @@ export default function App() {
                 if (prev.some((m) => m.id === msg.id)) return prev;
                 return [...prev, msg];
               });
-              setChannels((prev) =>
-                prev.map((c) =>
-                  c.id === msg.channelId && msg.channelId !== activeChannelId
-                    ? { ...c, unreadCount: (c.unreadCount || 0) + 1 }
-                    : c,
-                ),
-              );
+              if (!isOwnHumanMessage) {
+                setChannels((prev) =>
+                  prev.map((c) =>
+                    c.id === msg.channelId && msg.channelId !== activeChannelId
+                      ? {
+                          ...c,
+                          unreadCount: (c.unreadCount || 0) + 1,
+                          ...(mentionsMe ? { mentionCount: (c.mentionCount || 0) + 1 } : {}),
+                        }
+                      : c,
+                  ),
+                );
+              }
             }
           } else if (event.type === 'message.send_failed') {
             const { messageId, message } = event.payload as { messageId: string; message: string };
             pendingSends.current.get(messageId)?.(new Error(message));
           } else if (event.type === 'message.updated') {
             const msg = event.payload as Message;
+            const activeChannelId = channelRef.current;
             setRunningMessageChannelMap((prev) => {
               if (msg.card?.status === 'running') {
                 return prev[msg.id] === msg.channelId ? prev : { ...prev, [msg.id]: msg.channelId };
@@ -946,8 +1190,42 @@ export default function App() {
               delete next[msg.id];
               return next;
             });
+            if (msg.justCompleted) {
+              if (msg.threadId) {
+                const isViewingThisThread =
+                  msg.channelId === activeChannelId && msg.threadId === activeThreadRootRef.current;
+                if (!isViewingThisThread) {
+                  setChannels((prev) =>
+                    prev.map((c) =>
+                      c.id === msg.channelId
+                        ? { ...c, threadUnreadCount: (c.threadUnreadCount || 0) + 1 }
+                        : c,
+                    ),
+                  );
+                  if (msg.channelId === activeChannelId) {
+                    setMessages((prev) =>
+                      prev.map((root) =>
+                        root.id === msg.threadId
+                          ? { ...root, unreadReplyCount: (root.unreadReplyCount ?? 0) + 1 }
+                          : root,
+                      ),
+                    );
+                  }
+                } else {
+                  markThreadRead(msg.channelId, msg.threadId, currentUserIdRef.current);
+                }
+              } else if (msg.channelId !== activeChannelId) {
+                setChannels((prev) =>
+                  prev.map((c) =>
+                    c.id === msg.channelId
+                      ? { ...c, unreadCount: (c.unreadCount || 0) + 1 }
+                      : c,
+                  ),
+                );
+              }
+            }
             const updateMessage = (row: Message) => row.id === msg.id
-              ? { ...row, ...msg, pinned: row.pinned, replyCount: row.replyCount }
+              ? { ...row, ...msg, pinned: row.pinned, replyCount: row.replyCount, unreadReplyCount: row.unreadReplyCount }
               : row;
             setMessages((prev) =>
               prev.map((root) =>
@@ -995,10 +1273,14 @@ export default function App() {
               reactions: ReactionGroup[];
             };
             setMessages((prev) =>
-              prev.map((m) => (m.id === messageId ? { ...m, reactions } : m)),
+              prev.some((m) => m.id === messageId)
+                ? prev.map((m) => (m.id === messageId ? { ...m, reactions } : m))
+                : prev,
             );
             setThreadReplies((prev) =>
-              prev.map((r) => (r.id === messageId ? { ...r, reactions } : r)),
+              prev.some((r) => r.id === messageId)
+                ? prev.map((r) => (r.id === messageId ? { ...r, reactions } : r))
+                : prev,
             );
             setThreadRoot((prev) =>
               prev && prev.id === messageId ? { ...prev, reactions } : prev,
@@ -1009,6 +1291,28 @@ export default function App() {
               pins: Message[];
             };
             if (channelId === activeChannelId) applyPins(nextPins);
+          } else if (event.type === 'channel.members.updated') {
+            const { channelId, members, ownerId } = event.payload as {
+              channelId: string;
+              members: ChannelMember[];
+              ownerId?: string;
+            };
+            const ids = new Set<string>();
+            for (const m of members || []) {
+              if (m.userId) ids.add(m.userId);
+              if (m.agentId) ids.add(m.agentId);
+            }
+            if (ownerId) ids.add(ownerId);
+            setChannels((prev) =>
+              prev.map((c) => (c.id === channelId ? { ...c, memberIds: Array.from(ids) } : c)),
+            );
+            if (channelId === activeChannelId) {
+              setChannelMembersList(members);
+              setChannelOwnerId(ownerId ?? undefined);
+              setMembersLoadedChannelId(channelId);
+              setMembersLoading(false);
+              setMembersError(null);
+            }
           } else if (event.type === 'channel.created') {
             const ch = event.payload as Channel;
             setChannels((prev) => (prev.some((c) => c.id === ch.id) ? prev : [...prev, ch]));
@@ -1292,8 +1596,12 @@ export default function App() {
           setTerminalSessionId(null);
           setTerminalReturnAgentId(null);
         } else if (activeThreadRootId) {
+          if (document.querySelector('.buzz-popover-popup:not([data-closed])')) {
+            return;
+          }
           event.preventDefault();
           setActiveThreadRootId(null);
+          setMessageFocus((current) => (current?.reply ? { ...current, reply: undefined } : current));
         }
       }
     };
@@ -1731,7 +2039,7 @@ export default function App() {
     olderRequest.current = controller;
     setLoadingMore(true);
     try {
-      const data = await fetchMessagePage(activeChannelId, controller.signal, { nextCursor, nextCursorId });
+      const data = await fetchMessagePage(activeChannelId, controller.signal, { nextCursor, nextCursorId }, 50, currentUserId);
       if (controller.signal.aborted) return;
       setMessages((prev) => {
         const existingIds = new Set(prev.map((m) => m.id));
@@ -1955,19 +2263,52 @@ export default function App() {
     });
   };
 
-  const handleCreateChannel = async () => {
+  const toggleCreateChannelTarget = (target: string) => {
+    setCreateChannelError(null);
+    setNewChannelName('');
+    setCreatingChannelTarget((prev) => (prev === target ? null : target));
+  };
+
+  const handleCreateChannel = async (targetGroupId?: string | null) => {
     const name = newChannelName.trim();
-    if (!name) return;
-    const res = await fetch(`${SERVER_HTTP}/api/channels`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ name, userId: currentUserId }),
-    });
-    if (res.ok) {
+    if (!name || creatingChannelPending) return;
+    setCreateChannelError(null);
+    setCreatingChannelPending(true);
+    try {
+      const res = await fetch(`${SERVER_HTTP}/api/channels`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name, userId: currentUserId }),
+      });
+      if (!res.ok) {
+        const errData = (await res.json().catch(() => ({}))) as { error?: string };
+        setCreateChannelError(errData.error || `创建失败 (${res.status})`);
+        return;
+      }
       const data = (await res.json()) as { channel: Channel };
-      openChannel(data.channel.id);
+      const createdChannel: Channel = {
+        ...data.channel,
+        ...(targetGroupId ? { groupId: targetGroupId, starred: false } : {}),
+      };
+      setChannels((prev) =>
+        prev.some((c) => c.id === createdChannel.id)
+          ? prev.map((c) => (c.id === createdChannel.id ? { ...c, ...createdChannel } : c))
+          : [...prev, createdChannel],
+      );
+      if (targetGroupId) {
+        await handleSetChannelPlacement(createdChannel, {
+          starred: false,
+          groupId: targetGroupId,
+        });
+      }
+      openChannel(createdChannel.id);
       setNewChannelName('');
-      setCreatingChannel(false);
+      setCreateChannelError(null);
+      setCreatingChannelTarget(null);
+    } catch {
+      setCreateChannelError('网络异常，创建频道失败');
+    } finally {
+      setCreatingChannelPending(false);
     }
   };
 
@@ -1987,13 +2328,20 @@ export default function App() {
     }
   };
 
-  const detailPane = showPinsPanel && activeChannel
-    ? 'pins'
-    : selectedAgentProfileId
-      ? 'agent'
-      : terminalSessionId
-        ? 'terminal'
-        : undefined;
+  const unreadThreadsInChannel = useMemo(
+    () => messages.filter((m) => (m.unreadReplyCount ?? 0) > 0),
+    [messages],
+  );
+
+  const detailPane = showActivityPanel
+    ? 'activity'
+    : showPinsPanel && activeChannel
+      ? 'pins'
+      : selectedAgentProfileId
+        ? 'agent'
+        : terminalSessionId
+          ? 'terminal'
+          : undefined;
 
   return (
     <div className={workspaceStyles.shell}>
@@ -2077,6 +2425,33 @@ export default function App() {
                   </div>
                 }
               >
+                <div style={{ padding: '4px 6px 2px' }}>
+                  <NavigationItem
+                    data-activity-nav="true"
+                    label="Activity"
+                    selected={showActivityPanel}
+                    unread={totalUnreadCount > 0 && !showActivityPanel}
+                    icon={<BellIcon size={16} aria-hidden="true" />}
+                    trailing={
+                      totalUnreadCount > 0 ? (
+                        <CountBadge
+                          count={totalUnreadCount}
+                          label={`${totalUnreadCount} unread items`}
+                        />
+                      ) : undefined
+                    }
+                    onClick={() => {
+                      if (showActivityPanel) {
+                        setShowActivityPanel(false);
+                      } else {
+                        setShowPinsPanel(false);
+                        setSelectedAgentProfileId(null);
+                        setTerminalSessionId(null);
+                        setShowActivityPanel(true);
+                      }
+                    }}
+                  />
+                </div>
                   {starredChannels.length > 0 && (
                     <NavigationSection label="Starred">
                       {starredChannels.map((ch) => (
@@ -2090,7 +2465,7 @@ export default function App() {
                           isWorking={workingChannelIds.has(ch.id)}
                           onOpen={() => openChannel(ch.id)}
                           onToggleMute={(muted) => void handleToggleChannelMute(ch, muted)}
-                          onMarkRead={() => markChannelRead(ch.id, currentUserId)}
+                          onMarkRead={() => markChannelRead(ch.id, currentUserId, true)}
                           onMarkUnread={() => void handleMarkChannelUnread(ch)}
                           onCopyLink={() => handleCopyChannelLink(ch)}
                           onSetPlacement={(p) => void handleSetChannelPlacement(ch, p)}
@@ -2126,25 +2501,91 @@ export default function App() {
                             <IconButton
                               hint="familiar"
                               size="sm"
-                              aria-label={`Rename section ${group.name}`}
-                              title={`Rename section ${group.name}`}
-                              icon={<PencilSimpleIcon size={14} />}
-                              onClick={() => {
-                                setRenameGroupTarget(group);
-                                setRenameGroupName(group.name);
-                              }}
+                              aria-label={`New channel in ${group.name}`}
+                              title={`New channel in ${group.name}`}
+                              icon={<PlusIcon size={16} />}
+                              onClick={() => toggleCreateChannelTarget(group.id)}
                             />
-                            <IconButton
-                              hint="familiar"
-                              size="sm"
-                              aria-label={`Delete section ${group.name}`}
-                              title={`Delete section ${group.name}`}
-                              icon={<TrashIcon size={14} />}
-                              onClick={() => void handleDeleteSidebarGroup(group.id)}
-                            />
+                            <MenuRoot>
+                              <MenuTrigger
+                                render={
+                                  <IconButton
+                                    hint="familiar"
+                                    size="sm"
+                                    aria-label={`More actions for ${group.name}`}
+                                    title={`More actions for ${group.name}`}
+                                    icon={<DotsThreeIcon size={16} aria-hidden="true" />}
+                                  />
+                                }
+                              />
+                              <MenuPopup side="bottom" align="end" size="compact">
+                                <MenuItem
+                                  onClick={() => {
+                                    setRenameGroupTarget(group);
+                                    setRenameGroupName(group.name);
+                                  }}
+                                >
+                                  <MenuIcon>
+                                    <PencilSimpleIcon size={14} />
+                                  </MenuIcon>
+                                  Rename section
+                                </MenuItem>
+                                <MenuSeparator />
+                                <MenuItem
+                                  tone="danger"
+                                  onClick={() => void handleDeleteSidebarGroup(group.id)}
+                                >
+                                  <MenuIcon>
+                                    <TrashIcon size={14} />
+                                  </MenuIcon>
+                                  Delete section
+                                </MenuItem>
+                              </MenuPopup>
+                            </MenuRoot>
                           </div>
                         }
                       >
+                        {creatingChannelTarget === group.id && (
+                          <form
+                            onSubmit={(e) => {
+                              e.preventDefault();
+                              void handleCreateChannel(group.id);
+                            }}
+                            style={{ padding: '4px 6px' }}
+                          >
+                            <Input
+                              value={newChannelName}
+                              disabled={creatingChannelPending}
+                              onChange={(e) => {
+                                setNewChannelName(e.target.value);
+                                if (createChannelError) setCreateChannelError(null);
+                              }}
+                              onKeyDown={(e) => {
+                                if (e.key === 'Escape') {
+                                  e.preventDefault();
+                                  setCreatingChannelTarget(null);
+                                  setNewChannelName('');
+                                  setCreateChannelError(null);
+                                }
+                              }}
+                              placeholder="channel-name"
+                              autoFocus
+                            />
+                            {createChannelError && (
+                              <div
+                                className="text-caption"
+                                role="alert"
+                                style={{
+                                  color: 'var(--text-danger, #e5484d)',
+                                  marginTop: 4,
+                                  paddingLeft: 2,
+                                }}
+                              >
+                                {createChannelError}
+                              </div>
+                            )}
+                          </form>
+                        )}
                         {groupItems.map((ch) => (
                           <SidebarChannelRow
                             key={ch.id}
@@ -2156,7 +2597,7 @@ export default function App() {
                             isWorking={workingChannelIds.has(ch.id)}
                             onOpen={() => openChannel(ch.id)}
                             onToggleMute={(muted) => void handleToggleChannelMute(ch, muted)}
-                            onMarkRead={() => markChannelRead(ch.id, currentUserId)}
+                            onMarkRead={() => markChannelRead(ch.id, currentUserId, true)}
                             onMarkUnread={() => void handleMarkChannelUnread(ch)}
                             onCopyLink={() => handleCopyChannelLink(ch)}
                             onSetPlacement={(p) => void handleSetChannelPlacement(ch, p)}
@@ -2190,24 +2631,49 @@ export default function App() {
                         size="sm"
                         aria-label="New channel"
                         icon={<PlusIcon size={16} />}
-                        onClick={() => setCreatingChannel((v) => !v)}
+                        onClick={() => toggleCreateChannelTarget('channels')}
                       />
                     }
                   >
-                    {creatingChannel && (
+                    {creatingChannelTarget === 'channels' && (
                       <form
                         onSubmit={(e) => {
                           e.preventDefault();
-                          void handleCreateChannel();
+                          void handleCreateChannel(null);
                         }}
                         style={{ padding: '4px 6px' }}
                       >
                         <Input
                           value={newChannelName}
-                          onChange={(e) => setNewChannelName(e.target.value)}
+                          disabled={creatingChannelPending}
+                          onChange={(e) => {
+                            setNewChannelName(e.target.value);
+                            if (createChannelError) setCreateChannelError(null);
+                          }}
+                          onKeyDown={(e) => {
+                            if (e.key === 'Escape') {
+                              e.preventDefault();
+                              setCreatingChannelTarget(null);
+                              setNewChannelName('');
+                              setCreateChannelError(null);
+                            }
+                          }}
                           placeholder="channel-name"
                           autoFocus
                         />
+                        {createChannelError && (
+                          <div
+                            className="text-caption"
+                            role="alert"
+                            style={{
+                              color: 'var(--text-danger, #e5484d)',
+                              marginTop: 4,
+                              paddingLeft: 2,
+                            }}
+                          >
+                            {createChannelError}
+                          </div>
+                        )}
                       </form>
                     )}
                     {regularChannels.map((ch) => (
@@ -2221,7 +2687,7 @@ export default function App() {
                         isWorking={workingChannelIds.has(ch.id)}
                         onOpen={() => openChannel(ch.id)}
                         onToggleMute={(muted) => void handleToggleChannelMute(ch, muted)}
-                        onMarkRead={() => markChannelRead(ch.id, currentUserId)}
+                        onMarkRead={() => markChannelRead(ch.id, currentUserId, true)}
                         onMarkUnread={() => void handleMarkChannelUnread(ch)}
                         onCopyLink={() => handleCopyChannelLink(ch)}
                         onSetPlacement={(p) => void handleSetChannelPlacement(ch, p)}
@@ -2265,7 +2731,7 @@ export default function App() {
                               sectionTitle="Archived"
                               onOpen={() => openChannel(ch.id)}
                               onToggleMute={(muted) => void handleToggleChannelMute(ch, muted)}
-                              onMarkRead={() => markChannelRead(ch.id, currentUserId)}
+                              onMarkRead={() => markChannelRead(ch.id, currentUserId, true)}
                               onMarkUnread={() => void handleMarkChannelUnread(ch)}
                               onCopyLink={() => handleCopyChannelLink(ch)}
                               onSetPlacement={(p) => void handleSetChannelPlacement(ch, p)}
@@ -2304,7 +2770,7 @@ export default function App() {
                           isWorking={workingChannelIds.has(dm.id)}
                           onOpen={() => openChannel(dm.id)}
                           onToggleMute={(muted) => void handleToggleChannelMute(dm, muted)}
-                          onMarkRead={() => markChannelRead(dm.id, currentUserId)}
+                          onMarkRead={() => markChannelRead(dm.id, currentUserId, true)}
                           onMarkUnread={() => void handleMarkChannelUnread(dm)}
                           onCopyLink={() => handleCopyChannelLink(dm)}
                           onSetPlacement={(p) => void handleSetChannelPlacement(dm, p)}
@@ -2494,12 +2960,79 @@ export default function App() {
                   ) : 'Select a channel'}
                   actions={activeChannel && (
                     <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
+                      {unreadThreadsInChannel.length > 0 && (
+                        <MenuRoot>
+                          <MenuTrigger
+                            render={
+                              <Button
+                                variant="quiet"
+                                size="xs"
+                                data-unread-threads-trigger="true"
+                                style={{
+                                  display: 'inline-flex',
+                                  alignItems: 'center',
+                                  gap: 6,
+                                  color: 'var(--accent-standard, #e5484d)',
+                                  fontWeight: 600,
+                                }}
+                              >
+                                <span
+                                  aria-hidden="true"
+                                  style={{
+                                    width: 6,
+                                    height: 6,
+                                    borderRadius: '50%',
+                                    background: 'var(--accent-standard, #e5484d)',
+                                  }}
+                                />
+                                {unreadThreadsInChannel.length}{' '}
+                                {unreadThreadsInChannel.length === 1 ? 'unread thread' : 'unread threads'}
+                              </Button>
+                            }
+                          />
+                          <MenuPopup align="end" size="compact">
+                            {unreadThreadsInChannel.map((root) => (
+                              <MenuItem
+                                key={root.id}
+                                data-unread-thread-jump={root.id}
+                                onClick={() => {
+                                  setThreadRoot(root);
+                                  setActiveThreadRootId(root.id);
+                                  openMessage(root);
+                                }}
+                              >
+                                <span
+                                  style={{
+                                    maxWidth: 220,
+                                    overflow: 'hidden',
+                                    textOverflow: 'ellipsis',
+                                    whiteSpace: 'nowrap',
+                                  }}
+                                >
+                                  {root.content.trim().slice(0, 48) || '[Attachment]'}
+                                </span>
+                                <span
+                                  style={{
+                                    marginLeft: 8,
+                                    fontSize: 11,
+                                    fontWeight: 600,
+                                    color: 'var(--accent-standard, #e5484d)',
+                                  }}
+                                >
+                                  {root.unreadReplyCount} new
+                                </span>
+                              </MenuItem>
+                            ))}
+                          </MenuPopup>
+                        </MenuRoot>
+                      )}
                       <ChannelPinsButton
                         ref={pinsButton}
                         open={showPinsPanel}
                         onToggle={() => {
                           if (showPinsPanel) closePins();
                           else {
+                            setShowActivityPanel(false);
                             setSelectedAgentProfileId(null);
                             setTerminalSessionId(null);
                             setShowPinsPanel(true);
@@ -2694,6 +3227,16 @@ export default function App() {
                     activeChannel={activeChannel}
                     messages={messages}
                     participants={participants}
+                    channelMembers={channelMembersList}
+                    channelMembersState={
+                      !activeChannelId
+                        ? 'loading'
+                        : membersLoadedChannelId === activeChannelId
+                          ? 'ready'
+                          : membersError
+                            ? 'error'
+                            : 'loading'
+                    }
                     currentUserId={currentUserId}
                     hasMore={hasMore}
                     loadingMore={loadingMore}
@@ -2719,9 +3262,17 @@ export default function App() {
                       if (channelRef.current === msg.channelId) setNavigationError(error.message);
                     })}
                     onToggleReaction={(id, emoji) => void handleToggleReaction(id, emoji)}
-                    onOpenThread={(id) => setActiveThreadRootId(id)}
+                    onOpenThread={(id) => {
+                      const cached = messages.find((m) => m.id === id) ?? null;
+                      if (cached) setThreadRoot(cached);
+                      setMessageFocus((current) => (current?.reply ? { ...current, reply: undefined } : current));
+                      setActiveThreadRootId(id);
+                    }}
                     onOpenReply={openMessage}
-                    onCloseThread={() => setActiveThreadRootId(null)}
+                    onCloseThread={() => {
+                      setActiveThreadRootId(null);
+                      setMessageFocus((current) => (current?.reply ? { ...current, reply: undefined } : current));
+                    }}
                     onOpenTerminal={openTerminalSession}
                     onOpenMedia={(attachments, selectedId) =>
                       setMediaViewer({ attachments, selectedId })
@@ -2742,6 +3293,19 @@ export default function App() {
                   data-pane={detailPane}
                   data-expanded={detailPane === 'terminal' && terminalExpanded ? 'true' : undefined}
                 >
+                  {showActivityPanel && (
+                    <ActivityPanel
+                      items={activityItems}
+                      loading={activityLoading}
+                      onRefresh={() => void loadActivity()}
+                      onClose={() => setShowActivityPanel(false)}
+                      onOpenMessage={(msg) => {
+                        setShowActivityPanel(false);
+                        openMessage(msg);
+                      }}
+                    />
+                  )}
+
                   {showPinsPanel && activeChannel && (
                     <ChannelPinsPanel
                       key={activeChannelId}
@@ -2773,6 +3337,11 @@ export default function App() {
                       }}
                       onOpenChannel={openChannel}
                       onOpenTerminal={openTerminalSession}
+                      onChannelMembersChanged={(channelId) => {
+                        if (channelRef.current === channelId) {
+                          setMembersRevision((revision) => revision + 1);
+                        }
+                      }}
                     />
                   )}
 

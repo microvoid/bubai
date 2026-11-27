@@ -65,6 +65,8 @@ export interface SidebarChannelItem {
   archived?: boolean;
   createdByUserId?: string;
   unreadCount: number;
+  threadUnreadCount?: number;
+  mentionCount?: number;
   muted?: boolean;
   markedUnread?: boolean;
   starred?: boolean;
@@ -140,7 +142,12 @@ export function SidebarChannelRow({
   const isArchived = Boolean(channel.archived);
   const isMuted = Boolean(channel.muted);
   const isStarred = Boolean(channel.starred);
-  const hasUnread = channel.unreadCount > 0 || Boolean(channel.markedUnread);
+  const channelUnread = channel.unreadCount || 0;
+  const threadUnread = channel.threadUnreadCount || 0;
+  const mentionCount = channel.mentionCount || 0;
+  const hasChannelUnread = channelUnread > 0 || Boolean(channel.markedUnread);
+  const hasUnread = hasChannelUnread || threadUnread > 0 || mentionCount > 0;
+  const showUnreadStyle = !isMuted && hasUnread && !selected;
   const canManage = !isDm && (!channel.createdByUserId || channel.createdByUserId === currentUserId);
   const label = isDm ? channel.topic || channel.name : channel.name;
   const homeKey = isDm ? 'dm' : 'channels';
@@ -326,7 +333,7 @@ export function SidebarChannelRow({
     </>
   );
 
-  const trailing = isWorking ? (
+  const workingIndicator = isWorking ? (
     <span
       className={styles.mutedGlyph}
       title="Agent working…"
@@ -335,16 +342,67 @@ export function SidebarChannelRow({
     >
       <SparklesIcon size={13} aria-hidden="true" />
     </span>
-  ) : isMuted ? (
+  ) : null;
+
+  const unreadBadge = isMuted ? (
     <span className={styles.mutedGlyph} title="Muted">
       <BellSlashIcon size={13} aria-hidden="true" />
     </span>
-  ) : hasUnread && !selected ? (
+  ) : hasChannelUnread && !selected ? (
     <CountBadge
-      count={Math.max(1, channel.unreadCount)}
-      label={`${Math.max(1, channel.unreadCount)} unread messages`}
+      count={Math.max(1, channelUnread)}
+      label={`${Math.max(1, channelUnread)} unread messages`}
     />
-  ) : undefined;
+  ) : threadUnread > 0 ? (
+    <span
+      data-thread-unread-badge="true"
+      title={`${threadUnread} unread thread ${threadUnread === 1 ? 'reply' : 'replies'}`}
+      style={{
+        display: 'inline-flex',
+        alignItems: 'center',
+        gap: 3,
+      }}
+    >
+      <CountBadge
+        count={threadUnread}
+        label={`${threadUnread} unread thread replies`}
+      />
+    </span>
+  ) : null;
+
+  const mentionBadge =
+    !isMuted && !selected && mentionCount > 0 ? (
+      <span
+        data-mention-badge="true"
+        aria-label={`${mentionCount} unread mentions`}
+        title={`${mentionCount} unread @mentions`}
+        style={{
+          display: 'inline-flex',
+          alignItems: 'center',
+          justifyContent: 'center',
+          minWidth: 20,
+          height: 18,
+          padding: '0 5px',
+          borderRadius: 999,
+          fontSize: 11,
+          fontWeight: 700,
+          lineHeight: 1,
+          background: 'var(--accent-standard, #e5484d)',
+          color: '#fff',
+        }}
+      >
+        @{mentionCount}
+      </span>
+    ) : null;
+
+  const trailing =
+    workingIndicator || mentionBadge || unreadBadge ? (
+      <span style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}>
+        {workingIndicator}
+        {mentionBadge}
+        {unreadBadge}
+      </span>
+    ) : undefined;
 
   return (
     <ContextMenuRoot open={contextOpen} onOpenChange={setContextOpen}>
@@ -353,6 +411,7 @@ export function SidebarChannelRow({
           <div
             className={styles.row}
             data-channel-id={channel.id}
+            data-unread={showUnreadStyle || undefined}
             data-muted={isMuted || undefined}
             data-archived={isArchived || undefined}
             data-menu-open={menuOpen || contextOpen || undefined}
@@ -361,6 +420,7 @@ export function SidebarChannelRow({
               label={label}
               icon={icon ?? (isDm ? undefined : <HashIcon size={16} />)}
               selected={selected}
+              unread={showUnreadStyle}
               trailing={trailing}
               onClick={onOpen}
             />

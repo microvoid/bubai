@@ -2279,11 +2279,14 @@ html[data-keyboard-navigation] .membership .membershipName:focus-visible {
     margin: 0;
     overflow: visible;
   }
+  .messageActions[popover]:popover-open,
+  .messageActions:has([data-open]) {
+    opacity: 1;
+    pointer-events: auto;
+  }
   .messageActions[popover]:popover-open {
     position: fixed;
     inset: auto;
-    opacity: 1;
-    pointer-events: auto;
   }
 }
 
@@ -2501,6 +2504,64 @@ html[data-keyboard-navigation] .replyBranchCollapse:focus-visible {
   text-overflow: ellipsis;
   white-space: nowrap;
   color: var(--text-subtle);
+}
+/* Compact inline quote bar for flat thread replies referencing an earlier message. */
+.replyQuote {
+  display: flex;
+  align-items: center;
+  gap: var(--space-1h);
+  width: fit-content;
+  max-width: 100%;
+  margin-block-end: var(--space-1);
+  padding: var(--space-1) var(--space-2);
+  border: 0;
+  border-inline-start: 2px solid var(--border-strong, var(--border-standard));
+  border-radius: 0 var(--radius-control) var(--radius-control) 0;
+  background: var(--surface-inset);
+  color: var(--text-subtle);
+  font-family: inherit;
+  font-size: var(--text-caption);
+  line-height: var(--text-caption--line-height);
+  letter-spacing: var(--text-caption--letter-spacing);
+  text-align: start;
+  cursor: pointer;
+  transition:
+    background var(--duration-fast) var(--easing-enter),
+    color var(--duration-fast) var(--easing-enter);
+}
+.replyQuote:hover {
+  background: var(--surface-hover, var(--surface-inset));
+  color: var(--text-standard);
+}
+.replyQuote:focus-visible {
+  outline: 2px solid var(--border-focus);
+  outline-offset: 1px;
+}
+.replyQuote[data-reply-quote-missing] {
+  cursor: default;
+  font-style: italic;
+}
+.replyQuote[data-reply-quote-missing]:hover {
+  background: var(--surface-inset);
+  color: var(--text-subtle);
+}
+.replyQuoteAuthor {
+  flex-shrink: 0;
+  font-weight: 600;
+  color: var(--text-standard);
+  max-width: 16ch;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.replyQuoteText {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.message[data-viewer-message] .replyQuote {
+  margin-inline-start: auto;
 }
 /* The bubble owns the reading measure; prose fills its padded content box. */
 .messageBubble > :is(.text, .plainText) {

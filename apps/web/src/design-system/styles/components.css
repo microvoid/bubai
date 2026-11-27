@@ -2269,6 +2269,11 @@
     color: var(--navigation-item-text, var(--text-standard));
   }
 
+  .navigation-item[data-unread]:not([data-selected]) {
+    color: var(--text-navigation-unread, var(--text-standard));
+    font-weight: 600;
+  }
+
   .navigation-item[data-selected] {
     --text-subtle: var(--interaction-selected-text);
     --text-metadata: var(--interaction-selected-metadata);

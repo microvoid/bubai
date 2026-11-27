@@ -71,9 +71,11 @@ export interface ChatMessage {
   attachments?: UploadedAttachment[];
   botmuxSessionId?: string;
   replyCount?: number;
+  unreadReplyCount?: number;
   replyPreviews?: ChatMessage[];
   reactions?: ReactionGroup[];
   pinned?: boolean;
+  justCompleted?: boolean;
   createdAt: number;
   updatedAt?: number;
 }

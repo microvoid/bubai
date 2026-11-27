@@ -88,6 +88,7 @@ export function AgentProfilePanel({
   onOpenChannel,
   onOpenTerminal,
   onAgentUpdated,
+  onChannelMembersChanged,
 }: {
   agentId: string;
   activeChannelId?: string;
@@ -99,6 +100,7 @@ export function AgentProfilePanel({
   onOpenChannel: (channelId: string) => void;
   onOpenTerminal: (sessionId: string, context?: { agentId?: string; channelId?: string }) => void;
   onAgentUpdated?: () => void;
+  onChannelMembersChanged?: (channelId: string) => void;
 }) {
   const [agent, setAgent] = useState<AgentDetail | null>(null);
   const [loading, setLoading] = useState(true);
@@ -284,6 +286,7 @@ export function AgentProfilePanel({
         },
       );
       if (!res.ok) throw new Error(`加入频道失败 (HTTP ${res.status})`);
+      onChannelMembersChanged?.(selectedAddChannelId);
       await loadAgent();
     } catch (err) {
       setActionError(err instanceof Error ? err.message : '加入频道失败');
@@ -302,6 +305,7 @@ export function AgentProfilePanel({
         body: JSON.stringify({ agentId, autoReply: enabled }),
       });
       if (!res.ok) throw new Error(`切换自动回复失败 (HTTP ${res.status})`);
+      onChannelMembersChanged?.(channelId);
       setAgent((prev) =>
         prev
           ? {
@@ -329,6 +333,7 @@ export function AgentProfilePanel({
         body: JSON.stringify({ agentId }),
       });
       if (!res.ok) throw new Error(`移出频道失败 (HTTP ${res.status})`);
+      onChannelMembersChanged?.(channelId);
       await loadAgent();
     } catch (err) {
       setActionError(err instanceof Error ? err.message : '移出频道失败');

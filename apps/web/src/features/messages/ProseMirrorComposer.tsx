@@ -871,7 +871,7 @@ export function ProseMirrorComposer({
                   <div className={styles.replyContext} data-reply-context="">
                     <div>
                       <strong>Replying to {replyContext.author}</strong>
-                      <p>{replyContext.excerpt}</p>
+                      {replyContext.excerpt && <p>{replyContext.excerpt}</p>}
                     </div>
                     <IconButton
                       hint="familiar"

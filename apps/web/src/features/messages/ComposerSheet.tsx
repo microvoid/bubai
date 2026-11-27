@@ -395,7 +395,7 @@ export function ComposerSheet({
 
   useLayoutEffect(() => {
     if (popup.current) grow(popup.current, open);
-  });
+  }, [open, grow]);
 
   return (
     <SheetRoot

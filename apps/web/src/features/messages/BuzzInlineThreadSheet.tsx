@@ -1,15 +1,12 @@
 /**
- * Inline in-conversation thread sheet ported from Buzz's ComposerSheet + ThreadPanel
- * (references/buzz-app/src/features/messages/ComposerSheet.tsx, ThreadPanel.tsx,
- *  ReplyBranch.tsx, reply-tree.ts).
+ * Inline in-conversation thread sheet ported from Buzz's ComposerSheet + ThreadPanel.
  *
- * Opens docked inside the conversation's .composerDock (replacing the old fixed
- * right-hand Thread drawer), renders nested reply branches via replyTree + ReplyBranch,
- * keeps historical threadId-only replies under root, and supports replying to a
- * specific reply with Buzz's .composerReplySlot / .replyContext banner.
+ * Opens docked inside the conversation's .composerDock, renders all thread replies
+ * in flat chronological order so new messages always append at the bottom, and
+ * displays a clickable inline quote bar whenever a reply references a specific
+ * earlier message (replyToId) to jump and highlight that message.
  */
 import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
-import { AvatarStack } from '../../design-system/ui/AvatarStack';
 import { DialogBarMaterial } from '../../design-system/ui/DialogBarMaterial';
 import { calendarDay, toUnixSeconds } from '../../shared/datetime';
 import { BuzzMessageRow } from './BuzzMessageRow';
@@ -26,8 +23,7 @@ import {
   type ProseMirrorComposerHandle,
   type UploadedAttachment,
 } from './ProseMirrorComposer';
-import { replyTree } from './reply-tree';
-import { ReplyBranch } from './ReplyBranch';
+import type { MentionCandidate } from '../conversation/MentionCompletions';
 import type { ChatMessage, MessageFocus, Participant } from './types';
 
 export interface BuzzInlineThreadSheetProps {
@@ -36,6 +32,7 @@ export interface BuzzInlineThreadSheetProps {
   replies: readonly ChatMessage[];
   messageFocus?: MessageFocus;
   participants: readonly Participant[];
+  mentionCandidates?: readonly MentionCandidate[];
   currentUserId: string;
   serverHttp: string;
   editingMessageId: string | null;
@@ -66,6 +63,7 @@ export function BuzzInlineThreadSheet({
   replies,
   messageFocus,
   participants,
+  mentionCandidates,
   currentUserId,
   serverHttp,
   editingMessageId,
@@ -90,10 +88,17 @@ export function BuzzInlineThreadSheet({
   const host = composerHost(scope?.handle);
   const dock = host?.dock;
 
-  const [expandedBranches, setExpandedBranches] = useState<Set<string>>(() => new Set());
+  const [mounted, setMounted] = useState(open);
+  if (open && !mounted) setMounted(true);
   const [replyTarget, setReplyTarget] = useState<ChatMessage | null>(null);
+  const [jumpHighlightId, setJumpHighlightId] = useState<string | null>(null);
+  const jumpHighlightTimerRef = useRef<number | null>(null);
   const scrollerRef = useRef<HTMLElement | null>(null);
   const placedFocus = useRef<number | undefined>(undefined);
+  const initialScrolledRootRef = useRef<string | null>(null);
+  const followBottomRef = useRef(true);
+  const userScrolledRef = useRef(false);
+  const lastScrollTopRef = useRef(0);
   const threadComposerRef = useRef<ProseMirrorComposerHandle | null>(null);
 
   const participantMap = useMemo(
@@ -101,28 +106,102 @@ export function BuzzInlineThreadSheet({
     [participants],
   );
 
-  const tree = useMemo(
-    () => replyTree(replies, root?.id),
-    [replies, root?.id],
-  );
+  const replyLookup = useMemo(() => {
+    const map = new Map<string, ChatMessage>();
+    if (root) map.set(root.id, root);
+    for (const reply of replies) map.set(reply.id, reply);
+    return map;
+  }, [replies, root]);
 
-  // Reset branch state & reply target when switching threads
+  const clearJumpHighlight = () => {
+    if (jumpHighlightTimerRef.current !== null) {
+      window.clearTimeout(jumpHighlightTimerRef.current);
+      jumpHighlightTimerRef.current = null;
+    }
+    setJumpHighlightId(null);
+  };
+
+  useEffect(() => () => {
+    if (jumpHighlightTimerRef.current !== null) {
+      window.clearTimeout(jumpHighlightTimerRef.current);
+      jumpHighlightTimerRef.current = null;
+    }
+  }, []);
+
+  // Reset reply target & highlight state when switching threads
   useEffect(() => {
-    setExpandedBranches(new Set());
     setReplyTarget(null);
+    clearJumpHighlight();
     prevReplyCount.current = 0;
-  }, [root?.id]);
+    initialScrolledRootRef.current = null;
+    followBottomRef.current = !messageFocus;
+    userScrolledRef.current = Boolean(messageFocus);
+    lastScrollTopRef.current = 0;
+  }, [root?.id, open]);
+
+  // Default scroll to latest reply when opening a thread without an explicit messageFocus
+  useEffect(() => {
+    if (!open || !dock || !root?.id || messageFocus || replies.length === 0) return;
+    if (initialScrolledRootRef.current === root.id) return;
+
+    let frame = 0;
+    let attempts = 0;
+    const settleToBottom = () => {
+      const el = scrollerRef.current;
+      const rows = el?.querySelector<HTMLElement>('[data-thread-rows]');
+      if ((!el || !rows || rows.getBoundingClientRect().height === 0) && attempts++ < 30) {
+        frame = requestAnimationFrame(settleToBottom);
+        return;
+      }
+      if (!el) return;
+      followBottomRef.current = true;
+      userScrolledRef.current = false;
+      el.scrollTop = el.scrollHeight;
+      lastScrollTopRef.current = el.scrollTop;
+      initialScrolledRootRef.current = root.id;
+      frame = requestAnimationFrame(() => {
+        if (scrollerRef.current && followBottomRef.current && !userScrolledRef.current) {
+          scrollerRef.current.scrollTop = scrollerRef.current.scrollHeight;
+          lastScrollTopRef.current = scrollerRef.current.scrollTop;
+        }
+      });
+    };
+    frame = requestAnimationFrame(settleToBottom);
+    return () => {
+      cancelAnimationFrame(frame);
+    };
+  }, [dock, messageFocus, open, replies.length, root?.id]);
+
+  // Stick-to-bottom observer for in-place reply expansion (e.g. Agent card -> full reply)
+  useEffect(() => {
+    if (!open || !dock) return;
+    if (typeof ResizeObserver === 'undefined') return;
+    const el = scrollerRef.current;
+    const rows = el?.querySelector<HTMLElement>('[data-thread-rows]');
+    if (!el || !rows) return;
+
+    const observer = new ResizeObserver(() => {
+      const current = scrollerRef.current;
+      if (!current) return;
+      if (followBottomRef.current && !userScrolledRef.current && !messageFocus) {
+        const dist = current.scrollHeight - current.clientHeight - current.scrollTop;
+        if (dist > 1) {
+          current.scrollTop = current.scrollHeight;
+          lastScrollTopRef.current = current.scrollTop;
+        }
+      }
+    });
+    observer.observe(rows);
+    observer.observe(el);
+    return () => observer.disconnect();
+  }, [dock, messageFocus, open, root?.id, replies.length]);
 
   useEffect(() => {
     if (!open || !dock || !messageFocus || messageFocus.sequence === placedFocus.current ||
         !replies.some((reply) => reply.id === messageFocus.id)) return;
 
-    const ancestors = tree.ancestors(messageFocus.id);
-    if (ancestors.length) {
-      setExpandedBranches((previous) => ancestors.every((id) => previous.has(id))
-        ? previous
-        : new Set([...previous, ...ancestors]));
-    }
+    followBottomRef.current = false;
+    userScrolledRef.current = true;
     let frame = 0;
     let attempts = 0;
     const reveal = () => {
@@ -135,37 +214,38 @@ export function BuzzInlineThreadSheet({
       }
       placedFocus.current = messageFocus.sequence;
       row?.scrollIntoView({ block: 'center' });
+      if (scrollerRef.current) {
+        lastScrollTopRef.current = scrollerRef.current.scrollTop;
+      }
     };
     frame = requestAnimationFrame(reveal);
     return () => cancelAnimationFrame(frame);
-  }, [dock, messageFocus, open, replies, tree]);
+  }, [dock, messageFocus, open, replies]);
 
-  // Auto-expand branch only when a live nested reply arrives after initial thread load
+  // Keep viewport at the bottom when new replies arrive (including own replies)
   const prevReplyCount = useRef(0);
   useEffect(() => {
     if (prevReplyCount.current > 0 && replies.length > prevReplyCount.current) {
       const newest = replies[replies.length - 1];
       if (newest) {
-        const ancestors = tree.ancestors(newest.id);
-        if (ancestors.length > 0) {
-          setExpandedBranches((prev) => {
-            const next = new Set(prev);
-            for (const id of ancestors) next.add(id);
-            return next;
-          });
-        }
+        const isOwnReply = newest.senderRole === 'human' && newest.senderId === currentUserId;
         const el = scrollerRef.current;
-        if (el) {
+        if (el && (followBottomRef.current || isOwnReply)) {
+          followBottomRef.current = true;
+          userScrolledRef.current = false;
           requestAnimationFrame(() => {
-            el.scrollTop = el.scrollHeight;
+            if (scrollerRef.current && followBottomRef.current && !userScrolledRef.current) {
+              scrollerRef.current.scrollTop = scrollerRef.current.scrollHeight;
+              lastScrollTopRef.current = scrollerRef.current.scrollTop;
+            }
           });
         }
       }
     }
     prevReplyCount.current = replies.length;
-  }, [replies, tree]);
+  }, [currentUserId, replies]);
 
-  if (!open || !host) return null;
+  if ((!open && !mounted) || !host) return null;
 
   const replyCount = replies.length;
   const description =
@@ -173,122 +253,114 @@ export function BuzzInlineThreadSheet({
       ? `${replyCount} ${replyCount === 1 ? 'reply' : 'replies'}`
       : undefined;
 
-  const expandBranch = (id: string) => {
-    setExpandedBranches((prev) => {
-      const next = new Set(prev);
-      next.add(id);
-      return next;
+  const jumpToMessage = (targetId: string) => {
+    const el = scrollerRef.current;
+    const row = el?.querySelector<HTMLElement>(
+      `[data-message-id="${CSS.escape(targetId)}"]`,
+    );
+    if (!row) return;
+    followBottomRef.current = false;
+    userScrolledRef.current = true;
+    row.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    clearJumpHighlight();
+    requestAnimationFrame(() => {
+      setJumpHighlightId(targetId);
+      jumpHighlightTimerRef.current = window.setTimeout(() => {
+        setJumpHighlightId(null);
+        jumpHighlightTimerRef.current = null;
+      }, 2200);
     });
   };
 
-  const collapseBranch = (id: string) => {
-    setExpandedBranches((prev) => {
-      const next = new Set(prev);
-      next.delete(id);
-      return next;
-    });
-  };
+  const hasQuoteFor = (msg: ChatMessage | undefined) =>
+    Boolean(msg?.replyToId && msg.replyToId !== root?.id);
 
-  const renderReplies = (parent: string | undefined, depth = 0): ReactNode => {
-    const siblings = tree.children.get(parent) ?? [];
-    return siblings.map((row, index) => {
-      const prev = siblings[index - 1];
-      const next = siblings[index + 1];
-      const nested = tree.children.get(row.id) ?? [];
-      const hasNested = nested.length > 0;
-      const isExpanded = expandedBranches.has(row.id);
+  const renderReplies = (): ReactNode =>
+    replies.map((row, index) => {
+      const prev = replies[index - 1];
+      const next = replies[index + 1];
+      const hasQuote = hasQuoteFor(row);
+      const nextHasQuote = hasQuoteFor(next);
 
-      const stackPrevious = continuesMessageGroup(prev, row);
-      const stackNext =
-        !hasNested && next ? continuesMessageGroup(row, next) : false;
+      const stackPrevious = !hasQuote && continuesMessageGroup(prev, row);
+      const stackNext = next
+        ? !nextHasQuote && continuesMessageGroup(row, next)
+        : false;
       const day =
-        depth === 0 &&
         index > 0 &&
         calendarDay(toUnixSeconds(prev!.createdAt)) !==
           calendarDay(toUnixSeconds(row.createdAt));
 
       const sender = participantMap.get(row.senderId);
-      const branchAvatars = Array.from(
-        new Map(
-          nested.map((child) => {
-            const p = participantMap.get(child.senderId);
-            return [
-              child.senderId,
-              {
-                id: child.senderId,
-                name: p?.name || child.senderId,
-                src: p?.avatarUrl,
-                shape: (child.senderRole === 'agent' ? 'squircle' : 'circle') as
-                  | 'squircle'
-                  | 'circle',
-              },
-            ];
-          }),
-        ).values(),
-      );
-
       const layout = stackPrevious ? 'continuation' : 'thread';
-      const replyLabel = `${nested.length} ${nested.length === 1 ? 'reply' : 'replies'}`;
+
+      let replyQuote: ReactNode = null;
+      if (hasQuote && row.replyToId) {
+        const quoted = replyLookup.get(row.replyToId);
+        if (quoted) {
+          const quotedAuthor =
+            participantMap.get(quoted.senderId)?.name || quoted.senderId;
+          const quotedExcerpt = replyTargetExcerpt(quoted);
+          replyQuote = (
+            <button
+              type="button"
+              className={styles.replyQuote}
+              data-reply-quote=""
+              data-reply-target-id={quoted.id}
+              onClick={() => jumpToMessage(quoted.id)}
+              title={quotedExcerpt ? `${quotedAuthor}: ${quotedExcerpt}` : quotedAuthor}
+            >
+              <span className={styles.replyQuoteAuthor}>{quotedAuthor}</span>
+              {quotedExcerpt && (
+                <span className={styles.replyQuoteText}>{quotedExcerpt}</span>
+              )}
+            </button>
+          );
+        } else {
+          replyQuote = (
+            <div
+              className={styles.replyQuote}
+              data-reply-quote=""
+              data-reply-quote-missing=""
+            >
+              <span className={styles.replyQuoteText}>Original message unavailable</span>
+            </div>
+          );
+        }
+      }
 
       return (
         <li key={row.id} className={styles.replyItem}>
-          <ReplyBranch
+          <BuzzMessageRow
+            msg={row}
+            sender={sender}
+            currentUserId={currentUserId}
+            serverHttp={serverHttp}
             layout={layout}
-            depth={depth}
-            hasReplies={hasNested}
-            open={isExpanded}
-            label={`Expand ${replyLabel} to ${sender?.name || row.senderId}`}
-            collapseLabel={`Collapse ${replyLabel} to ${sender?.name || row.senderId}`}
-            onExpand={() => expandBranch(row.id)}
-            onCollapse={() => collapseBranch(row.id)}
-            summary={
-              <>
-                <AvatarStack items={branchAvatars} size="mini" max={3} />
-                <span>{replyLabel}</span>
-              </>
-            }
-            message={
-              <BuzzMessageRow
-                msg={row}
-                sender={sender}
-                currentUserId={currentUserId}
-                serverHttp={serverHttp}
-                layout={layout}
-                stackPrevious={stackPrevious}
-                stackNext={stackNext}
-                day={day}
-                inThread
-                highlighted={row.id === messageFocus?.id}
-                isEditing={editingMessageId === row.id}
-                editingDraft={editingDraft}
-                onEditingDraftChange={onEditingDraftChange}
-                onStartEdit={onStartEdit}
-                onSaveEdit={onSaveEdit}
-                onCancelEdit={onCancelEdit}
-                onDelete={onDelete}
-                onTogglePin={onTogglePin}
-                onToggleReaction={onToggleReaction}
-                onReply={() => {
-                  setReplyTarget(row);
-                  if (hasNested) expandBranch(row.id);
-                }}
-                onOpenTerminal={onOpenTerminal}
-                onOpenMedia={onOpenMedia}
-                onOpenAgentProfile={onOpenAgentProfile}
-                onMentionParticipant={(p) => threadComposerRef.current?.insertMention(p)}
-              />
-            }
-          >
-            {hasNested && (
-              <ol className={styles.threadList}>
-                {renderReplies(row.id, depth + 1)}
-              </ol>
-            )}
-          </ReplyBranch>
+            stackPrevious={stackPrevious}
+            stackNext={stackNext}
+            day={day}
+            inThread
+            highlighted={row.id === messageFocus?.id || row.id === jumpHighlightId}
+            replyQuote={replyQuote}
+            isEditing={editingMessageId === row.id}
+            editingDraft={editingDraft}
+            onEditingDraftChange={onEditingDraftChange}
+            onStartEdit={onStartEdit}
+            onSaveEdit={onSaveEdit}
+            onCancelEdit={onCancelEdit}
+            onDelete={onDelete}
+            onTogglePin={onTogglePin}
+            onToggleReaction={onToggleReaction}
+            onReply={() => setReplyTarget(row)}
+            onOpenTerminal={onOpenTerminal}
+            onOpenMedia={onOpenMedia}
+            onOpenAgentProfile={onOpenAgentProfile}
+            onMentionParticipant={(p) => threadComposerRef.current?.insertMention(p)}
+          />
         </li>
       );
     });
-  };
 
   const targetAuthor = replyTarget
     ? participantMap.get(replyTarget.senderId)?.name || replyTarget.senderId
@@ -300,6 +372,7 @@ export function BuzzInlineThreadSheet({
       onOpenChange={(next) => {
         if (!next) onClose();
       }}
+      onClosed={() => setMounted(false)}
       host={host}
       title="Thread"
       description={description}
@@ -318,6 +391,38 @@ export function BuzzInlineThreadSheet({
             className={styles.threadHistory}
             aria-label="Thread messages"
             tabIndex={0}
+            onWheel={(event) => {
+              if (event.deltaY < 0) userScrolledRef.current = true;
+            }}
+            onPointerDown={(event) => {
+              if (event.target === event.currentTarget) {
+                const rect = event.currentTarget.getBoundingClientRect();
+                if (event.clientX >= rect.left + event.currentTarget.clientWidth) {
+                  userScrolledRef.current = true;
+                }
+              }
+            }}
+            onKeyDown={(event) => {
+              if (event.key === 'ArrowUp' || event.key === 'PageUp' || event.key === 'Home') {
+                userScrolledRef.current = true;
+              }
+            }}
+            onScroll={(event) => {
+              const el = event.currentTarget;
+              if (el.scrollTop < lastScrollTopRef.current - 2) {
+                userScrolledRef.current = true;
+              }
+              const atBottom = el.scrollHeight - el.clientHeight - el.scrollTop < 80;
+              if (atBottom) {
+                followBottomRef.current = true;
+                userScrolledRef.current = false;
+              } else if (followBottomRef.current && !userScrolledRef.current && !messageFocus) {
+                el.scrollTop = el.scrollHeight;
+              } else {
+                followBottomRef.current = false;
+              }
+              lastScrollTopRef.current = el.scrollTop;
+            }}
           >
             <div data-thread-rows="">
               {root && (
@@ -328,6 +433,7 @@ export function BuzzInlineThreadSheet({
                   serverHttp={serverHttp}
                   layout="thread"
                   inThread
+                  highlighted={root.id === jumpHighlightId}
                   isEditing={editingMessageId === root.id}
                   editingDraft={editingDraft}
                   onEditingDraftChange={onEditingDraftChange}
@@ -345,7 +451,7 @@ export function BuzzInlineThreadSheet({
                 />
               )}
 
-              <ol className={styles.threadList}>{renderReplies(undefined, 0)}</ol>
+              <ol className={styles.threadList}>{renderReplies()}</ol>
 
               <div className={styles.timelineEnd} data-thread-end="" aria-hidden="true" />
             </div>
@@ -355,7 +461,7 @@ export function BuzzInlineThreadSheet({
 
         <ProseMirrorComposer
           composerRef={threadComposerRef}
-          candidates={participants}
+          candidates={mentionCandidates ?? participants}
           draftScope={JSON.stringify([currentUserId, root?.id, replyTarget?.id])}
           serverHttp={serverHttp}
           onUploadFile={onUploadFile}
@@ -364,19 +470,17 @@ export function BuzzInlineThreadSheet({
             replyTarget
               ? {
                   author: targetAuthor,
-                  excerpt: replyTarget.content || '[attachment]',
+                  excerpt: replyTargetExcerpt(replyTarget),
                   onCancel: () => setReplyTarget(null),
                 }
               : null
           }
           onSend={async (text, attachments, messageId) => {
             const targetId = replyTarget?.id;
+            followBottomRef.current = true;
+            userScrolledRef.current = false;
             await onSendReply(text, attachments, messageId, targetId);
-            if (targetId) {
-              const liftedParent = tree.parents.get(targetId) ?? targetId;
-              expandBranch(liftedParent);
-            }
-            setReplyTarget((current) => current?.id === targetId ? null : current);
+            setReplyTarget((current) => (current?.id === targetId ? null : current));
           }}
           placeholder={
             replyTarget ? `Reply to ${targetAuthor}...` : 'Reply in thread...'
@@ -385,4 +489,13 @@ export function BuzzInlineThreadSheet({
       </aside>
     </ComposerSheet>
   );
+}
+
+export function replyTargetExcerpt(target: Pick<ChatMessage, 'content' | 'card' | 'attachments'>): string {
+  const text = target.content.trim();
+  if (text) return text;
+  const cardText = target.card?.title?.trim() || target.card?.summary?.trim();
+  if (cardText) return cardText;
+  if (target.attachments && target.attachments.length > 0) return '[attachment]';
+  return '';
 }

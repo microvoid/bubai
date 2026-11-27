@@ -1,7 +1,7 @@
 /**
- * Virtualized channel timeline with Buzz's Virtua Virtualizer, reading position
- * restoration, prepend anchor preservation, bottom-follow-only-at-bottom, and
- * JumpToLatestButton.
+ * Virtualized channel timeline with Buzz's Virtua Virtualizer, stick-to-bottom
+ * locking across async height changes, prepend anchor preservation,
+ * bottom-follow-only-at-bottom, and JumpToLatestButton.
  *
  * Adapted from references/buzz-app/src/features/messages/ChannelTimeline.tsx.
  */
@@ -34,45 +34,7 @@ type ReadingPosition = {
   anchor?: ReadingAnchor;
 };
 
-const VIEW_STORAGE_PREFIX = 'buzz-view.v1:';
-const VIEW_SCOPE = 'buzz-botmux';
 const BOTTOM_THRESHOLD_PX = 80;
-
-function viewStorageKey(channelId: string): string {
-  return `${VIEW_STORAGE_PREFIX}${JSON.stringify([VIEW_SCOPE, `scroll:${channelId}`])}`;
-}
-
-function readSavedPosition(channelId: string): ReadingPosition | null {
-  try {
-    const raw = localStorage.getItem(viewStorageKey(channelId));
-    if (!raw) return null;
-    const parsed = JSON.parse(raw) as unknown;
-    if (!parsed || typeof parsed !== 'object') return null;
-    const obj = parsed as { bottom?: unknown; anchor?: { id?: unknown; y?: unknown } };
-    if (typeof obj.bottom !== 'boolean') return null;
-    if (
-      obj.anchor &&
-      typeof obj.anchor.id === 'string' &&
-      typeof obj.anchor.y === 'number' &&
-      Number.isFinite(obj.anchor.y)
-    ) {
-      return { bottom: obj.bottom, anchor: { id: obj.anchor.id, y: obj.anchor.y } };
-    }
-    return { bottom: obj.bottom };
-  } catch {
-    return null;
-  }
-}
-
-function writeSavedPosition(channelId: string, position: ReadingPosition | null): void {
-  if (!channelId || !position) return;
-  try {
-    const payload = position.bottom ? { bottom: true } : position;
-    localStorage.setItem(viewStorageKey(channelId), JSON.stringify(payload));
-  } catch {
-    // Ignore quota / private-mode storage errors
-  }
-}
 
 function positionAt(scroller: HTMLElement): ReadingPosition {
   const bottom =
@@ -131,7 +93,6 @@ export function BuzzChannelTimeline(props: BuzzChannelTimelineProps) {
 }
 
 function Timeline({
-  channelId,
   messages,
   participants,
   currentUserId,
@@ -167,16 +128,13 @@ function Timeline({
   const [jumpVisible, setJumpVisible] = useState(false);
   const [newMessageCount, setNewMessageCount] = useState(0);
 
-  const initialSaved = useRef<ReadingPosition | null>(
-    channelId ? readSavedPosition(channelId) : null,
-  );
-  const savedPosition = useRef<ReadingPosition | null>(initialSaved.current);
+  const savedPosition = useRef<ReadingPosition | null>({ bottom: true });
   const settled = useRef(false);
-  const follow = useRef(initialSaved.current ? initialSaved.current.bottom : true);
+  const follow = useRef(true);
   const userScrolled = useRef(false);
   const jumpingToLatest = useRef(false);
   const jumpTimer = useRef<number | undefined>(undefined);
-  const lastWritten = useRef<string | undefined>(undefined);
+  const lastScrollTop = useRef(0);
   const pendingPrependAnchor = useRef<ReadingAnchor | null>(null);
   const placedFocus = useRef<number | undefined>(undefined);
   const focusPending = !!messageFocus && messageFocus.sequence !== placedFocus.current;
@@ -207,17 +165,10 @@ function Timeline({
     [participants],
   );
 
-  const persistPosition = useCallback(
-    (pos: ReadingPosition | null) => {
-      if (!channelId || !pos) return;
-      const normalized = pos.bottom ? { bottom: true } : pos;
-      const serialized = JSON.stringify(normalized);
-      if (serialized === lastWritten.current) return;
-      lastWritten.current = serialized;
-      writeSavedPosition(channelId, normalized);
-    },
-    [channelId],
-  );
+  const pinToBottom = useCallback((el: HTMLElement) => {
+    el.scrollTop = el.scrollHeight;
+    lastScrollTop.current = el.scrollTop;
+  }, []);
 
   // Measure scroller width and edge header height so Virtua can mount immediately
   useLayoutEffect(() => {
@@ -240,74 +191,61 @@ function Timeline({
     return () => observer.disconnect();
   }, []);
 
-  // Save reading position on unmount (e.g., switching channels) and pagehide
   useEffect(() => {
-    const flush = () => {
-      if (settled.current && scroller.current) {
-        savedPosition.current = positionAt(scroller.current);
-        persistPosition(savedPosition.current);
-      }
-    };
-    window.addEventListener('pagehide', flush);
     return () => {
-      window.removeEventListener('pagehide', flush);
       if (jumpTimer.current !== undefined) clearTimeout(jumpTimer.current);
-      flush();
     };
-  }, [persistPosition]);
+  }, []);
 
-  // Initial scroll placement (restore saved anchor or start at bottom)
+  // Initial scroll placement: always start at bottom unless an explicit messageFocus takes priority
   useLayoutEffect(() => {
     const el = scroller.current;
     if (!el || size.width === 0 || messages.length === 0 || settled.current || focusPending) return;
 
-    const saved = initialSaved.current;
-    if (saved && !saved.bottom && saved.anchor) {
-      const targetIndex = messages.findIndex((m) => m.id === saved.anchor!.id);
-      if (targetIndex >= 0) {
-        follow.current = false;
-        handle.current?.scrollToIndex(targetIndex, { align: 'start' });
-        const refine = () => {
-          const current = scroller.current;
-          if (!current) return;
-          const row = current.querySelector<HTMLElement>(
-            `[data-message-id="${CSS.escape(saved.anchor!.id)}"]`,
-          );
-          if (row) {
-            const currentY =
-              row.getBoundingClientRect().top - current.getBoundingClientRect().top;
-            const drift = currentY - saved.anchor!.y;
-            if (Math.abs(drift) > 1) {
-              current.scrollTop += drift;
-            }
-          }
-          settled.current = true;
-          savedPosition.current = positionAt(current);
-          setJumpVisible(!savedPosition.current.bottom);
-        };
-        // Run immediately and once after Virtua flushes item measurements
-        refine();
-        requestAnimationFrame(refine);
-        return;
-      }
-    }
-
-    // Default: start at bottom
     follow.current = true;
-    el.scrollTop = el.scrollHeight;
-    requestAnimationFrame(() => {
+    userScrolled.current = false;
+    pinToBottom(el);
+    settled.current = true;
+    savedPosition.current = { bottom: true };
+    setJumpVisible(false);
+    const frame = requestAnimationFrame(() => {
       const current = scroller.current;
       if (!current) return;
-      if (follow.current) {
-        current.scrollTop = current.scrollHeight;
+      if (follow.current && !userScrolled.current && !focusPending) {
+        pinToBottom(current);
       }
-      settled.current = true;
-      savedPosition.current = { bottom: true };
-      setJumpVisible(false);
     });
-  }, [messages, size.width, focusPending]);
+    return () => cancelAnimationFrame(frame);
+  }, [messages.length, size.width, focusPending, pinToBottom]);
 
-  // Handle list mutations after initial settle: prepends vs appends
+  // Stick-to-bottom observer: keep pinned when Virtua finishes measuring tall items,
+  // images finish loading, or the latest message expands in place (e.g. Agent reply).
+  useEffect(() => {
+    const el = scroller.current;
+    if (!el || size.width === 0 || messages.length === 0) return;
+    if (typeof ResizeObserver === 'undefined') return;
+
+    const listEl = el.querySelector<HTMLElement>(':scope > ol');
+    if (!listEl) return;
+
+    const observer = new ResizeObserver(() => {
+      const current = scroller.current;
+      if (!current) return;
+      if (follow.current && !userScrolled.current && !focusPending && !jumpingToLatest.current) {
+        const distanceFromBottom =
+          current.scrollHeight - current.clientHeight - current.scrollTop;
+        if (distanceFromBottom > 1) {
+          pinToBottom(current);
+        }
+        setJumpVisible(false);
+      }
+    });
+    observer.observe(listEl);
+    observer.observe(el);
+    return () => observer.disconnect();
+  }, [size.width, messages.length, focusPending, pinToBottom]);
+
+  // Handle list mutations after initial settle: prepends, appends, and in-place tail updates
   useLayoutEffect(() => {
     const prev = prevIdsRef.current;
     const nextFirstId = messages[0]?.id;
@@ -339,9 +277,9 @@ function Timeline({
               } else {
                 handle.current?.scrollToIndex(anchorIdx, { align: 'start' });
               }
+              lastScrollTop.current = current.scrollTop;
               const nextPos = positionAt(current);
               savedPosition.current = { ...nextPos, bottom: false };
-              persistPosition(savedPosition.current);
               setJumpVisible(true);
             });
           }
@@ -361,20 +299,34 @@ function Timeline({
 
         if (follow.current || isOwnNewMessage) {
           follow.current = true;
-          el.scrollTop = el.scrollHeight;
+          userScrolled.current = false;
+          pinToBottom(el);
           requestAnimationFrame(() => {
-            if (scroller.current && follow.current) {
-              scroller.current.scrollTop = scroller.current.scrollHeight;
+            if (scroller.current && follow.current && !userScrolled.current) {
+              pinToBottom(scroller.current);
             }
           });
           setJumpVisible(false);
           setNewMessageCount(0);
           savedPosition.current = { bottom: true };
-          persistPosition(savedPosition.current);
         } else {
           setNewMessageCount((n) => n + addedCount);
           setJumpVisible(true);
         }
+      }
+      // Case C: In-place update (e.g. Agent card expanding into full Markdown reply)
+      else if (follow.current && !userScrolled.current) {
+        requestAnimationFrame(() => {
+          if (scroller.current && follow.current && !userScrolled.current && !focusPending) {
+            const distanceFromBottom =
+              scroller.current.scrollHeight -
+              scroller.current.clientHeight -
+              scroller.current.scrollTop;
+            if (distanceFromBottom > 1) {
+              pinToBottom(scroller.current);
+            }
+          }
+        });
       }
     }
 
@@ -383,7 +335,7 @@ function Timeline({
       lastId: nextLastId,
       count: messages.length,
     };
-  }, [messages, isPrepending, currentUserId, persistPosition, focusPending]);
+  }, [messages, isPrepending, currentUserId, focusPending, pinToBottom]);
 
   useLayoutEffect(() => {
     if (!messageFocus || !focusPending || !size.width) return;
@@ -391,7 +343,12 @@ function Timeline({
     if (index === -1 || !handle.current) return;
 
     follow.current = false;
+    userScrolled.current = true;
     jumpingToLatest.current = false;
+    if (jumpTimer.current !== undefined) {
+      clearTimeout(jumpTimer.current);
+      jumpTimer.current = undefined;
+    }
     pendingPrependAnchor.current = null;
     settled.current = true;
     handle.current.scrollToIndex(index, { align: 'center' });
@@ -415,14 +372,14 @@ function Timeline({
         element.scrollTop += bounds.top - viewport.top + (bounds.height - element.clientHeight) / 2;
         if (!activeThreadRootId) row.focus({ preventScroll: true });
       }
+      lastScrollTop.current = element.scrollTop;
       const position = positionAt(element);
       savedPosition.current = position;
-      persistPosition(position);
       setJumpVisible(!position.bottom);
     };
     frame = requestAnimationFrame(settle);
     return () => cancelAnimationFrame(frame);
-  }, [activeThreadRootId, focusPending, messageFocus, messages, persistPosition, size.width]);
+  }, [activeThreadRootId, focusPending, messageFocus, messages, size.width]);
 
   const triggerLoadOlder = useCallback(() => {
     if (!hasMore || loadingMore) return;
@@ -432,6 +389,7 @@ function Timeline({
         pendingPrependAnchor.current = pos.anchor;
       }
       follow.current = false;
+      userScrolled.current = true;
     }
     onLoadOlder();
   }, [hasMore, loadingMore, onLoadOlder]);
@@ -440,21 +398,21 @@ function Timeline({
     const el = scroller.current;
     if (!el) return;
     follow.current = true;
+    userScrolled.current = false;
     jumpingToLatest.current = true;
     setJumpVisible(false);
     setNewMessageCount(0);
     el.scrollTo({ top: el.scrollHeight, behavior: 'smooth' });
     savedPosition.current = { bottom: true };
-    persistPosition(savedPosition.current);
     if (jumpTimer.current !== undefined) clearTimeout(jumpTimer.current);
     jumpTimer.current = window.setTimeout(() => {
       jumpTimer.current = undefined;
       if (scroller.current && jumpingToLatest.current) {
-        scroller.current.scrollTop = scroller.current.scrollHeight;
+        pinToBottom(scroller.current);
       }
       jumpingToLatest.current = false;
     }, 350);
-  }, [messages.length, persistPosition]);
+  }, [pinToBottom]);
 
   return (
     <section
@@ -464,23 +422,66 @@ function Timeline({
       data-jump-visible={jumpVisible || undefined}
       tabIndex={0}
       aria-label="Channel message history"
-      onWheel={() => {
-        userScrolled.current = true;
+      onWheel={(event) => {
+        if (event.deltaY < 0) {
+          userScrolled.current = true;
+          jumpingToLatest.current = false;
+        }
+      }}
+      onPointerDown={(event) => {
+        jumpingToLatest.current = false;
+        if (event.target === event.currentTarget) {
+          const rect = event.currentTarget.getBoundingClientRect();
+          if (event.clientX >= rect.left + event.currentTarget.clientWidth) {
+            userScrolled.current = true;
+          }
+        }
+      }}
+      onTouchStart={() => {
         jumpingToLatest.current = false;
       }}
-      onPointerDown={() => {
-        userScrolled.current = true;
-        jumpingToLatest.current = false;
+      onKeyDown={(event) => {
+        if (event.key === 'ArrowUp' || event.key === 'PageUp' || event.key === 'Home') {
+          userScrolled.current = true;
+          jumpingToLatest.current = false;
+        }
+      }}
+      onLoadCapture={() => {
+        if (
+          scroller.current &&
+          follow.current &&
+          !userScrolled.current &&
+          !focusPending &&
+          !jumpingToLatest.current
+        ) {
+          pinToBottom(scroller.current);
+        }
       }}
       onScroll={(event) => {
         const element = event.currentTarget;
-        if (!settled.current || jumpingToLatest.current) return;
+        if (!settled.current || jumpingToLatest.current) {
+          lastScrollTop.current = element.scrollTop;
+          return;
+        }
+        if (element.scrollTop < lastScrollTop.current - 2) {
+          userScrolled.current = true;
+        }
         const pos = positionAt(element);
-        follow.current = pos.bottom;
-        savedPosition.current = pos;
-        setJumpVisible(!pos.bottom);
-        if (pos.bottom) setNewMessageCount(0);
-        persistPosition(pos);
+        if (pos.bottom) {
+          follow.current = true;
+          userScrolled.current = false;
+          savedPosition.current = { bottom: true };
+          setJumpVisible(false);
+          setNewMessageCount(0);
+        } else if (follow.current && !userScrolled.current && !focusPending) {
+          pinToBottom(element);
+          setJumpVisible(false);
+        } else {
+          follow.current = false;
+          savedPosition.current = pos;
+          setJumpVisible(true);
+        }
+        lastScrollTop.current = element.scrollTop;
       }}
     >
       <div

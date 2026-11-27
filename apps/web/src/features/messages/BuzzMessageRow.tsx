@@ -199,6 +199,7 @@ export interface BuzzMessageRowProps {
   onTogglePin?: (msg: ChatMessage) => void;
   onToggleReaction: (messageId: string, emoji: string) => void;
   onOpenThread?: (messageId: string) => void;
+  replyQuote?: ReactNode;
   replyPreview?: ReactNode;
   onReply?: () => void;
   onOpenTerminal?: (sessionId: string) => void;
@@ -231,6 +232,7 @@ export function BuzzMessageRow({
   onTogglePin,
   onToggleReaction,
   onOpenThread,
+  replyQuote,
   replyPreview,
   onReply,
   onOpenTerminal,
@@ -441,6 +443,7 @@ export function BuzzMessageRow({
               createdAt={stackPrevious ? msg.createdAt : undefined}
               attachments={hasAttachments}
             >
+              {replyQuote}
               {hasBubble && (
                 <div
                   className={styles.messageBubble}
@@ -620,12 +623,39 @@ export function BuzzMessageRow({
               size="sm"
               data-thread-summary=""
               data-reply-connector=""
+              data-thread-unread={(msg.unreadReplyCount ?? 0) > 0 ? 'true' : undefined}
+              data-thread-unread-count={(msg.unreadReplyCount ?? 0) > 0 ? msg.unreadReplyCount : undefined}
               type="button"
               onClick={() => onOpenThread(msg.id)}
             >
+              {(msg.unreadReplyCount ?? 0) > 0 && (
+                <span
+                  aria-hidden="true"
+                  style={{
+                    display: 'inline-block',
+                    width: 6,
+                    height: 6,
+                    borderRadius: '50%',
+                    background: 'var(--accent-standard, #e5484d)',
+                    marginRight: 6,
+                    flexShrink: 0,
+                  }}
+                />
+              )}
               <span>
                 {msg.replyCount} {msg.replyCount === 1 ? 'reply' : 'replies'}
               </span>
+              {(msg.unreadReplyCount ?? 0) > 0 && (
+                <span
+                  style={{
+                    marginLeft: 6,
+                    fontWeight: 600,
+                    color: 'var(--accent-standard, #e5484d)',
+                  }}
+                >
+                  · {msg.unreadReplyCount} new
+                </span>
+              )}
             </Button>
           )}
         </div>

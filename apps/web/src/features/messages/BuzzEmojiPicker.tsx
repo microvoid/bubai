@@ -56,7 +56,7 @@ export function BuzzEmojiPicker({
   }, [open, host]);
 
   return (
-    <fieldset className={styles.emojiPicker} aria-label="Emoji picker">
+    <fieldset className={styles.emojiPicker} data-open={open || undefined} aria-label="Emoji picker">
       <PopoverRoot open={open} onOpenChange={setOpen}>
         <PopoverTrigger
           render={

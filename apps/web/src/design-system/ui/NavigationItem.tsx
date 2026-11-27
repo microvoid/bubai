@@ -35,6 +35,7 @@ export function NavigationItem({
   icon,
   trailing,
   selected = false,
+  unread = false,
   highlighted = false,
   inset = false,
   variant = "row",
@@ -45,6 +46,7 @@ export function NavigationItem({
   icon?: ReactNode;
   trailing?: ReactNode;
   selected?: boolean;
+  unread?: boolean;
   /** Transient picker focus; persistent navigation selection stays separate. */
   highlighted?: boolean;
   inset?: boolean;
@@ -61,6 +63,7 @@ export function NavigationItem({
       data-buzz-ui=""
       className="navigation-item"
       data-selected={selected || undefined}
+      data-unread={unread || undefined}
       data-highlighted={highlighted || undefined}
       data-inset={inset || undefined}
       aria-current={props["aria-current"] ?? (selected ? "page" : undefined)}

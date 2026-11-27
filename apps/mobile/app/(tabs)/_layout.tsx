@@ -11,7 +11,7 @@ export default function TabsLayout() {
   const { colors, accent } = useBuzzTheme();
   const { asks, channels } = useBubai();
   const insets = useSafeAreaInsets();
-  const totalUnread = channels.reduce((sum, c) => sum + (c.unreadCount || 0), 0);
+  const totalUnread = channels.reduce((sum, c) => sum + (c.muted ? 0 : (c.unreadCount || 0) + (c.threadUnreadCount || 0)), 0);
 
   return (
     <Tabs
@@ -41,7 +41,7 @@ export default function TabsLayout() {
       <Tabs.Screen
         name="index"
         options={{
-          title: 'Messages',
+          title: 'Messages', tabBarButtonTestID: 'messages-tab',
           tabBarBadge: totalUnread > 0 ? (totalUnread > 99 ? '99+' : totalUnread) : undefined,
           tabBarBadgeStyle: {
             backgroundColor: accent.fill,
@@ -74,7 +74,7 @@ export default function TabsLayout() {
       <Tabs.Screen
         name="activity"
         options={{
-          title: 'Activity',
+          title: 'Activity', tabBarButtonTestID: 'activity-tab',
           tabBarBadge: asks.length > 0 ? asks.length : undefined,
           tabBarBadgeStyle: {
             backgroundColor: colors.error,

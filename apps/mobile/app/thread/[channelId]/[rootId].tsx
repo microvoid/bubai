@@ -42,6 +42,7 @@ export default function ThreadScreen() {
     client,
     serverUrl,
     activeOrgId,
+    authToken,
     currentUserId,
     participants,
     sendWsMessage,
@@ -60,11 +61,13 @@ export default function ThreadScreen() {
   const [draft, setDraft] = useDraft(serverUrl, activeOrgId, currentUserId, channelId, rootId);
   const [actionMessage, setActionMessage] = useState<ChatMessage | null>(null);
 
+  const loaded = useRef(false);
   const loadThread = useCallback(async () => {
     if (!client || !channelId || !rootId) return;
-    setLoading(true);
+    if (!loaded.current) setLoading(true);
     try {
       const data = await client.getThread(channelId, rootId);
+      loaded.current = true;
       setRoot(data.root);
       setReplies(data.replies ?? []);
       await client.markThreadRead(channelId, rootId, currentUserId);
@@ -74,8 +77,10 @@ export default function ThreadScreen() {
   }, [channelId, client, rootId, currentUserId]);
 
   useEffect(() => {
-    if (wsState === 'open') void loadThread().catch(error => Alert.alert('加载失败', String(error)));
-  }, [loadThread, wsState]);
+    if (!loaded.current || wsState === 'open') void loadThread().catch(error => {
+      if (error?.status !== 401 || !authToken) Alert.alert('加载失败', String(error));
+    });
+  }, [loadThread, wsState, authToken]);
 
   useEffect(() => {
     return subscribeWsEvents((event) => {
@@ -91,6 +96,11 @@ export default function ThreadScreen() {
           setReplies((prev) => prev.map((r) => (r.id === msg.id ? { ...r, ...msg } : r)));
         }
       } else if (event.type === 'message.deleted') {
+        if (event.payload.channelId !== channelId) return;
+        if (event.payload.id === rootId) {
+          router.replace(`/channel/${encodeURIComponent(channelId)}`);
+          return;
+        }
         setReplies((prev) => prev.filter((r) => r.id !== event.payload.id));
       } else if (event.type === 'reaction.updated') {
         const { messageId, reactions } = event.payload;
@@ -102,7 +112,7 @@ export default function ThreadScreen() {
         );
       }
     });
-  }, [channelId, rootId, subscribeWsEvents, client, currentUserId]);
+  }, [channelId, rootId, subscribeWsEvents, client, currentUserId, router]);
 
   const [uploading, setUploading] = useState(false);
   const [editing, setEditing] = useState<ChatMessage | null>(null);
@@ -181,6 +191,8 @@ export default function ThreadScreen() {
           </View>
         ) : (
           <FlatList
+            keyboardShouldPersistTaps="handled"
+            keyboardDismissMode="interactive"
             data={allItems}
             ref={list}
             onScrollToIndexFailed={info => list.current?.scrollToOffset({ offset: info.averageItemLength * info.index, animated: false })}

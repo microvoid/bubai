@@ -52,6 +52,8 @@ export default function ChannelScreen() {
   const list = useRef<FlatList<ChatMessage>>(null);
   const jumped = useRef<string | undefined>(undefined);
   const focused = useRef(false);
+  const loaded = useRef(false);
+  const loadVersion = useRef(0);
   const channelId = Array.isArray(id) ? id[0] : id || '';
   const router = useRouter();
   const insets = useSafeAreaInsets();
@@ -79,15 +81,12 @@ export default function ChannelScreen() {
     () => new Map<string, Participant>(participants.map((p) => [p.id, p])),
     [participants],
   );
-  const agents = useMemo(
-    () => participants.filter((p) => p.role === 'agent' && !p.archived),
-    [participants],
-  );
 
-  const dmAgent = useMemo(() => {
+  const dmPeer = useMemo(() => {
     if (channel?.kind !== 'dm' || !channel.dmKey) return undefined;
-    return participants.find((p) => p.role === 'agent' && channel.dmKey?.includes(`a:${p.id}`));
-  }, [channel, participants]);
+    const keys = channel.dmKey.split('|');
+    return participants.find(p => p.id !== currentUserId && keys.includes((p.role === 'agent' ? 'a:' : 'u:') + p.id));
+  }, [channel, currentUserId, participants]);
 
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [loading, setLoading] = useState(true);
@@ -110,14 +109,15 @@ export default function ChannelScreen() {
 
   const loadInitial = useCallback(async () => {
     if (!client || !channelId) return;
-    setLoading(true);
+    const version = ++loadVersion.current;
+    if (!loaded.current) setLoading(true);
     try {
       const [msgRes, pinRes, memRes] = await Promise.all([
         client.getChannelMessages(channelId, { limit: 50, userId: currentUserId }),
         client.getPins(channelId).catch(() => ({ pins: [] })),
         client.getChannelMembers(channelId).catch(() => ({ members: [] })),
       ]);
-      if (!focused.current) return;
+      if (!focused.current || version !== loadVersion.current) return;
       let page = msgRes;
       let history = page.messages;
       while (messageId && !history.some(m => m.id === messageId) && page.hasMore && page.nextCursor != null) {
@@ -126,7 +126,8 @@ export default function ChannelScreen() {
         history = [...older.messages, ...history];
         page = older;
       }
-      if (!focused.current) return;
+      if (!focused.current || version !== loadVersion.current) return;
+      loaded.current = true;
       setMessages(history);
       setHasMore(Boolean(page.hasMore));
       setNextCursorId(page.nextCursorId);
@@ -135,28 +136,35 @@ export default function ChannelScreen() {
       setMembers(memRes.members ?? []);
       clearChannelUnread(channelId);
     } finally {
-      setLoading(false);
+      if (version === loadVersion.current) setLoading(false);
     }
   }, [channelId, clearChannelUnread, client, currentUserId, messageId]);
 
   useFocusEffect(useCallback(() => {
     focused.current = true;
-    if (wsState === 'open') void loadInitial().catch(error => Alert.alert('加载失败', String(error)));
+    if (!loaded.current || wsState === 'open') void loadInitial().catch(error => {
+      if (error?.status !== 401 || !authToken) Alert.alert('加载失败', String(error));
+    });
     return () => { focused.current = false; };
-  }, [loadInitial, wsState]));
+  }, [loadInitial, wsState, authToken]));
 
   // Live WS updates for this channel
   useEffect(() => {
     return subscribeWsEvents((event) => {
+      if ((event.type === 'message.created' || event.type === 'message.updated' || event.type === 'message.deleted') &&
+          event.payload.channelId === channelId && event.payload.threadId) {
+        const rootId = event.payload.threadId;
+        void client?.getThreadPreview(channelId, rootId).then(preview => {
+          setMessages(prev => prev.map(m => m.id === rootId ? { ...m, ...preview } : m));
+        }).catch(() => {});
+      }
       if (event.type === 'message.created') {
         const msg = event.payload;
         if (msg.channelId !== channelId) return;
         if (msg.threadId) {
-          setMessages((prev) =>
-            prev.map((m) =>
-              m.id === msg.threadId ? { ...m, replyCount: (m.replyCount ?? 0) + 1 } : m,
-            ),
-          );
+          if (msg.senderId !== currentUserId) {
+            setMessages(prev => prev.map(m => m.id === msg.threadId ? { ...m, unreadReplyCount: (m.unreadReplyCount ?? 0) + 1 } : m));
+          }
           return;
         }
         setMessages((prev) => (prev.some((m) => m.id === msg.id) ? prev : [...prev, msg]));
@@ -182,7 +190,7 @@ export default function ChannelScreen() {
         setMessages((prev) => prev.map((m) => ({ ...m, pinned: pinSet.has(m.id) })));
       }
     });
-  }, [channelId, clearChannelUnread, subscribeWsEvents]);
+  }, [channelId, clearChannelUnread, subscribeWsEvents, client, currentUserId]);
 
   const loadOlder = async () => {
     if (!client || !channelId || !hasMore || !nextCursor || loadingOlder) return;
@@ -311,7 +319,7 @@ export default function ChannelScreen() {
 
   const title =
     channel?.kind === 'dm'
-      ? dmAgent?.name || channel.topic || channel.name
+      ? dmPeer?.name || channel.topic || channel.name
       : `#${channel?.name || 'channel'}`;
 
   return (
@@ -333,13 +341,13 @@ export default function ChannelScreen() {
         </Pressable>
 
         <View style={styles.headerCenter}>
-          {dmAgent && (
+          {dmPeer && (
             <BuzzAvatar
-              name={dmAgent.name}
-              uri={dmAgent.avatarUrl}
+              name={dmPeer.name}
+              uri={dmPeer.avatarUrl}
               size={28}
-              isAgent
-              status={dmAgent.status}
+              isAgent={dmPeer.role === 'agent'}
+              status={dmPeer.status}
             />
           )}
           <View style={{ minWidth: 0 }}>
@@ -506,7 +514,7 @@ export default function ChannelScreen() {
           uploading={uploading}
           placeholder={
             channel?.kind === 'dm'
-              ? `Message ${dmAgent?.name || 'Agent'}…`
+              ? `Message ${dmPeer?.name || title}…`
               : `Message #${channel?.name || 'channel'}… (输入 @ 召唤 Agent)`
           }
           currentUserId={currentUserId}

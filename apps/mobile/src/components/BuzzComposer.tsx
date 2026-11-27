@@ -48,19 +48,21 @@ export function BuzzComposer({
   const { colors, accent } = useBuzzTheme();
 
   const { sendTyping, subscribeWsEvents } = useBubai();
-  const [typingName, setTypingName] = useState('');
+  const [typingUserId, setTypingUserId] = useState('');
+  const typingName = participants.find(p => p.id === typingUserId)?.name || typingUserId;
   const lastTyped = useRef(0);
   useEffect(() => {
     let timer: ReturnType<typeof setTimeout>;
+    setTypingUserId('');
     const unsubscribe = subscribeWsEvents(event => {
       if (event.type !== 'typing.updated' || event.payload.channelId !== channel?.id || event.payload.userId === currentUserId) return;
       const { userId } = event.payload;
-      setTypingName(participants.find(p => p.id === userId)?.name || userId);
       clearTimeout(timer);
-      timer = setTimeout(() => setTypingName(''), 2500);
+      setTypingUserId(event.payload.typing ? userId : '');
+      if (event.payload.typing) timer = setTimeout(() => setTypingUserId(''), 2500);
     });
     return () => { clearTimeout(timer); unsubscribe(); };
-  }, [channel?.id, participants, currentUserId, subscribeWsEvents]);
+  }, [channel?.id, currentUserId, subscribeWsEvents]);
 
   // Detect active @mention query at the end of draft
   const mentionMatch = useMemo(() => {

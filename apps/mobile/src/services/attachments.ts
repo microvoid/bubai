@@ -7,10 +7,17 @@ export function attachmentSource(serverUrl: string, path: string, token: string 
   const url = new URL(path, serverUrl + '/');
   if (!['http:', 'https:'].includes(url.protocol)) throw new Error('无效的附件链接');
   const privateUpload = url.href.startsWith(serverUrl.replace(/\/+$/, '') + '/api/uploads/');
-  return { uri: url.href, headers: privateUpload && token ? { Authorization: 'Bearer ' + token } : undefined };
+  return {
+    uri: url.href,
+    headers: privateUpload && token ? { Authorization: 'Bearer ' + token } : undefined,
+  };
 }
 
-export async function openAttachment(serverUrl: string, attachment: MessageAttachment, token: string | null) {
+export async function openAttachment(
+  serverUrl: string,
+  attachment: MessageAttachment,
+  token: string | null,
+) {
   const { uri, headers } = attachmentSource(serverUrl, attachment.url, token);
   if (!headers) return Linking.openURL(uri);
   const filename = attachment.name.replace(/[^\p{L}\p{N}._-]/gu, '_');

@@ -112,8 +112,9 @@ export function MessageActionSheet({
 
   return (
     <Modal visible transparent animationType="fade" onRequestClose={onClose}>
-      <Pressable style={[styles.backdrop, { backgroundColor: colors.scrim }]} onPress={onClose}>
-        <Pressable
+      <View style={[styles.backdrop, { backgroundColor: colors.scrim }]}>
+        <Pressable accessibilityLabel="关闭消息操作" style={StyleSheet.absoluteFill} onPress={onClose} />
+        <View accessibilityViewIsModal
           style={[
             styles.sheet,
             {
@@ -122,7 +123,6 @@ export function MessageActionSheet({
               paddingBottom: Math.max(insets.bottom, 16) + 10,
             },
           ]}
-          onPress={() => {}}
         >
           <View style={[styles.handle, { backgroundColor: colors.outlineVariant }]} />
 
@@ -155,6 +155,9 @@ export function MessageActionSheet({
           >
             {actions.map((act, idx) => (
               <Pressable
+                testID={'message-action-' + act.key}
+                accessibilityRole="button"
+                accessibilityLabel={act.label}
                 key={act.key}
                 onPress={() => {
                   void Haptics.selectionAsync();
@@ -185,8 +188,8 @@ export function MessageActionSheet({
               </Pressable>
             ))}
           </View>
-        </Pressable>
-      </Pressable>
+        </View>
+      </View>
     </Modal>
   );
 }

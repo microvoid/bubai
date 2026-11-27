@@ -746,20 +746,22 @@ describe('Phase 2 Web Auth UI & Buzz Alignment E2E (real headless Chrome)', () =
         ),
       'Charlie row in CommunityMembersDialog',
     );
-    await cdp.eval<void>(`(() => {
-      const sel = document.querySelector('[data-member-row="charlie@example.com"] [data-member-role-select]');
-      if (sel) {
-        sel.value = 'member';
-        sel.dispatchEvent(new Event('change', { bubbles: true }));
-      }
-    })()`);
-    await cdp.waitFor(
-      () =>
-        cdp!.eval<boolean>(
-          `document.querySelector('[data-member-row="charlie@example.com"] [data-member-role-select]')?.value === 'member'`,
-        ),
-      'Charlie role updated to member',
-    );
+    const roleSelector = '[data-member-row="charlie@example.com"] [data-member-role-select]';
+    assert.equal(await cdp.eval(`document.querySelector(${JSON.stringify(roleSelector)}).value`), 'admin');
+    await cdp.eval(`document.querySelector(${JSON.stringify(roleSelector)}).focus()`);
+    // Use the native select's type-ahead to choose "member".
+    await cdp.send('Input.dispatchKeyEvent', { type: 'keyDown', key: 'm', code: 'KeyM', text: 'm', windowsVirtualKeyCode: 77 });
+    await cdp.send('Input.dispatchKeyEvent', { type: 'keyUp', key: 'm', code: 'KeyM', windowsVirtualKeyCode: 77 });
+    await cdp.waitFor(() => cdp!.eval(`(() => {
+      const select = document.querySelector(${JSON.stringify(roleSelector)});
+      return select?.value === 'member' && !select.disabled;
+    })()`), 'Role update finished');
+    await cdp.send('Page.reload');
+    await cdp.waitFor(() => cdp!.eval(`Boolean(document.querySelector('[data-profile-trigger]'))`), 'Workspace reloaded');
+    await cdp.click('[data-profile-trigger]');
+    await cdp.waitFor(() => cdp!.eval(`Boolean(document.querySelector('[data-profile-action="open-community-members"]'))`), 'Members menu item');
+    await cdp.click('[data-profile-action="open-community-members"]');
+    await cdp.waitFor(() => cdp!.eval(`document.querySelector(${JSON.stringify(roleSelector)})?.value === 'member'`), 'Saved role after reload');
     await cdp.click('[data-member-row="charlie@example.com"] [data-member-remove]');
     await cdp.waitFor(
       () =>

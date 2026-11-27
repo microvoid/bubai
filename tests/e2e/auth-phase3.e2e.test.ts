@@ -1,23 +1,23 @@
+import { CdpSession, findChromeBinary } from './browser-cdp';
 import { registerTestUser } from './account-mailbox';
 import assert from 'node:assert/strict';
-import { execFile, spawn, type ChildProcess } from 'node:child_process';
+import { spawn, type ChildProcess } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { after, before, describe, it } from 'node:test';
-import { promisify } from 'node:util';
 import { BubaiClient } from '../../packages/chat-client/src/client';
 
-const execFileAsync = promisify(execFile);
-
-const PORT = 4201;
+const reservation = Bun.listen({ hostname: '127.0.0.1', port: 0, socket: { data() {} } });
+const PORT = reservation.port;
+reservation.stop();
 const BASE_URL = `http://127.0.0.1:${PORT}`;
 const SERVER_ENTRY = path.resolve(import.meta.dirname, '../../apps/server/src/main.ts');
 const CLI_ENTRY = path.resolve(import.meta.dirname, '../../apps/cli/src/index.ts');
 const BUZZ_SEND_SCRIPT = path.resolve(import.meta.dirname, '../../scripts/buzz-send.mjs');
 const AUTH_SECRET = 'e2e-phase3-secret-0123456789abcdef0123456789';
 
-async function waitForServerReady(url: string, timeoutMs = 15000): Promise<void> {
+async function waitForServerReady(url: string, timeoutMs = 45000): Promise<void> {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     try {
@@ -75,6 +75,12 @@ describe('Phase 3 E2E: Bot Convergence, Strict Bot API Key, CLI Device Auth, and
   let cliConfigDir = '';
   let serverProc: ChildProcess | null = null;
 
+  async function runCommand(command: string, args: string[], options: { env?: NodeJS.ProcessEnv; cwd?: string }) {
+    const file = path.join(tempDir, crypto.randomUUID() + '.stdout');
+    const child = Bun.spawn([command, ...args], { ...options, stdout: Bun.file(file), stderr: 'inherit' });
+    assert.equal(await child.exited, 0, command + ' exited unsuccessfully');
+    return { stdout: fs.readFileSync(file, 'utf8') };
+  }
 
   before(async () => {
     pushRelay = Bun.serve({ hostname: '127.0.0.1', port: 0, async fetch(request) {
@@ -92,6 +98,7 @@ describe('Phase 3 E2E: Bot Convergence, Strict Bot API Key, CLI Device Auth, and
       env: {
         ...process.env,
         PORT: String(PORT),
+        STATIC_DIR: path.join(tempDir, 'web'),
         EXPO_PUSH_ENDPOINT: pushRelay.url.href,
         CLOUDFLARE_ACCOUNT_ID: '', CLOUDFLARE_EMAIL_API_TOKEN: '', EMAIL_FROM: '',
         DATABASE_URL: '',
@@ -101,7 +108,7 @@ describe('Phase 3 E2E: Bot Convergence, Strict Bot API Key, CLI Device Auth, and
         BUZZ_BOT_TOKEN: '',
         BOTMUX_ENDPOINT: 'http://127.0.0.1:19998',
       },
-      stdio: ['ignore', 'ignore', 'pipe'],
+      stdio: ['ignore', 'ignore', 'inherit'],
     });
     await waitForServerReady(BASE_URL);
   });
@@ -209,7 +216,7 @@ describe('Phase 3 E2E: Bot Convergence, Strict Bot API Key, CLI Device Auth, and
     );
 
     // (e) scripts/buzz-send.mjs works with BUBAI_BOT_TOKEN=bot_...
-    const { stdout } = await execFileAsync(
+    const { stdout } = await runCommand(
       'node',
       [
         BUZZ_SEND_SCRIPT,
@@ -235,7 +242,7 @@ describe('Phase 3 E2E: Bot Convergence, Strict Bot API Key, CLI Device Auth, and
     assert.equal(sent.channelId, general.id);
   });
 
-  it('2. CLI Device Authorization: `bubai login` requests device code, approves via Better Auth /device/approve, saves Bearer token, and runs authenticated `bubai status`', async () => {
+  it('2. CLI Device Authorization: `bubai login` requests device code, opens the printed URL and approves in Chrome, saves Bearer token, and runs authenticated `bubai status`', async () => {
     const bob = await signUpAndCreateOrg(
       'phase3-bob@example.com',
       'Bob CLI',
@@ -243,93 +250,58 @@ describe('Phase 3 E2E: Bot Convergence, Strict Bot API Key, CLI Device Auth, and
       'cli-team',
     );
 
+    await runCommand('node', ['node_modules/vite/bin/vite.js', 'build', '--outDir', path.join(tempDir, 'web')], {
+      cwd: path.resolve(import.meta.dirname, '../../apps/web'),
+      env: { ...process.env, VITE_SERVER_URL: '' },
+    });
     // Spawn `bun apps/cli/src/index.ts login --server <BASE_URL> --json`
-    const loginProc = spawn(
-      'bun',
-      [CLI_ENTRY, 'login', '--server', BASE_URL, '--json'],
-      {
-        env: {
-          ...process.env,
-          BUBAI_CONFIG_DIR: cliConfigDir,
-        },
-        stdio: ['ignore', 'pipe', 'pipe'],
-      },
-    );
-
-    let loginStdout = '';
-    let loginStderr = '';
-    const userCodePromise = new Promise<string>((resolve, reject) => {
-      const timer = setTimeout(() => {
-        reject(new Error(`Timed out waiting for device code from CLI. stdout=${loginStdout} stderr=${loginStderr}`));
-      }, 10000);
-
-      const inspect = (chunk: Buffer) => {
-        loginStdout += String(chunk);
-        const lines = loginStdout.split('\n').filter(Boolean);
-        for (const line of lines) {
-          try {
-            const parsed = JSON.parse(line) as { event?: string; userCode?: string; user_code?: string };
-            const code = parsed.userCode || parsed.user_code;
-            if (parsed.event === 'device_code' && code) {
-              clearTimeout(timer);
-              resolve(code);
-              return;
-            }
-          } catch {
-            // ignore non-json lines
+    const loginOutput = path.join(tempDir, 'login.jsonl');
+    const loginProc = Bun.spawn(['bun', CLI_ENTRY, 'login', '--server', BASE_URL, '--json'], {
+      env: { ...process.env, BUBAI_CONFIG_DIR: cliConfigDir },
+      stdout: Bun.file(loginOutput), stderr: 'inherit', timeout: 45000,
+    });
+    let chrome: ChildProcess | undefined;
+    let browser: CdpSession | undefined;
+    try {
+      let approvalUrl: string | undefined;
+      let userCode: string | undefined;
+      for (let i = 0; i < 100 && !approvalUrl && loginProc.exitCode === null; i++) {
+        const output = fs.readFileSync(loginOutput, 'utf8');
+        if (output.includes('\n')) {
+          const event = JSON.parse(output.split('\n')[0]);
+          if (event.event === 'device_code') {
+            approvalUrl = event.verificationUriComplete;
+            userCode = event.userCode;
           }
         }
-      };
-      loginProc.stdout?.on('data', inspect);
-      loginProc.stderr?.on('data', (chunk) => {
-        loginStderr += String(chunk);
-      });
-      loginProc.on('exit', (code) => {
-        clearTimeout(timer);
-        if (code !== 0) {
-          reject(new Error(`CLI login exited early (${code}): stdout=${loginStdout} stderr=${loginStderr}`));
-        }
-      });
-    });
-
-    const userCode = await userCodePromise;
-    assert.ok(userCode.length >= 4, `Expected valid userCode, got ${userCode}`);
-
-    // Claim/verify then approve the device code as Bob (same two-step flow Web /device page calls)
-    const verifyRes = await fetch(
-      `${BASE_URL}/api/auth/device?user_code=${encodeURIComponent(userCode)}`,
-      {
-        headers: {
-          Authorization: `Bearer ${bob.token}`,
-          Origin: 'http://localhost:5173',
-        },
-      },
-    );
-    assert.equal(verifyRes.status, 200, `device verify failed: ${await verifyRes.clone().text()}`);
-
-    const approveRes = await fetch(`${BASE_URL}/api/auth/device/approve`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: `Bearer ${bob.token}`,
-        Origin: 'http://localhost:5173',
-      },
-      body: JSON.stringify({ userCode }),
-    });
-    assert.equal(approveRes.status, 200, `device approve failed: ${await approveRes.clone().text()}`);
-
-    // Wait for CLI login process to finish polling and save config
-    const exitCode = await new Promise<number | null>((resolve, reject) => {
-      const timer = setTimeout(() => {
-        loginProc.kill('SIGKILL');
-        reject(new Error(`CLI login did not finish after approval. stdout=${loginStdout} stderr=${loginStderr}`));
-      }, 15000);
-      loginProc.on('exit', (code) => {
-        clearTimeout(timer);
-        resolve(code);
-      });
-    });
-    assert.equal(exitCode, 0, `CLI login failed: stderr=${loginStderr}`);
+        if (!approvalUrl) await Bun.sleep(100);
+      }
+      assert.ok(approvalUrl && userCode, 'CLI must print an approval link and code');
+      assert.equal(new URL(approvalUrl).origin, BASE_URL);
+      const binary = findChromeBinary();
+      assert.ok(binary, 'Chrome is required for device approval');
+      const profile = path.join(tempDir, 'chrome');
+      chrome = spawn(binary, ['--headless=new', '--remote-debugging-port=0', '--no-first-run',
+        '--user-data-dir=' + profile, 'about:blank'], { stdio: 'ignore' });
+      const portFile = path.join(profile, 'DevToolsActivePort');
+      for (let i = 0; i < 100 && !fs.existsSync(portFile); i++) await Bun.sleep(100);
+      browser = await CdpSession.connect(Number(fs.readFileSync(portFile, 'utf8').split('\n')[0]));
+      const cookie = bob.cookie.indexOf('=');
+      const installed = await browser.send('Network.setCookie', { url: BASE_URL,
+        name: bob.cookie.slice(0, cookie), value: bob.cookie.slice(cookie + 1), path: '/' });
+      assert.ok(installed.success);
+      await browser.send('Page.navigate', { url: approvalUrl });
+      await browser.waitFor(() => browser!.eval(
+        `document.querySelector('[data-device-code-input]')?.value === ${JSON.stringify(userCode)}`,
+      ));
+      await browser.clickElement('[data-auth-action="approve-device"]');
+      await browser.waitFor(() => browser!.eval(`Boolean(document.querySelector('[data-device-outcome="approved"]'))`));
+      assert.equal(await loginProc.exited, 0);
+    } finally {
+      browser?.close();
+      chrome?.kill();
+      if (loginProc.exitCode === null) loginProc.kill();
+    }
 
     // Verify token was saved in config.json and `bubai status` succeeds against BUBAI_AUTH_REQUIRED=true
     const savedConfig = JSON.parse(fs.readFileSync(path.join(cliConfigDir, 'config.json'), 'utf8')) as {
@@ -348,7 +320,7 @@ describe('Phase 3 E2E: Bot Convergence, Strict Bot API Key, CLI Device Auth, and
         BUZZ_BOT_TOKEN: '',
       },
     };
-    const { stdout: statusOut } = await execFileAsync('bun', [CLI_ENTRY, 'status', '--json'], statusOptions);
+    const { stdout: statusOut } = await runCommand('bun', [CLI_ENTRY, 'status', '--json'], statusOptions);
     const statusJson = JSON.parse(statusOut) as {
       ok: boolean;
       serverUrl: string;
@@ -361,7 +333,7 @@ describe('Phase 3 E2E: Bot Convergence, Strict Bot API Key, CLI Device Auth, and
 
     const activeAgents = statusJson.agents.filter((agent) => !agent.archived);
     const onlineAgents = activeAgents.filter((agent) => agent.status === 'online').length;
-    const { stdout: summaryOut } = await execFileAsync('bun', [CLI_ENTRY, 'status'], statusOptions);
+    const { stdout: summaryOut } = await runCommand('bun', [CLI_ENTRY, 'status'], statusOptions);
     assert.deepEqual(summaryOut.trim().split('\n'), [
       'Local bridge: stopped',
       `Server: ${BASE_URL} (reachable)`,
@@ -426,7 +398,7 @@ describe('Phase 3 E2E: Bot Convergence, Strict Bot API Key, CLI Device Auth, and
     assert.ok(pwSession.token);
     assert.equal(pwSession.user.email, 'phase3-alice@example.com');
   });
-  it('mobile workspace owners invite, accept, manage and remove a member', async () => {
+  it('mobile service integration: workspace owners invite, accept, manage and remove a member', async () => {
     const mobile = await import('../../apps/mobile/src/services/auth');
     const owner = await signUpAndCreateOrg('native-owner@example.test', 'Native Owner', 'Native Team', 'native-team');
     const deviceResponse = await fetch(BASE_URL + '/api/auth/device/code', {

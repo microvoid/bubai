@@ -296,7 +296,7 @@ describe('E2E: BubaiCLI + Unified SDK + AgentUser + Botmux Bridge', () => {
     fakeBotmuxUrl = `http://127.0.0.1:${fakeBotmux.port}`;
 
     // 2. Start real BubAI Server with BOTMUX_DISABLED=true (zero direct Botmux coupling!)
-    serverProc = spawn('bun', ['run', SERVER_ENTRY], {
+    serverProc = spawn(process.execPath, [SERVER_ENTRY], {
       cwd: tmpDataDir,
       env: {
         ...process.env,

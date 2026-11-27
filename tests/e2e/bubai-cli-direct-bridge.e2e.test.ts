@@ -53,7 +53,7 @@ if (message.includes('hang')) {
 `;
 
 for (const cli of ['codex', 'claude']) {
-  test(`direct ${cli} daemon handles progress, resume, ordering, failure and restart`, async () => {
+  test(`direct ${cli} executable fixture handles progress, resume, ordering, failure and restart`, async () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'bub-direct-'));
     const bundle = path.join(dir, 'bub.mjs');
     execFileSync(path.join(root, 'apps/cli/node_modules/.bin/esbuild'), [
@@ -76,7 +76,7 @@ for (const cli of ['codex', 'claude']) {
       BUBAI_CONFIG_DIR: dir,
       BOTMUX_ENDPOINT: 'http://127.0.0.1:1',
     };
-    const server = Bun.spawn(['bun', 'run', path.join(root, 'apps/server/src/main.ts')], {
+    const server = Bun.spawn([process.execPath, path.join(root, 'apps/server/src/main.ts')], {
       cwd: dir,
       env: {
         ...env,

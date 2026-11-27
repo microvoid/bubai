@@ -11,6 +11,8 @@
     "typecheck": "turbo run typecheck",
     "test": "bun test packages/botmux-client/src packages/chat-client/src apps/server/src",
     "test:e2e": "bun test --timeout 30000 ./tests/e2e",
+    "test:e2e:relay": "BUBAI_LIVE_RELAY=1 bun test tests/e2e/live-agent-relay.e2e.test.ts",
+    "test:e2e:direct": "BUBAI_LIVE_DIRECT=${BUBAI_LIVE_DIRECT:-codex,claude} bun test tests/e2e/live-agent-relay.e2e.test.ts",
     "buzz:send": "node scripts/buzz-send.mjs",
     "format": "prettier --write \"**/*.{ts,tsx,js,json,md}\""
   },

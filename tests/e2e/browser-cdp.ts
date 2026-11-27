@@ -91,6 +91,21 @@ export class CdpSession {
     throw new Error('Timed out waiting for condition in E2E');
   }
 
+  async clickElement(selector: string): Promise<void> {
+    const point = await this.waitFor(() => this.eval<{ x: number; y: number } | null>(`(() => {
+      const el = document.querySelector(${JSON.stringify(selector)});
+      if (!el || el.disabled) return null;
+      el.scrollIntoView({ block: 'nearest' });
+      const rect = el.getBoundingClientRect();
+      const x = rect.left + rect.width / 2;
+      const y = rect.top + rect.height / 2;
+      return el.contains(document.elementFromPoint(x, y)) ? { x, y } : null;
+    })()`));
+    for (const type of ['mousePressed', 'mouseReleased']) {
+      await this.send('Input.dispatchMouseEvent', { type, ...point, button: 'left', clickCount: 1 });
+    }
+  }
+
   async clearComposer(): Promise<void> {
     const rect = await this.eval<{ x: number; y: number } | null>(`(() => {
       const ed = document.querySelector('.spike-editor');

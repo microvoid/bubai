@@ -3,10 +3,13 @@ import { spawn, type ChildProcess } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { type TriggerRequest, validateTriggerRequest } from '../../packages/botmux-client/src/index.ts';
 import { BubaiClient, type ChatMessage } from '../../packages/chat-client/src/index.ts';
 
 const SERVER_ENTRY = path.resolve(import.meta.dir, '../../apps/server/src/main.ts');
 const CLI_ENTRY = path.resolve(import.meta.dir, '../../apps/cli/src/index.ts');
+const BOT_ID = 'e2e_botmux_agent_1';
+const ANTIGRAVITY_BOT_ID = 'e2e_antigravity_agent';
 
 async function waitForHttp(url: string, timeoutMs = 20_000): Promise<void> {
   const deadline = Date.now() + timeoutMs;
@@ -72,9 +75,115 @@ describe('E2E: BubaiCLI + Unified SDK + AgentUser + Botmux Bridge', () => {
   const triggerRecords: Array<{
     triggerId: string;
     sessionId: string;
-    botId: string;
     prompt: string;
+    request: TriggerRequest;
+    key?: string;
   }> = [];
+  const triggerRequests: Array<{ prompt: string; request: TriggerRequest }> = [];
+  const polledTriggerIds = new Set<string>();
+  const runningPrompts = new Set<string>();
+  const heldTriggerAcks = new Map<string, Promise<void>>();
+  let legacyBotmux = false;
+
+  function launchBridge(channelId: string, configDir = tmpConfigDir, botId = BOT_ID) {
+    bridgeProc = Bun.spawn(
+      [
+        process.execPath,
+        CLI_ENTRY,
+        'bridge',
+        'botmux',
+        '--server',
+        serverUrl,
+        '--token',
+        'e2e-cli-secret-token',
+        '--botmux',
+        fakeBotmuxUrl,
+        '--botmux-token',
+        'fake-e2e-botmux-token',
+        '--bots',
+        botId,
+        '--channel',
+        channelId,
+        '--auto-reply',
+        '--poll-ms',
+        '100',
+      ],
+      {
+        env: { ...process.env, HOME: configDir, BUBAI_CONFIG_DIR: configDir },
+        stdout: Bun.file(path.join(configDir, 'bridge-out.log')),
+        stderr: Bun.file(path.join(configDir, 'bridge-err.log')),
+      },
+    );
+  }
+
+  async function stopBridge(signal: NodeJS.Signals = 'SIGTERM') {
+    if (!bridgeProc) return;
+    const proc = bridgeProc;
+    bridgeProc = null;
+    proc.kill(signal);
+    await proc.exited;
+  }
+
+  function waitForBridge(sdk: BubaiClient, status: 'online' | 'offline', botId = BOT_ID) {
+    return waitForCondition(async () => {
+      const boot = await sdk.bootstrap('u-owner');
+      return boot.participants.find((p) => p.role === 'agent' && p.id === botId && p.status === status);
+    }, `Botmux AgentUser ${status}`);
+  }
+
+  function waitForReply(
+    sdk: BubaiClient,
+    channelId: string,
+    status: 'running' | 'completed' | 'failed',
+    messageId?: string,
+  ) {
+    return waitForCondition(async () => {
+      const { messages } = await sdk.getChannelMessages(channelId);
+      return messages.find(
+        (m) => m.senderRole === 'agent' && m.card?.status === status &&
+          (messageId === undefined || m.id === messageId),
+      );
+    }, `Botmux reply ${status}`);
+  }
+
+  async function withRecoveryBridge(
+    name: string,
+    run: (fixture: {
+      sdk: BubaiClient;
+      channelId: string;
+      homeDir: string;
+      send: (content: string) => void;
+      relaunch: () => void;
+    }) => Promise<void>,
+    botId = BOT_ID,
+  ) {
+    const sdk = new BubaiClient({ baseUrl: serverUrl });
+    const { channel } = await sdk.createChannel({ name, userId: 'u-owner' });
+    const configDir = fs.mkdtempSync(path.join(tmpConfigDir, 'bridge-recovery-'));
+    const relaunch = () => launchBridge(channel.id, configDir, botId);
+    let humanWsOpen = false;
+    const humanWs = sdk.connectWebSocket({
+      userId: 'u-owner',
+      onStateChange: (state) => { humanWsOpen = state === 'open'; },
+    });
+    const send = (content: string) => {
+      expect(humanWs.send({
+        type: 'message.send',
+        payload: { channelId: channel.id, senderId: 'u-owner', content },
+      })).toBe(true);
+    };
+
+    try {
+      relaunch();
+      await waitForBridge(sdk, 'online', botId);
+      await waitForCondition(async () => humanWsOpen, 'Human WebSocket open');
+      await run({ sdk, channelId: channel.id, homeDir: configDir, send, relaunch });
+    } finally {
+      humanWs.close();
+      await stopBridge();
+      await waitForBridge(sdk, 'offline', botId);
+    }
+  }
 
   beforeAll(async () => {
     tmpDataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'bubai-cli-e2e-db-'));
@@ -89,9 +198,16 @@ describe('E2E: BubaiCLI + Unified SDK + AgentUser + Botmux Bridge', () => {
           return Response.json({
             bots: [
               {
-                larkAppId: 'e2e_botmux_agent_1',
+                larkAppId: BOT_ID,
                 botName: 'E2E Botmux Agent',
                 cliId: 'claude',
+                online: true,
+                workingDir: '/tmp/e2e-botmux-repo',
+              },
+              {
+                larkAppId: ANTIGRAVITY_BOT_ID,
+                botName: 'E2E Antigravity Agent',
+                cliId: 'antigravity',
                 online: true,
                 workingDir: '/tmp/e2e-botmux-repo',
               },
@@ -99,23 +215,56 @@ describe('E2E: BubaiCLI + Unified SDK + AgentUser + Botmux Bridge', () => {
           });
         }
         if (url.pathname === '/api/sessions' && req.method === 'GET') {
-          return Response.json({ sessions: [] });
+          const sessions = triggerRecords
+            .filter((record) => record.request.target.botId === ANTIGRAVITY_BOT_ID)
+            .map((record) => ({
+              sessionId: record.sessionId,
+              larkAppId: ANTIGRAVITY_BOT_ID,
+              cliId: 'antigravity',
+              status: 'idle',
+              backendType: 'tmux',
+              queued: false,
+              tuiPromptActive: false,
+            }));
+          return Response.json({ sessions });
         }
         if (url.pathname === '/api/trigger' && req.method === 'POST') {
-          const body = (await req.json()) as {
-            target?: { larkAppId?: string; sessionId?: string };
-            envelope?: { payload?: { message?: string } };
-          };
-          const botId = body.target?.larkAppId || 'e2e_botmux_agent_1';
-          const sessionId = body.target?.sessionId || `sess_e2e_${triggerRecords.length + 1}`;
-          const triggerId = `trg_e2e_${triggerRecords.length + 1}`;
-          const prompt = body.envelope?.payload?.message || '';
-          triggerRecords.push({ triggerId, sessionId, botId, prompt });
+          const request = (await req.json()) as TriggerRequest;
+          const { idempotencyKey, turnIdempotencyKey, dryRun } = request.options ?? {};
+          if (dryRun) {
+            if (!legacyBotmux) {
+              const validation = validateTriggerRequest(request);
+              if (!validation.ok) return Response.json(validation.body, { status: validation.status });
+            }
+            return Response.json({ ok: true, action: 'dry_run' });
+          }
+
+          const botId = request.target.botId || BOT_ID;
+          const prompt = (request.envelope.payload as { message?: string } | undefined)?.message || '';
+          triggerRequests.push({ prompt, request });
+          const key = turnIdempotencyKey
+            ? JSON.stringify([botId, request.target.sessionId, turnIdempotencyKey])
+            : idempotencyKey ? JSON.stringify([botId, idempotencyKey]) : undefined;
+          let record = !legacyBotmux && key ? triggerRecords.find((turn) => turn.key === key) : undefined;
+          if (record && !Bun.deepEquals(record.request, request)) {
+            return Response.json({ ok: false, errorCode: 'idempotency_conflict' }, { status: 409 });
+          }
+          if (!record) {
+            record = {
+              triggerId: `trg_e2e_${triggerRecords.length + 1}`,
+              sessionId: request.target.sessionId || `sess_e2e_${triggerRecords.length + 1}`,
+              prompt,
+              request,
+              key,
+            };
+            triggerRecords.push(record);
+            await heldTriggerAcks.get(prompt);
+          }
           return Response.json({
             ok: true,
             accepted: true,
-            triggerId,
-            target: { sessionId, larkAppId: botId },
+            triggerId: record.triggerId,
+            target: { sessionId: record.sessionId, larkAppId: botId },
           });
         }
         const pollMatch = url.pathname.match(/^\/api\/sessions\/([^/]+)\/trigger-result$/);
@@ -127,6 +276,10 @@ describe('E2E: BubaiCLI + Unified SDK + AgentUser + Botmux Bridge', () => {
           );
           if (!rec) {
             return Response.json({ ok: false, error: 'unknown_session' }, { status: 404 });
+          }
+          polledTriggerIds.add(rec.triggerId);
+          if (runningPrompts.has(rec.prompt)) {
+            return Response.json({ ok: true, state: 'running', triggerId: rec.triggerId });
           }
           return Response.json({
             ok: true,
@@ -160,10 +313,7 @@ describe('E2E: BubaiCLI + Unified SDK + AgentUser + Botmux Bridge', () => {
   }, 25_000);
 
   afterAll(async () => {
-    if (bridgeProc) {
-      bridgeProc.kill('SIGTERM');
-      bridgeProc = null;
-    }
+    await stopBridge();
     if (serverProc) {
       serverProc.kill('SIGTERM');
       serverProc = null;
@@ -269,43 +419,10 @@ describe('E2E: BubaiCLI + Unified SDK + AgentUser + Botmux Bridge', () => {
     });
 
     // Launch real `bubai bridge botmux` subprocess joining `cli-bridge-room` with autoReply
-    const bridgeOutFile = path.join(tmpConfigDir, 'bridge-out.log');
-    const bridgeErrFile = path.join(tmpConfigDir, 'bridge-err.log');
-    bridgeProc = Bun.spawn(
-      [
-        process.execPath,
-        CLI_ENTRY,
-        'bridge',
-        'botmux',
-        '--server',
-        serverUrl,
-        '--token',
-        'e2e-cli-secret-token',
-        '--botmux',
-        fakeBotmuxUrl,
-        '--botmux-token',
-        'fake-e2e-botmux-token',
-        '--channel',
-        channel.id,
-        '--auto-reply',
-        '--poll-ms',
-        '100',
-      ],
-      {
-        env: { ...process.env, BUBAI_CONFIG_DIR: tmpConfigDir },
-        stdout: Bun.file(bridgeOutFile),
-        stderr: Bun.file(bridgeErrFile),
-      },
-    );
+    launchBridge(channel.id);
 
     // Wait for AgentUser to appear online in BubAI
-    const onlineAgent = await waitForCondition(async () => {
-      const boot = await sdk.bootstrap('u-owner');
-      const found = boot.participants.find(
-        (p) => p.role === 'agent' && p.id === 'e2e_botmux_agent_1' && p.status === 'online',
-      );
-      return found ?? null;
-    }, `Botmux AgentUser online via BubaiCLI bridge`);
+    const onlineAgent = await waitForBridge(sdk, 'online');
     expect(onlineAgent.name).toBe('E2E Botmux Agent');
 
     // Connect as Human via the SAME unified BubaiClient SDK (`/ws`)
@@ -377,17 +494,8 @@ describe('E2E: BubaiCLI + Unified SDK + AgentUser + Botmux Bridge', () => {
       expect(receivedUpdates.length).toBeGreaterThan(0);
 
       // Case 4: Kill BubaiCLI bridge -> AgentUser stays in BubAI as offline (does NOT vanish)
-      bridgeProc.kill('SIGTERM');
-      bridgeProc = null;
-
-      const offlineAgent = await waitForCondition(async () => {
-        const boot = await sdk.bootstrap('u-owner');
-        return (
-          boot.participants.find(
-            (p) => p.role === 'agent' && p.id === 'e2e_botmux_agent_1' && p.status === 'offline',
-          ) ?? null
-        );
-      }, 'AgentUser persists as offline after CLI disconnect');
+      await stopBridge();
+      const offlineAgent = await waitForBridge(sdk, 'offline');
       expect(offlineAgent.name).toBe('E2E Botmux Agent');
 
       // Sending @mention while offline produces a clean dispatch_failed card instead of hanging
@@ -414,4 +522,298 @@ describe('E2E: BubaiCLI + Unified SDK + AgentUser + Botmux Bridge', () => {
       humanWs.close();
     }
   });
+
+  test('restarts the bridge and fills the original reply without reposting an accepted turn', async () => {
+    await withRecoveryBridge('cli-bridge-recover-accepted', async ({ sdk, channelId, send, relaunch }) => {
+      const prompt = 'finish this running turn while the bridge is offline';
+      runningPrompts.add(prompt);
+      try {
+        send(prompt);
+        const placeholder = await waitForReply(sdk, channelId, 'running');
+        const turn = await waitForCondition(
+          async () => triggerRecords.find((record) => record.prompt === prompt),
+          'Botmux accepted the turn',
+        );
+        await waitForCondition(async () => polledTriggerIds.has(turn.triggerId), 'Botmux replied running');
+
+        await stopBridge('SIGINT');
+        await waitForBridge(sdk, 'offline');
+        runningPrompts.delete(prompt);
+        relaunch();
+
+        const completed = await waitForReply(sdk, channelId, 'completed', placeholder.id);
+        expect(completed.content).toBe(`Botmux reply to: ${prompt}`);
+        expect(completed.adapterMeta?.triggerId).toBe(turn.triggerId);
+        expect(triggerRequests.filter((attempt) => attempt.prompt === prompt)).toHaveLength(1);
+      } finally {
+        runningPrompts.delete(prompt);
+      }
+    });
+  });
+
+  test('fills the original Antigravity reply from its local transcript while Botmux still reports running', async () => {
+    await withRecoveryBridge('cli-bridge-antigravity-result', async ({ sdk, channelId, homeDir, send }) => {
+      const prompt = 'return an answer through the local Antigravity transcript';
+      const answer = 'Verified local Antigravity answer';
+      runningPrompts.add(prompt);
+      try {
+        send(prompt);
+        const placeholder = await waitForReply(sdk, channelId, 'running');
+        expect(placeholder.senderId).toBe(ANTIGRAVITY_BOT_ID);
+        const turn = await waitForCondition(
+          async () => triggerRecords.find((record) => record.prompt === prompt),
+          'Botmux accepted the Antigravity turn',
+        );
+        await waitForCondition(async () => polledTriggerIds.has(turn.triggerId), 'Botmux still reports running');
+
+        const createdAt = new Date().toISOString();
+        function transcriptTurn(messageId: string, content: string) {
+          const event = {
+            triggerId: turn.triggerId,
+            source: turn.request.source,
+            envelope: {
+              format: 'json',
+              trusted: false,
+              payload: {
+                conversation: {
+                  channel: { id: channelId },
+                  outboundApi: {
+                    botId: ANTIGRAVITY_BOT_ID,
+                    channelId,
+                    placeholderMessageId: messageId,
+                  },
+                },
+              },
+            },
+            options: { asyncReturnSessionId: true },
+          };
+          return [{
+            type: 'USER_INPUT',
+            source: 'USER_EXPLICIT',
+            status: 'DONE',
+            created_at: createdAt,
+            content: [
+              '<USER_REQUEST>',
+              '<user_message>',
+              '<botmux_headless_request>',
+              '```json',
+              JSON.stringify(event),
+              '```',
+              '</botmux_headless_request>',
+              '</user_message>',
+              '</USER_REQUEST>',
+            ].join('\n'),
+          }, {
+            type: 'PLANNER_RESPONSE',
+            source: 'MODEL',
+            status: 'DONE',
+            created_at: createdAt,
+            content,
+          }];
+        }
+
+        const logDir = path.join(
+          homeDir, '.gemini', 'antigravity-cli', 'brain',
+          '706093e6-0317-4b9f-9905-7dccf5b73141', '.system_generated', 'logs',
+        );
+        fs.mkdirSync(logDir, { recursive: true });
+        const steps = [
+          ...transcriptTurn('46bc1534-83aa-48be-a4ca-81cd3f1cc8ca', 'Different reply card'),
+          ...transcriptTurn(placeholder.id, answer),
+        ];
+        fs.writeFileSync(
+          path.join(logDir, 'transcript_full.jsonl'),
+          `${steps.map((step) => JSON.stringify(step)).join('\n')}\n`,
+        );
+
+        const completed = await waitForReply(sdk, channelId, 'completed', placeholder.id);
+        expect(completed.content).toBe(answer);
+        expect(completed.adapterMeta?.sessionId).toBe(turn.sessionId);
+        expect(completed.adapterMeta?.triggerId).toBe(turn.triggerId);
+        expect(triggerRequests.filter((attempt) => attempt.prompt === prompt)).toHaveLength(1);
+      } finally {
+        runningPrompts.delete(prompt);
+      }
+    }, ANTIGRAVITY_BOT_ID);
+  }, 30_000);
+
+  test('streams live local tool progress through CLI bridge and preserves finalized steps on completion', async () => {
+    await withRecoveryBridge('cli-bridge-live-progress', async ({ sdk, channelId, homeDir, send }) => {
+      const prompt = 'stream tool progress while running through CLI bridge';
+      runningPrompts.add(prompt);
+      try {
+        send(prompt);
+        const placeholder = await waitForReply(sdk, channelId, 'running');
+        expect(placeholder.senderId).toBe(ANTIGRAVITY_BOT_ID);
+        const turn = await waitForCondition(
+          async () => triggerRecords.find((record) => record.prompt === prompt),
+          'Botmux accepted the progress turn',
+        );
+        await waitForCondition(async () => polledTriggerIds.has(turn.triggerId), 'Botmux replied running');
+
+        const createdAt = new Date().toISOString();
+        const event = {
+          triggerId: turn.triggerId,
+          source: turn.request.source,
+          envelope: {
+            format: 'json',
+            trusted: false,
+            payload: {
+              conversation: {
+                channel: { id: channelId },
+                outboundApi: {
+                  botId: ANTIGRAVITY_BOT_ID,
+                  channelId,
+                  placeholderMessageId: placeholder.id,
+                },
+              },
+            },
+          },
+          options: { asyncReturnSessionId: true },
+        };
+        const userInputStep = {
+          type: 'USER_INPUT',
+          source: 'USER_EXPLICIT',
+          status: 'DONE',
+          created_at: createdAt,
+          content: [
+            '<USER_REQUEST>',
+            '<user_message>',
+            '<botmux_headless_request>',
+            '```json',
+            JSON.stringify(event),
+            '```',
+            '</botmux_headless_request>',
+            '</user_message>',
+            '</USER_REQUEST>',
+          ].join('\n'),
+        };
+        const firstToolStep = {
+          type: 'PLANNER_RESPONSE',
+          source: 'MODEL',
+          status: 'RUNNING',
+          created_at: createdAt,
+          tool_calls: [
+            {
+              id: 'call-1',
+              name: 'default_api:run_command',
+              arguments: JSON.stringify({ toolSummary: 'Check bridge status', CommandLine: 'git status' }),
+            },
+          ],
+        };
+
+        const logDir = path.join(
+          homeDir, '.gemini', 'antigravity-cli', 'brain',
+          '817194f7-1428-4c0a-aa16-8eddf6c84252', '.system_generated', 'logs',
+        );
+        fs.mkdirSync(logDir, { recursive: true });
+        const logPath = path.join(logDir, 'transcript_full.jsonl');
+        fs.writeFileSync(
+          logPath,
+          `${[userInputStep, firstToolStep].map((step) => JSON.stringify(step)).join('\n')}\n`,
+        );
+
+        const liveCard = await waitForCondition(async () => {
+          const { messages } = await sdk.getChannelMessages(channelId);
+          const msg = messages.find((m) => m.id === placeholder.id);
+          return msg?.card?.status === 'running' && (msg.card.progress?.toolCount ?? 0) >= 1 ? msg : undefined;
+        }, 'Live tool progress pushed to running placeholder');
+        expect(liveCard.card?.progress?.activeLabel).toBe('Check bridge status');
+        expect(liveCard.card?.progress?.steps).toHaveLength(1);
+        expect(liveCard.card?.progress?.steps[0]?.kind).toBe('shell');
+        expect(liveCard.card?.progress?.steps[0]?.status).toBe('running');
+
+        const secondToolStep = {
+          type: 'PLANNER_RESPONSE',
+          source: 'MODEL',
+          status: 'DONE',
+          created_at: createdAt,
+          tool_calls: [
+            {
+              id: 'call-2',
+              name: 'default_api:read_file',
+              arguments: JSON.stringify({ Path: '/repo/apps/cli/src/bridge-botmux.ts' }),
+            },
+          ],
+        };
+        fs.writeFileSync(
+          logPath,
+          `${[userInputStep, { ...firstToolStep, status: 'DONE' }, secondToolStep].map((step) => JSON.stringify(step)).join('\n')}\n`,
+        );
+
+        runningPrompts.delete(prompt);
+        const completed = await waitForReply(sdk, channelId, 'completed', placeholder.id);
+        expect(completed.content).toBe(`Botmux reply to: ${prompt}`);
+        expect(completed.card?.progress?.toolCount).toBe(2);
+        expect(completed.card?.progress?.activeLabel).toBeUndefined();
+        expect(completed.card?.progress?.steps.map((s) => [s.kind, s.label, s.status])).toEqual([
+          ['shell', 'Check bridge status', 'done'],
+          ['read', '读取 bridge-botmux.ts', 'done'],
+        ]);
+      } finally {
+        runningPrompts.delete(prompt);
+      }
+    }, ANTIGRAVITY_BOT_ID);
+  }, 30_000);
+
+  for (const mode of ['fresh', 'follow-up', 'legacy'] as const) {
+    const testName = mode === 'legacy'
+      ? 'does not repeat a turn accepted by legacy Botmux after losing the response'
+      : `recovers a ${mode} turn whose Botmux acceptance response was lost`;
+    test(testName, async () => {
+      await withRecoveryBridge(`cli-bridge-lost-ack-${mode}`, async ({ sdk, channelId, send, relaunch }) => {
+        let existingSessionId: unknown;
+        if (mode === 'follow-up') {
+          send('open a session for the follow-up test');
+          const first = await waitForReply(sdk, channelId, 'completed');
+          existingSessionId = first.adapterMeta?.sessionId;
+          expect(existingSessionId).toBeString();
+        }
+
+        const prompt = `keep the original ${mode} turn across a lost response`;
+        const ack = Promise.withResolvers<void>();
+        heldTriggerAcks.set(prompt, ack.promise);
+        legacyBotmux = mode === 'legacy';
+        try {
+          send(prompt);
+          const placeholder = await waitForReply(sdk, channelId, 'running');
+          const turn = await waitForCondition(
+            async () => triggerRecords.find((record) => record.prompt === prompt),
+            'Botmux accepted the turn before sending its HTTP response',
+          );
+          expect(polledTriggerIds.has(turn.triggerId)).toBe(false);
+          expect(turn.request.target.sessionId).toBe(existingSessionId);
+          if (mode === 'follow-up') {
+            expect(turn.request.options?.turnIdempotencyKey).toBeString();
+          } else if (mode === 'fresh') {
+            expect(turn.request.options?.idempotencyKey).toBeString();
+          }
+
+          await stopBridge('SIGKILL');
+          await waitForBridge(sdk, 'offline');
+          ack.resolve();
+          relaunch();
+
+          if (mode === 'legacy') {
+            const failed = await waitForReply(sdk, channelId, 'failed', placeholder.id);
+            expect(failed.content).toContain('无法确认');
+            expect(triggerRequests.filter((attempt) => attempt.prompt === prompt)).toHaveLength(1);
+            expect(triggerRecords.filter((record) => record.prompt === prompt)).toHaveLength(1);
+            return;
+          }
+
+          const completed = await waitForReply(sdk, channelId, 'completed', placeholder.id);
+          expect(completed.content).toBe(`Botmux reply to: ${prompt}`);
+          expect(completed.adapterMeta?.triggerId).toBe(turn.triggerId);
+          expect(triggerRecords.filter((record) => record.prompt === prompt)).toHaveLength(1);
+          const retries = triggerRequests.filter((attempt) => attempt.prompt === prompt);
+          expect(retries.map((retry) => retry.request)).toEqual([turn.request, turn.request]);
+        } finally {
+          ack.resolve();
+          heldTriggerAcks.delete(prompt);
+          legacyBotmux = false;
+        }
+      });
+    });
+  }
 });

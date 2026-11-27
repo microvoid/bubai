@@ -3,6 +3,7 @@ import { BubaiClient } from '@buzz-botmux/chat-client';
 import { version } from '../package.json';
 import { loadCliConfig, saveCliConfig } from './config';
 import { startBotmuxBridge } from './bridge-botmux';
+import { listCommunities, resolveAndActivateCommunity } from './community';
 
 interface ParsedArgs {
   positionals: string[];
@@ -56,13 +57,15 @@ function printHelp() {
 
 Usage:
   bub --version
-  bub login [--server <url>] [--client-id <id>] [--json]
+  bub login [--server <url>] [--client-id <id>] [--community <name|slug|id>] [--json]
+  bub community list [--server <url>] [--token <token>] [--json]
+  bub community use <name|slug|id> [--server <url>] [--token <token>] [--json]
   bub config set --server <url> [--token <token>]
-  bub status [--server <url>] [--token <token>]
-  bub agent create --name <name> [--id <id>] [--external-id <ext>] [--channel <name|id>] [--auto-reply] [--issue-key]
+  bub status [--server <url>] [--token <token>] [--json]
+  bub agent create --name <name> [--id <id>] [--external-id <ext>] [--community <name|slug|id>] [--channel <name|id>] [--auto-reply] [--issue-key]
   bub agent list [--server <url>]
   bub agent join --agent <id> --channel <name|id> [--auto-reply]
-  bub bridge botmux [--server <url>] [--token <token>] [--botmux <url>] [--bots <id,id>] [--channel <name|id>] [--auto-reply]
+  bub bridge botmux [--server <url>] [--token <token>] [--botmux <url>] [--bots <id,id>] [--community <name|slug|id>] [--channel <name|id>] [--auto-reply]
   bub chat send --channel <name|id> --text <text> [--bot <agentId>] [--thread <threadId>]
 `);
 }
@@ -138,10 +141,43 @@ async function runDeviceLogin(serverUrl: string, flags: Record<string, string | 
 
     if (tokenRes.ok && tokenBody.access_token) {
       const next = saveCliConfig({ serverUrl: baseUrl, token: tokenBody.access_token });
+      const requestedCommunity = getStringFlag(flags, 'community');
+      let communityResult: Awaited<ReturnType<typeof resolveAndActivateCommunity>> | null = null;
+      try {
+        communityResult = await resolveAndActivateCommunity(
+          baseUrl,
+          tokenBody.access_token,
+          requestedCommunity,
+        );
+      } catch (err) {
+        if (requestedCommunity) throw err;
+      }
+
       if (jsonMode) {
-        console.log(JSON.stringify({ event: 'authenticated', ok: true, serverUrl: next.serverUrl }));
+        console.log(
+          JSON.stringify({
+            event: 'authenticated',
+            ok: true,
+            serverUrl: next.serverUrl,
+            ...(communityResult?.status === 'activated'
+              ? { community: communityResult.community }
+              : communityResult?.status === 'multiple'
+                ? { communities: communityResult.communities }
+                : {}),
+          }),
+        );
       } else {
         console.log(`Authenticated with ${next.serverUrl}. Token saved to CLI config.`);
+        if (communityResult?.status === 'activated') {
+          console.log(
+            `Active community: ${communityResult.community.name} (${communityResult.community.slug})`,
+          );
+        } else if (communityResult?.status === 'multiple') {
+          const list = communityResult.communities.map((c) => `${c.name} (${c.slug})`).join(', ');
+          console.log(
+            `Multiple communities found: ${list}. Run "bub community use <name|slug|id>" to select one.`,
+          );
+        }
       }
       return;
     }
@@ -222,11 +258,56 @@ async function main() {
     return;
   }
 
+  if (cmd === 'community' && sub === 'list') {
+    if (!token) {
+      throw new Error('Not authenticated. Run "bub login" first.');
+    }
+    const communities = await listCommunities(serverUrl, token);
+    if (flags.json) {
+      console.log(JSON.stringify({ ok: true, communities }, null, 2));
+    } else if (communities.length === 0) {
+      console.log('No communities found.');
+    } else {
+      for (const community of communities) {
+        console.log(`${community.name}\t${community.slug}\t${community.id}`);
+      }
+    }
+    return;
+  }
+
+  if (cmd === 'community' && sub === 'use') {
+    if (!token) {
+      throw new Error('Not authenticated. Run "bub login" first.');
+    }
+    const ref = positionals[2] || getStringFlag(flags, 'community');
+    if (!ref) {
+      console.error('Error: community name, slug, or id is required');
+      process.exit(1);
+    }
+    const result = await resolveAndActivateCommunity(serverUrl, token, ref);
+    if (result.status !== 'activated') {
+      throw new Error(`Failed to activate community "${ref}"`);
+    }
+    if (flags.json) {
+      console.log(JSON.stringify({ ok: true, community: result.community }, null, 2));
+    } else {
+      console.log(`Active community set to ${result.community.name} (${result.community.slug})`);
+    }
+    return;
+  }
+
   const sdk = new BubaiClient({ baseUrl: serverUrl, token });
 
   if (cmd === 'status') {
     const [instance, { agents }] = await Promise.all([sdk.getInstance(), sdk.listAgents()]);
-    console.log(JSON.stringify({ ok: true, serverUrl, instance, agents }, null, 2));
+    if (flags.json) {
+      console.log(JSON.stringify({ ok: true, serverUrl, instance, agents }, null, 2));
+    } else {
+      const activeAgents = agents.filter((agent) => !agent.archived);
+      const online = activeAgents.filter((agent) => agent.status === 'online').length;
+      console.log(`Server: ${sdk.baseUrl} (reachable)`);
+      console.log(`Agents: ${online} online, ${activeAgents.length - online} offline`);
+    }
     return;
   }
 
@@ -255,6 +336,7 @@ async function main() {
       webhookUrl: getStringFlag(flags, 'webhook-url'),
       webhookSecret: getStringFlag(flags, 'webhook-secret'),
       ...(isUuid ? { channelId: channelRef } : channelRef ? { channelName: channelRef } : {}),
+      ...(getStringFlag(flags, 'community') ? { community: getStringFlag(flags, 'community') } : {}),
       autoReply: Boolean(flags['auto-reply']),
       issueKey: Boolean(flags['issue-key']),
     });
@@ -312,6 +394,7 @@ async function main() {
       throw new Error('--bots requires a comma-separated list of Botmux bot IDs');
     }
     const channelRef = getStringFlag(flags, 'channel');
+    const community = getStringFlag(flags, 'community');
     const pollMsRaw = getStringFlag(flags, 'poll-ms');
     const pollMs = pollMsRaw ? Number(pollMsRaw) : undefined;
 
@@ -323,6 +406,7 @@ async function main() {
       botmuxToken,
       botIds,
       channelRef,
+      community,
       autoReply: flags['auto-reply'] !== undefined ? Boolean(flags['auto-reply']) : undefined,
       pollMs,
     });

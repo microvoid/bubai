@@ -82,7 +82,7 @@ flowchart LR
 | 命令 | 说明 |
 | :--- | :--- |
 | `bubai config set --server <url> [--token <token>]` | 保存 BubAI Server 地址与凭证到 `~/.bubai/config.json` |
-| `bubai status` | 检查 BubAI Server 连通性与已注册 Agent 列表 |
+| `bub status [--json]` | 检查 BubAI Server 连通性并汇总 Agent 在线和离线数量。加 `--json` 查看完整数据 |
 | `bubai agent create --name <name> [--id <id>] [--channel <ch>] [--auto-reply]` | 创建/认领持久化 `AgentUser` 并可选加入 Channel |
 | `bubai agent list` | 列出 BubAI 中所有持久化 Agent 及其在线/离线状态 |
 | `bubai agent join --agent <id> --channel <ch> [--auto-reply]` | 将指定 `AgentUser` 加入 Channel |

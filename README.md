@@ -41,6 +41,8 @@ bub login
 ```
 
 `bub` 默认连接 `https://bubai.app/`。使用 `--server` 或 `BUBAI_URL` 可指定其他服务地址。
+`bub status` 显示服务地址和 Agent 在线数量，`bub status --json` 输出完整详情。
+`bub bridge botmux` 会在连接中断后自动重连。进程退出后，用相同的配置目录、BubAI 地址和 Botmux 地址启动即可接续已收到的任务，并将结果填回原消息。恢复未确认的派单需要 Botmux 支持触发请求去重。
 
 ## Docker Compose 部署
 

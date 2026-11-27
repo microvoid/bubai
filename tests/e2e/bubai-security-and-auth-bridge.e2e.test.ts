@@ -538,4 +538,186 @@ describe('E2E: Security boundaries, strict auth bridge & idempotency regressions
       fs.rmSync(cliCfgDir, { recursive: true, force: true });
     }
   });
+
+  test('CLI device login auto-activates community and server /api/agents/provision resolves or guards missing activeOrganizationId', async () => {
+    const dave = await signUpAndGetToken(serverUrl, 'dave-community@example.com', 'Dave Community');
+
+    // Create Dave's first community (web session activates it)
+    const org1Res = await fetch(`${serverUrl}/api/auth/organization/create`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${dave.token}`,
+        Origin: 'http://localhost:5173',
+      },
+      body: JSON.stringify({ name: 'Dave Space', slug: 'dave-space' }),
+    });
+    expect(org1Res.status).toBe(200);
+    const org1 = (await org1Res.json()) as { id: string; slug: string; name: string };
+
+    const setActive1 = await fetch(`${serverUrl}/api/auth/organization/set-active`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${dave.token}`,
+        Origin: 'http://localhost:5173',
+      },
+      body: JSON.stringify({ organizationId: org1.id }),
+    });
+    expect(setActive1.status).toBe(200);
+
+    // 1. CLI device login auto-activates Dave's single community
+    const cliCfgDir = fs.mkdtempSync(path.join(os.tmpdir(), 'bubai-cli-community-'));
+    try {
+      const loginOutFile = path.join(cliCfgDir, 'login.stdout');
+      const loginErrFile = path.join(cliCfgDir, 'login.stderr');
+      const loginProc = Bun.spawn(
+        ['bun', path.resolve(import.meta.dir, '../../apps/cli/src/index.ts'), 'login', '--server', serverUrl, '--json'],
+        {
+          env: { ...process.env, BUBAI_CONFIG_DIR: cliCfgDir },
+          stdout: Bun.file(loginOutFile),
+          stderr: Bun.file(loginErrFile),
+        },
+      );
+
+      let userCode = '';
+      await waitForCondition(async () => {
+        if (!fs.existsSync(loginOutFile)) return false;
+        const lines = fs.readFileSync(loginOutFile, 'utf8').split('\n').filter(Boolean);
+        for (const line of lines) {
+          try {
+            const parsed = JSON.parse(line) as { event?: string; userCode?: string };
+            if (parsed.event === 'device_code' && parsed.userCode) {
+              userCode = parsed.userCode;
+              return true;
+            }
+          } catch {
+            // ignore
+          }
+        }
+        return false;
+      }, 'device_code output from bub login');
+
+      const verifyRes = await fetch(
+        `${serverUrl}/api/auth/device?user_code=${encodeURIComponent(userCode)}`,
+        { headers: { Authorization: `Bearer ${dave.token}`, Origin: 'http://localhost:5173' } },
+      );
+      expect(verifyRes.status).toBe(200);
+      const approveRes = await fetch(`${serverUrl}/api/auth/device/approve`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${dave.token}`,
+          Origin: 'http://localhost:5173',
+        },
+        body: JSON.stringify({ userCode }),
+      });
+      expect(approveRes.status).toBe(200);
+      expect(await loginProc.exited).toBe(0);
+
+      const loginLines = fs.readFileSync(loginOutFile, 'utf8').trim().split('\n');
+      const authEvent = JSON.parse(loginLines[loginLines.length - 1]!) as {
+        event: string;
+        community?: { id: string; slug: string };
+      };
+      expect(authEvent.event).toBe('authenticated');
+      expect(authEvent.community?.id).toBe(org1.id);
+
+      // Provisioning without --channel attaches the bot to org1 and makes it visible to Dave's web session
+      const createRes = await runCli(
+        ['agent', 'create', '--name', 'CLI Auto Org Bot', '--id', 'bot_cli_auto_org'],
+        { BUBAI_CONFIG_DIR: cliCfgDir, BUBAI_TOKEN: '', BUBAI_BOT_TOKEN: '', BUZZ_BOT_TOKEN: '' },
+      );
+      expect(createRes.code).toBe(0);
+      const createJson = JSON.parse(createRes.stdout) as { ok: boolean; organizationId?: string };
+      expect(createJson.ok).toBe(true);
+      expect(createJson.organizationId).toBe(org1.id);
+
+      const webAgentsRes = await fetch(`${serverUrl}/api/agents`, {
+        headers: { Authorization: `Bearer ${dave.token}` },
+      });
+      expect(webAgentsRes.status).toBe(200);
+      const webAgents = (await webAgentsRes.json()) as { agents: Array<{ id: string }> };
+      expect(webAgents.agents.some((a) => a.id === 'bot_cli_auto_org')).toBe(true);
+
+      // 2. Fresh session with activeOrganizationId = null (simulating older CLI 0.1.1 / 0.1.2):
+      const signInNoOrg = await fetch(`${serverUrl}/api/auth/sign-in/email`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Origin: 'http://localhost:5173' },
+        body: JSON.stringify({ email: 'dave-community@example.com', password: 'Password123!' }),
+      });
+      expect(signInNoOrg.status).toBe(200);
+      const noOrgToken = signInNoOrg.headers.get('set-auth-token')!;
+      expect(noOrgToken).toBeTruthy();
+
+      // Single community -> server auto-resolves org1
+      const fallbackProv = await fetch(`${serverUrl}/api/agents/provision`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${noOrgToken}` },
+        body: JSON.stringify({ agentId: 'bot_server_fallback_org', name: 'Server Fallback Bot' }),
+      });
+      expect(fallbackProv.status).toBe(201);
+      const fallbackJson = (await fallbackProv.json()) as { organizationId?: string };
+      expect(fallbackJson.organizationId).toBe(org1.id);
+
+      // 3. Create a second community -> ambiguous provision without active org returns 400
+      const org2Res = await fetch(`${serverUrl}/api/auth/organization/create`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${dave.token}`,
+          Origin: 'http://localhost:5173',
+        },
+        body: JSON.stringify({ name: 'Dave Space 2', slug: 'dave-space-2' }),
+      });
+      expect(org2Res.status).toBe(200);
+      const org2 = (await org2Res.json()) as { id: string; slug: string };
+
+      const ambiguousProv = await fetch(`${serverUrl}/api/agents/provision`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${noOrgToken}` },
+        body: JSON.stringify({ agentId: 'bot_ambiguous_org', name: 'Ambiguous Org Bot' }),
+      });
+      expect(ambiguousProv.status).toBe(400);
+
+      // Explicit community succeeds and attaches bot to org2
+      const explicitProv = await fetch(`${serverUrl}/api/agents/provision`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${noOrgToken}` },
+        body: JSON.stringify({
+          agentId: 'bot_explicit_org',
+          name: 'Explicit Org Bot',
+          community: 'dave-space-2',
+        }),
+      });
+      expect(explicitProv.status).toBe(201);
+      const explicitJson = (await explicitProv.json()) as { organizationId?: string };
+      expect(explicitJson.organizationId).toBe(org2.id);
+
+      // 4. `bub community list` and `bub community use` work end-to-end
+      const listRes = await runCli(['community', 'list', '--json'], {
+        BUBAI_CONFIG_DIR: cliCfgDir,
+        BUBAI_TOKEN: '',
+        BUBAI_BOT_TOKEN: '',
+        BUZZ_BOT_TOKEN: '',
+      });
+      expect(listRes.code).toBe(0);
+      const listJson = JSON.parse(listRes.stdout) as { ok: boolean; communities: Array<{ slug: string }> };
+      expect(listJson.ok).toBe(true);
+      expect(listJson.communities.some((c) => c.slug === 'dave-space-2')).toBe(true);
+
+      const useRes = await runCli(['community', 'use', 'dave-space-2', '--json'], {
+        BUBAI_CONFIG_DIR: cliCfgDir,
+        BUBAI_TOKEN: '',
+        BUBAI_BOT_TOKEN: '',
+        BUZZ_BOT_TOKEN: '',
+      });
+      expect(useRes.code).toBe(0);
+      const useJson = JSON.parse(useRes.stdout) as { ok: boolean; community: { id: string } };
+      expect(useJson.ok).toBe(true);
+      expect(useJson.community.id).toBe(org2.id);
+    } finally {
+      fs.rmSync(cliCfgDir, { recursive: true, force: true });
+    }
+  });
 });

@@ -21,6 +21,7 @@ import {
 import * as schema from './schema.js';
 
 export { botCredentials } from '@bubai/better-auth-bot/credentials';
+export { AUTH_DDL } from './ddl.js';
 export * as authSchema from './schema.js';
 
 type DrizzleDatabase = Parameters<typeof drizzleAdapter>[0];

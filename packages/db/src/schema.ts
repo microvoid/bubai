@@ -85,12 +85,12 @@ export const channels = pgTable(
     replyMode: text('reply_mode').notNull().default('follow_source'),
     archived: boolean('archived').notNull().default(false),
     dmKey: text('dm_key'),
+    organizationId: text('organization_id'),
     createdByUserId: text('created_by_user_id').references(() => users.id, {
       onDelete: 'set null',
     }),
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
   },
-  (t) => [unique().on(t.name), unique().on(t.dmKey)]
 );
 
 export const channelReads = pgTable(

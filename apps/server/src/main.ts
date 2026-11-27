@@ -14,6 +14,7 @@ import {
   users,
   channels,
   channelReads,
+  threadReads,
   channelMembers,
   messages,
   messageReactions,
@@ -28,6 +29,7 @@ import {
   lt,
   gt,
   isNull,
+  isNotNull,
   inArray,
   ilike,
   sql,
@@ -53,9 +55,18 @@ import {
   proxyTerminalHttpRequest,
   resolveTerminalUpstreamUrl,
 } from './terminal-proxy';
+import { AUTH_DDL } from '@bubai/auth';
 import { createUploadStorage } from './storage';
+import {
+  buildSessionHeaders,
+  createServerAuth,
+  resolveRequestIdentity,
+  resolveTrustedOrigins,
+  verifyBotRequest,
+} from './auth';
 
 const PORT = Number(process.env.PORT || 4000);
+const AUTH_REQUIRED = process.env.BUBAI_AUTH_REQUIRED === 'true';
 const BOTMUX_ENDPOINT = process.env.BOTMUX_ENDPOINT || 'http://127.0.0.1:7891';
 const BOTMUX_TOKEN = process.env.BOTMUX_TOKEN;
 const BUZZ_BOT_TOKEN = process.env.BUZZ_BOT_TOKEN;
@@ -115,12 +126,15 @@ const STATIC_DIR = process.env.STATIC_DIR?.trim()
   ? path.resolve(process.env.STATIC_DIR.trim())
   : '';
 
-const { db, driver: dbDriver } = await openChatDatabase();
+const { db, driver: dbDriver } = await openChatDatabase({ beforeDdl: AUTH_DDL });
+const auth = createServerAuth({ db, port: PORT });
 const botmux = new BotmuxClient(BOTMUX_ENDPOINT, BOTMUX_TOKEN);
 
 interface WsClientData {
   kind?: 'chat' | 'terminal-proxy';
   userId?: string;
+  organizationId?: string;
+  authenticated?: boolean;
   upstreamWsUrl?: string;
   upstreamWs?: WebSocket | null;
   pendingFrames?: Array<string | ArrayBuffer | Uint8Array>;
@@ -129,9 +143,12 @@ interface WsClientData {
 const clients = new Set<ServerWebSocket<WsClientData>>();
 let cachedBots: BotmuxBot[] = [];
 
-function broadcast(event: { type: string; payload: unknown }) {
+function broadcast(event: { type: string; payload: unknown }, targetOrgId?: string | null) {
   const payload = JSON.stringify(event);
   for (const ws of clients) {
+    if (targetOrgId && ws.data.organizationId && ws.data.organizationId !== targetOrgId) {
+      continue;
+    }
     ws.send(payload);
   }
 }
@@ -352,19 +369,58 @@ function channelVisibleTo(channel: { kind: string; dmKey: string | null }, userI
   return channel.kind !== 'dm' || !channel.dmKey || channel.dmKey.split('|').includes(`u:${userId}`);
 }
 
-async function listChannelsWithUnread(userId: string) {
-  const [channelRows, readRows] = await Promise.all([
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+function messageMentionsUser(content: string, userName?: string): boolean {
+  if (!content) return false;
+  if (/(?:^|[\s([{"'，。！？、])@(?:all|channel|here)(?=$|[\s)\]}"'，。！？、:：,.;!?])/i.test(content)) {
+    return true;
+  }
+  const cleanName = userName?.trim();
+  if (!cleanName) return false;
+  const pattern = new RegExp(
+    `(?:^|[\\s([{"'，。！？、])@${escapeRegExp(cleanName)}(?=$|[\\s)\\]}"'，。！？、:：,.;!?])`,
+    'i'
+  );
+  return pattern.test(content);
+}
+
+async function listChannelsWithUnread(userId: string, organizationId?: string | null) {
+  const [channelRows, readRows, threadReadRows, allMemberRows, userRows] = await Promise.all([
     db.select().from(channels).orderBy(asc(channels.createdAt)),
     db.select().from(channelReads).where(eq(channelReads.userId, userId)),
+    db.select().from(threadReads).where(eq(threadReads.userId, userId)),
+    db.select().from(channelMembers),
+    db.select({ id: users.id, name: users.name }).from(users).where(eq(users.id, userId)),
   ]);
+  const currentUserName = userRows[0]?.name;
   const readMap = new Map(readRows.map((r) => [r.channelId, r]));
+  const threadReadMap = new Map(threadReadRows.map((r) => [r.rootMessageId, r.lastReadAt]));
+  const memberIdsByChannel = new Map<string, Set<string>>();
+  for (const row of allMemberRows) {
+    let set = memberIdsByChannel.get(row.channelId);
+    if (!set) {
+      set = new Set<string>();
+      memberIdsByChannel.set(row.channelId, set);
+    }
+    if (row.userId) set.add(row.userId);
+    if (row.agentId) set.add(row.agentId);
+  }
 
   const visibleChannels = channelRows.filter((ch) => {
     if (!channelVisibleTo(ch, userId)) return false;
+    if (organizationId && ch.organizationId && ch.organizationId !== organizationId) {
+      return false;
+    }
     const readRow = readMap.get(ch.id);
     if (readRow?.hidden) return false;
     return true;
   });
+
+  const effectiveActivityAt = sql<Date>`CASE WHEN ${messages.card}->>'status' = 'completed' AND ${messages.updatedAt} IS NOT NULL THEN ${messages.updatedAt} ELSE ${messages.createdAt} END`;
+  const notOwnMessage = sql`(${messages.senderUserId} IS NULL OR ${messages.senderUserId} <> ${userId})`;
 
   return Promise.all(
     visibleChannels.map(async (ch) => {
@@ -375,19 +431,58 @@ async function listChannelsWithUnread(userId: string) {
             eq(messages.channelId, ch.id),
             isNull(messages.threadId),
             isNull(messages.deletedAt),
-            gt(messages.createdAt, lastRead)
+            notOwnMessage,
+            sql`${effectiveActivityAt} > ${lastRead}`
           )
         : and(
             eq(messages.channelId, ch.id),
             isNull(messages.threadId),
-            isNull(messages.deletedAt)
+            isNull(messages.deletedAt),
+            notOwnMessage
           );
-      const [row] = await db
-        .select({ count: sql<number>`count(*)::int` })
-        .from(messages)
-        .where(countWhere);
-      const rawUnread = Number(row?.count ?? 0);
+      const [unreadTopRows, replyActivityRows] = await Promise.all([
+        db
+          .select({ content: messages.content })
+          .from(messages)
+          .where(countWhere),
+        db
+          .select({
+            threadId: messages.threadId,
+            content: messages.content,
+            activityAt: effectiveActivityAt,
+          })
+          .from(messages)
+          .where(
+            and(
+              eq(messages.channelId, ch.id),
+              isNotNull(messages.threadId),
+              isNull(messages.deletedAt),
+              notOwnMessage
+            )
+          ),
+      ]);
+      const rawUnread = unreadTopRows.length;
+      let mentionCount = 0;
+      for (const topRow of unreadTopRows) {
+        if (messageMentionsUser(topRow.content, currentUserName)) {
+          mentionCount += 1;
+        }
+      }
+      let threadUnreadCount = 0;
+      for (const reply of replyActivityRows) {
+        if (!reply.threadId) continue;
+        const watermark = threadReadMap.get(reply.threadId) ?? lastRead;
+        const activityTime = new Date(reply.activityAt).getTime();
+        if (!watermark || activityTime > watermark.getTime()) {
+          threadUnreadCount += 1;
+          if (messageMentionsUser(reply.content, currentUserName)) {
+            mentionCount += 1;
+          }
+        }
+      }
       const markedUnread = Boolean(readRow?.markedUnread);
+      const memberIds = new Set(memberIdsByChannel.get(ch.id) ?? []);
+      if (ch.createdByUserId) memberIds.add(ch.createdByUserId);
       return {
         id: ch.id,
         name: ch.name,
@@ -397,7 +492,11 @@ async function listChannelsWithUnread(userId: string) {
         archived: Boolean(ch.archived),
         createdByUserId: ch.createdByUserId || undefined,
         dmKey: ch.dmKey || undefined,
+        organizationId: ch.organizationId || undefined,
+        memberIds: Array.from(memberIds),
         unreadCount: markedUnread ? Math.max(1, rawUnread) : rawUnread,
+        threadUnreadCount,
+        mentionCount,
         lastReadAt: lastRead ? lastRead.getTime() : undefined,
         muted: Boolean(readRow?.muted),
         markedUnread,
@@ -502,7 +601,8 @@ function formatMessageRow(
 
 async function formatMessagesWithReplyPreviews(
   channelId: string,
-  roots: (typeof messages.$inferSelect)[]
+  roots: (typeof messages.$inferSelect)[],
+  userId?: string
 ) {
   if (roots.length === 0) return [];
 
@@ -537,14 +637,55 @@ async function formatMessagesWithReplyPreviews(
     .orderBy(asc(latestReplies.createdAt), asc(latestReplies.id));
 
   const messageIds = [...rootIds, ...replyRows.map((row) => row.latestReplies.id)];
-  const [reactionMap, pinRows] = await Promise.all([
+  const effectiveActivityAt = sql<Date>`CASE WHEN ${messages.card}->>'status' = 'completed' AND ${messages.updatedAt} IS NOT NULL THEN ${messages.updatedAt} ELSE ${messages.createdAt} END`;
+  const [reactionMap, pinRows, threadReadRows, channelReadRow, unreadCandidates] = await Promise.all([
     getReactionsForMessages(messageIds),
     db
       .select({ messageId: messagePins.messageId })
       .from(messagePins)
       .where(and(eq(messagePins.channelId, channelId), inArray(messagePins.messageId, messageIds))),
+    userId
+      ? db
+          .select()
+          .from(threadReads)
+          .where(and(eq(threadReads.userId, userId), inArray(threadReads.rootMessageId, rootIds)))
+      : Promise.resolve([]),
+    userId
+      ? db
+          .select({ lastReadAt: channelReads.lastReadAt })
+          .from(channelReads)
+          .where(and(eq(channelReads.channelId, channelId), eq(channelReads.userId, userId)))
+      : Promise.resolve([]),
+    userId
+      ? db
+          .select({
+            threadId: messages.threadId,
+            activityAt: effectiveActivityAt,
+          })
+          .from(messages)
+          .where(
+            and(
+              eq(messages.channelId, channelId),
+              inArray(messages.threadId, rootIds),
+              isNull(messages.deletedAt),
+              sql`(${messages.senderUserId} IS NULL OR ${messages.senderUserId} <> ${userId})`
+            )
+          )
+      : Promise.resolve([]),
   ]);
   const pinned = new Set(pinRows.map((pin) => pin.messageId));
+  const threadReadMap = new Map(threadReadRows.map((r) => [r.rootMessageId, r.lastReadAt]));
+  const channelLastRead = channelReadRow[0]?.lastReadAt;
+  const unreadReplyCounts = new Map<string, number>();
+  for (const item of unreadCandidates) {
+    if (!item.threadId) continue;
+    const watermark = threadReadMap.get(item.threadId) ?? channelLastRead;
+    const activityTime = new Date(item.activityAt).getTime();
+    if (!watermark || activityTime > watermark.getTime()) {
+      unreadReplyCounts.set(item.threadId, (unreadReplyCounts.get(item.threadId) ?? 0) + 1);
+    }
+  }
+
   const summaries = new Map<
     string,
     { replyCount: number; replyPreviews: ReturnType<typeof formatMessageRow>[] }
@@ -564,9 +705,11 @@ async function formatMessagesWithReplyPreviews(
 
   return roots.map((root) => {
     const summary = summaries.get(root.id);
+    const unreadReplyCount = unreadReplyCounts.get(root.id) ?? 0;
     return {
       ...formatMessageRow(root, summary?.replyCount, reactionMap.get(root.id), pinned.has(root.id)),
       replyPreviews: summary?.replyPreviews ?? [],
+      ...(unreadReplyCount > 0 ? { unreadReplyCount } : {}),
     };
   });
 }
@@ -781,8 +924,92 @@ function scheduleBotmuxResultPoll() {
   }, BOTMUX_RESULT_POLL_MS);
 }
 
-const app = new Hono();
-app.use('*', cors());
+type AppEnv = {
+  Variables: {
+    authUserId: string | null;
+    authOrgId: string | null;
+  };
+};
+
+const trustedOriginSet = new Set(resolveTrustedOrigins({ port: PORT }));
+
+const app = new Hono<AppEnv>();
+app.use(
+  '*',
+  cors({
+    origin: (origin) => (origin && trustedOriginSet.has(origin) ? origin : ''),
+    credentials: true,
+    allowHeaders: ['Content-Type', 'Authorization'],
+    allowMethods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
+  }),
+);
+
+// Mount Better Auth endpoints directly (cookie + bearer + OTP + org + device + apiKey)
+app.on(['GET', 'POST'], '/api/auth/*', (c) => auth.handler(c.req.raw));
+
+// Resolve Better Auth session once per /api/* request (excluding public & bot endpoints)
+app.use('/api/*', async (c, next) => {
+  const pathname = new URL(c.req.url).pathname;
+  const isPublic =
+    pathname.startsWith('/api/auth/') ||
+    pathname === '/api/instance' ||
+    pathname.startsWith('/api/bot/') ||
+    (c.req.method === 'GET' && pathname.startsWith('/api/uploads/'));
+
+  if (isPublic) {
+    c.set('authUserId', null);
+    c.set('authOrgId', null);
+    return next();
+  }
+
+  const identity = await resolveRequestIdentity({
+    auth,
+    db,
+    headers: c.req.raw.headers,
+    authRequired: AUTH_REQUIRED,
+  });
+
+  if (!identity) {
+    return c.json({ error: 'Unauthorized' }, 401);
+  }
+
+  c.set('authUserId', identity.authenticated ? identity.userId : null);
+  c.set('authOrgId', identity.organizationId);
+  return next();
+});
+
+// Enforce Organization (Community) tenant isolation across all /api/channels/:channelId routes
+async function enforceChannelOrgAccess(
+  c: {
+    get: <K extends keyof AppEnv['Variables']>(key: K) => AppEnv['Variables'][K];
+    req: { param: (name: string) => string };
+    json: (data: unknown, status?: 403) => Response;
+  },
+  next: () => Promise<void>,
+) {
+  const orgId = c.get('authOrgId');
+  if (!orgId) return next();
+  const channelId = c.req.param('channelId');
+  if (!channelId || !/^[a-f\d]{8}(?:-[a-f\d]{4}){3}-[a-f\d]{12}$/i.test(channelId)) {
+    return next();
+  }
+  const [ch] = await db.select().from(channels).where(eq(channels.id, channelId));
+  if (ch && ch.organizationId && ch.organizationId !== orgId) {
+    return c.json({ error: 'Forbidden' }, 403);
+  }
+  return next();
+}
+app.use('/api/channels/:channelId', enforceChannelOrgAccess);
+app.use('/api/channels/:channelId/*', enforceChannelOrgAccess);
+
+function getRequestUserId(
+  c: { get: <K extends keyof AppEnv['Variables']>(key: K) => AppEnv['Variables'][K] },
+  fallback?: string | null,
+): string {
+  const authed = c.get('authUserId');
+  if (authed) return authed;
+  return fallback?.trim() || 'u-owner';
+}
 
 app.get('/health', async (c) => {
   const botmuxStatus = await botmux.checkHealth();
@@ -794,7 +1021,7 @@ app.get('/api/instance', async (c) => {
   return c.json({
     name: process.env.BUBAI_INSTANCE_NAME || 'Bubai',
     version: '0.1.0',
-    authRequired: false,
+    authRequired: AUTH_REQUIRED,
     publicUrl: process.env.PUBLIC_URL || undefined,
     botmux: {
       connected: botmuxStatus.connected,
@@ -809,10 +1036,11 @@ app.get('/api/instance', async (c) => {
 });
 
 app.get('/api/bootstrap', async (c) => {
-  const userId = c.req.query('userId') || 'u-owner';
+  const userId = getRequestUserId(c, c.req.query('userId'));
+  const organizationId = c.get('authOrgId');
   await syncBotmuxAndSeedDefaults();
   const [channelList, participants, sessions, asks, botmuxStatus, groupRows] = await Promise.all([
-    listChannelsWithUnread(userId),
+    listChannelsWithUnread(userId, organizationId),
     listParticipants(),
     botmux.getSessions(),
     botmux.getPendingAsks(),
@@ -830,6 +1058,12 @@ app.get('/api/bootstrap', async (c) => {
     asks,
     botmuxStatus,
     sidebarGroups: groupRows.map((g) => ({ id: g.id, name: g.name })),
+    auth: {
+      required: AUTH_REQUIRED,
+      authenticated: Boolean(c.get('authUserId')),
+      userId,
+      organizationId,
+    },
   });
 });
 
@@ -870,18 +1104,181 @@ app.get('/api/channels/:channelId/messages', async (c) => {
   const hasMore = rowsDesc.length > limit;
   const pageRows = (hasMore ? rowsDesc.slice(0, limit) : rowsDesc).reverse();
 
+  const userId = getRequestUserId(c, c.req.query('userId'));
   return c.json({
-    messages: await formatMessagesWithReplyPreviews(channelId, pageRows),
+    messages: await formatMessagesWithReplyPreviews(channelId, pageRows, userId),
     hasMore,
     nextCursor: hasMore && pageRows[0] ? pageRows[0].createdAt.getTime() : null,
     nextCursorId: hasMore ? pageRows[0]?.id : undefined,
   });
 });
 
+app.get('/api/activity', async (c) => {
+  const userId = getRequestUserId(c, c.req.query('userId'));
+  const [channelRows, readRows, threadReadRows, userRows, profileRows] = await Promise.all([
+    db.select().from(channels).orderBy(asc(channels.createdAt)),
+    db.select().from(channelReads).where(eq(channelReads.userId, userId)),
+    db.select().from(threadReads).where(eq(threadReads.userId, userId)),
+    db.select({ id: users.id, name: users.name }).from(users),
+    db.select({ id: agentProfiles.agentId, displayName: agentProfiles.displayName }).from(agentProfiles),
+  ]);
+
+  const userNameMap = new Map(userRows.map((u) => [u.id, u.name]));
+  const botNameMap = new Map<string, string>();
+  for (const bot of cachedBots) botNameMap.set(bot.larkAppId, bot.botName);
+  for (const p of profileRows) {
+    if (p.displayName) botNameMap.set(p.id, p.displayName);
+  }
+  const currentUserName = userNameMap.get(userId);
+  const readMap = new Map(readRows.map((r) => [r.channelId, r]));
+  const threadReadMap = new Map(threadReadRows.map((r) => [r.rootMessageId, r.lastReadAt]));
+
+  const activeChannels = channelRows.filter((ch) => {
+    if (ch.archived || !channelVisibleTo(ch, userId)) return false;
+    const readRow = readMap.get(ch.id);
+    if (readRow?.hidden || readRow?.muted) return false;
+    return true;
+  });
+
+  if (activeChannels.length === 0) {
+    return c.json({ totalUnread: 0, items: [] });
+  }
+
+  const channelMap = new Map(activeChannels.map((ch) => [ch.id, ch]));
+  const effectiveActivityAt = sql<Date>`CASE WHEN ${messages.card}->>'status' = 'completed' AND ${messages.updatedAt} IS NOT NULL THEN ${messages.updatedAt} ELSE ${messages.createdAt} END`;
+  const rows = await db
+    .select({
+      msg: messages,
+      activityAt: effectiveActivityAt,
+    })
+    .from(messages)
+    .where(
+      and(
+        inArray(messages.channelId, activeChannels.map((ch) => ch.id)),
+        isNull(messages.deletedAt),
+        sql`(${messages.senderUserId} IS NULL OR ${messages.senderUserId} <> ${userId})`
+      )
+    )
+    .orderBy(desc(effectiveActivityAt))
+    .limit(300);
+
+  const senderNameFor = (m: typeof messages.$inferSelect) =>
+    m.senderUserId
+      ? userNameMap.get(m.senderUserId) || m.senderUserId
+      : m.senderAgentId
+        ? botNameMap.get(m.senderAgentId) || m.senderAgentId
+        : 'Unknown';
+
+  type ActivityDto = {
+    id: string;
+    kind: 'mention' | 'thread' | 'dm';
+    channelId: string;
+    channelName: string;
+    channelKind: 'channel' | 'dm';
+    threadId?: string;
+    messageId: string;
+    senderName: string;
+    excerpt: string;
+    unreadCount: number;
+    createdAt: number;
+    message: ReturnType<typeof formatMessageRow>;
+  };
+
+  const items: ActivityDto[] = [];
+  const threadGroups = new Map<
+    string,
+    { latest: typeof messages.$inferSelect; activityMs: number; count: number; hasMention: boolean }
+  >();
+
+  for (const { msg, activityAt } of rows) {
+    const ch = channelMap.get(msg.channelId);
+    if (!ch) continue;
+    const channelLastRead = readMap.get(ch.id)?.lastReadAt;
+    const activityMs = new Date(activityAt).getTime();
+
+    if (msg.threadId) {
+      const watermark = threadReadMap.get(msg.threadId) ?? channelLastRead;
+      if (watermark && activityMs <= watermark.getTime()) continue;
+      const isMention = messageMentionsUser(msg.content, currentUserName);
+      const existing = threadGroups.get(msg.threadId);
+      if (!existing) {
+        threadGroups.set(msg.threadId, {
+          latest: msg,
+          activityMs,
+          count: 1,
+          hasMention: isMention,
+        });
+      } else {
+        existing.count += 1;
+        if (isMention) existing.hasMention = true;
+      }
+      if (isMention) {
+        items.push({
+          id: `mention:${msg.id}`,
+          kind: 'mention',
+          channelId: ch.id,
+          channelName: ch.kind === 'dm' ? ch.topic || ch.name : ch.name,
+          channelKind: ch.kind as 'channel' | 'dm',
+          threadId: msg.threadId,
+          messageId: msg.id,
+          senderName: senderNameFor(msg),
+          excerpt: msg.content.trim().slice(0, 140) || '[Attachment]',
+          unreadCount: 1,
+          createdAt: activityMs,
+          message: formatMessageRow(msg),
+        });
+      }
+    } else {
+      if (channelLastRead && activityMs <= channelLastRead.getTime()) continue;
+      const isMention = messageMentionsUser(msg.content, currentUserName);
+      if (isMention || ch.kind === 'dm') {
+        items.push({
+          id: `${isMention ? 'mention' : 'dm'}:${msg.id}`,
+          kind: isMention ? 'mention' : 'dm',
+          channelId: ch.id,
+          channelName: ch.kind === 'dm' ? ch.topic || ch.name : ch.name,
+          channelKind: ch.kind as 'channel' | 'dm',
+          messageId: msg.id,
+          senderName: senderNameFor(msg),
+          excerpt: msg.content.trim().slice(0, 140) || '[Attachment]',
+          unreadCount: 1,
+          createdAt: activityMs,
+          message: formatMessageRow(msg),
+        });
+      }
+    }
+  }
+
+  for (const [rootId, group] of threadGroups) {
+    const ch = channelMap.get(group.latest.channelId);
+    if (!ch) continue;
+    items.push({
+      id: `thread:${rootId}`,
+      kind: 'thread',
+      channelId: ch.id,
+      channelName: ch.kind === 'dm' ? ch.topic || ch.name : ch.name,
+      channelKind: ch.kind as 'channel' | 'dm',
+      threadId: rootId,
+      messageId: group.latest.id,
+      senderName: senderNameFor(group.latest),
+      excerpt: group.latest.content.trim().slice(0, 140) || '[Attachment]',
+      unreadCount: group.count,
+      createdAt: group.activityMs,
+      message: formatMessageRow(group.latest),
+    });
+  }
+
+  items.sort((a, b) => b.createdAt - a.createdAt);
+  return c.json({
+    totalUnread: items.length,
+    items: items.slice(0, 50),
+  });
+});
+
 app.get('/api/search', async (c) => {
   const q = (c.req.query('q') || '').trim();
   const channelId = c.req.query('channelId');
-  const userId = c.req.query('userId') || 'u-owner';
+  const userId = getRequestUserId(c, c.req.query('userId'));
   if (!q) return c.json({ results: [] });
 
   const searchChannels = await db
@@ -926,7 +1323,7 @@ app.post('/api/channels/:channelId/pins', async (c) => {
     .values({
       channelId,
       messageId: body.messageId,
-      pinnedByUserId: body.userId || 'u-owner',
+      pinnedByUserId: getRequestUserId(c, body.userId),
     })
     .onConflictDoNothing();
 
@@ -1086,7 +1483,7 @@ app.delete('/api/messages/:messageId', async (c) => {
 app.post('/api/messages/:messageId/reactions', async (c) => {
   const messageId = c.req.param('messageId');
   const body = await c.req.json<{ userId?: string; emoji?: string }>();
-  const userId = body.userId || 'u-owner';
+  const userId = getRequestUserId(c, body.userId);
   const emoji = body.emoji?.trim();
   if (!emoji) return c.json({ error: 'Emoji required' }, 400);
 
@@ -1122,9 +1519,57 @@ app.post('/api/messages/:messageId/reactions', async (c) => {
 
 app.post('/api/channels/:channelId/read', async (c) => {
   const channelId = c.req.param('channelId');
-  const body = await c.req.json<{ userId?: string }>().catch(() => ({ userId: undefined }));
-  const userId = body.userId || 'u-owner';
+  const body = await c.req
+    .json<{ userId?: string; includeThreads?: boolean }>()
+    .catch(() => ({ userId: undefined, includeThreads: false }));
+  const userId = getRequestUserId(c, body.userId);
   const now = new Date();
+  const [existingRead] = await db
+    .select({ lastReadAt: channelReads.lastReadAt })
+    .from(channelReads)
+    .where(and(eq(channelReads.channelId, channelId), eq(channelReads.userId, userId)));
+  const prevLastRead = existingRead?.lastReadAt;
+
+  if (body.includeThreads) {
+    const threadRows = await db
+      .selectDistinct({ threadId: messages.threadId })
+      .from(messages)
+      .where(and(eq(messages.channelId, channelId), isNotNull(messages.threadId), isNull(messages.deletedAt)));
+    for (const row of threadRows) {
+      if (!row.threadId) continue;
+      await db
+        .insert(threadReads)
+        .values({ channelId, rootMessageId: row.threadId, userId, lastReadAt: now })
+        .onConflictDoUpdate({
+          target: [threadReads.rootMessageId, threadReads.userId],
+          set: { lastReadAt: now },
+        });
+    }
+  } else if (prevLastRead) {
+    // Preserve independent thread unread state for threads that already had unread replies
+    // before entering this channel so opening the channel only clears top-level unread.
+    const effectiveActivityAt = sql<Date>`CASE WHEN ${messages.card}->>'status' = 'completed' AND ${messages.updatedAt} IS NOT NULL THEN ${messages.updatedAt} ELSE ${messages.createdAt} END`;
+    const unreadThreadRows = await db
+      .selectDistinct({ threadId: messages.threadId })
+      .from(messages)
+      .where(
+        and(
+          eq(messages.channelId, channelId),
+          isNotNull(messages.threadId),
+          isNull(messages.deletedAt),
+          sql`(${messages.senderUserId} IS NULL OR ${messages.senderUserId} <> ${userId})`,
+          sql`${effectiveActivityAt} > ${prevLastRead}`
+        )
+      );
+    for (const row of unreadThreadRows) {
+      if (!row.threadId) continue;
+      await db
+        .insert(threadReads)
+        .values({ channelId, rootMessageId: row.threadId, userId, lastReadAt: prevLastRead })
+        .onConflictDoNothing();
+    }
+  }
+
   await db
     .insert(channelReads)
     .values({ channelId, userId, lastReadAt: now, markedUnread: false, hidden: false })
@@ -1135,10 +1580,26 @@ app.post('/api/channels/:channelId/read', async (c) => {
   return c.json({ ok: true, channelId, userId, lastReadAt: now.getTime() });
 });
 
+app.post('/api/channels/:channelId/threads/:rootMessageId/read', async (c) => {
+  const channelId = c.req.param('channelId');
+  const rootMessageId = c.req.param('rootMessageId');
+  const body = await c.req.json<{ userId?: string }>().catch(() => ({ userId: undefined }));
+  const userId = getRequestUserId(c, body.userId);
+  const now = new Date();
+  await db
+    .insert(threadReads)
+    .values({ channelId, rootMessageId, userId, lastReadAt: now })
+    .onConflictDoUpdate({
+      target: [threadReads.rootMessageId, threadReads.userId],
+      set: { lastReadAt: now },
+    });
+  return c.json({ ok: true, channelId, rootMessageId, userId, lastReadAt: now.getTime() });
+});
+
 app.post('/api/channels/:channelId/unread', async (c) => {
   const channelId = c.req.param('channelId');
   const body = await c.req.json<{ userId?: string }>().catch(() => ({ userId: undefined }));
-  const userId = body.userId || 'u-owner';
+  const userId = getRequestUserId(c, body.userId);
   await db
     .insert(channelReads)
     .values({ channelId, userId, markedUnread: true })
@@ -1152,7 +1613,7 @@ app.post('/api/channels/:channelId/unread', async (c) => {
 app.post('/api/channels/:channelId/mute', async (c) => {
   const channelId = c.req.param('channelId');
   const body = await c.req.json<{ userId?: string; muted?: boolean }>();
-  const userId = body.userId || 'u-owner';
+  const userId = getRequestUserId(c, body.userId);
   const muted = Boolean(body.muted);
   await db
     .insert(channelReads)
@@ -1167,7 +1628,7 @@ app.post('/api/channels/:channelId/mute', async (c) => {
 app.post('/api/channels/:channelId/hide', async (c) => {
   const channelId = c.req.param('channelId');
   const body = await c.req.json<{ userId?: string; hidden?: boolean }>();
-  const userId = body.userId || 'u-owner';
+  const userId = getRequestUserId(c, body.userId);
   const hidden = body.hidden !== undefined ? Boolean(body.hidden) : true;
   await db
     .insert(channelReads)
@@ -1186,7 +1647,7 @@ app.post('/api/channels/:channelId/placement', async (c) => {
     starred?: boolean;
     groupId?: string | null;
   }>();
-  const userId = body.userId || 'u-owner';
+  const userId = getRequestUserId(c, body.userId);
   const [existing] = await db
     .select()
     .from(channelReads)
@@ -1209,7 +1670,7 @@ app.post('/api/channels/:channelId/placement', async (c) => {
 app.patch('/api/channels/:channelId/archive', async (c) => {
   const channelId = c.req.param('channelId');
   const body = await c.req.json<{ userId?: string; archived?: boolean }>();
-  const userId = body.userId || 'u-owner';
+  const userId = getRequestUserId(c, body.userId);
   const archived = Boolean(body.archived);
 
   const [existing] = await db.select().from(channels).where(eq(channels.id, channelId));
@@ -1243,7 +1704,7 @@ app.patch('/api/channels/:channelId/archive', async (c) => {
 
 app.delete('/api/channels/:channelId', async (c) => {
   const channelId = c.req.param('channelId');
-  const userId = c.req.query('userId') || 'u-owner';
+  const userId = getRequestUserId(c, c.req.query('userId'));
 
   const [existing] = await db.select().from(channels).where(eq(channels.id, channelId));
   if (!existing) return c.json({ error: 'Channel not found' }, 404);
@@ -1261,7 +1722,7 @@ app.delete('/api/channels/:channelId', async (c) => {
 
 app.post('/api/sidebar-groups', async (c) => {
   const body = await c.req.json<{ userId?: string; name?: string }>();
-  const userId = body.userId || 'u-owner';
+  const userId = getRequestUserId(c, body.userId);
   const name = (body.name || '').trim().slice(0, 60);
   if (!name) return c.json({ error: 'Group name required' }, 400);
   const [created] = await db
@@ -1274,7 +1735,7 @@ app.post('/api/sidebar-groups', async (c) => {
 app.patch('/api/sidebar-groups/:groupId', async (c) => {
   const groupId = c.req.param('groupId');
   const body = await c.req.json<{ userId?: string; name?: string }>();
-  const userId = body.userId || 'u-owner';
+  const userId = getRequestUserId(c, body.userId);
   const name = (body.name || '').trim().slice(0, 60);
   if (!name) return c.json({ error: 'Group name required' }, 400);
   const [updated] = await db
@@ -1288,7 +1749,7 @@ app.patch('/api/sidebar-groups/:groupId', async (c) => {
 
 app.delete('/api/sidebar-groups/:groupId', async (c) => {
   const groupId = c.req.param('groupId');
-  const userId = c.req.query('userId') || 'u-owner';
+  const userId = getRequestUserId(c, c.req.query('userId'));
   await db
     .update(channelReads)
     .set({ groupId: null })
@@ -1307,15 +1768,39 @@ app.post('/api/channels', async (c) => {
     .replace(/[^a-z0-9\u4e00-\u9fa5_-]+/g, '-');
   if (!cleanName) return c.json({ error: 'Channel name required' }, 400);
 
-  const [created] = await db
-    .insert(channels)
-    .values({
-      name: cleanName,
-      topic: body.topic?.trim() || '',
-      kind: 'channel',
-      createdByUserId: body.userId || 'u-owner',
-    })
-    .returning();
+  let created: typeof channels.$inferSelect;
+  try {
+    const [row] = await db
+      .insert(channels)
+      .values({
+        name: cleanName,
+        topic: body.topic?.trim() || '',
+        kind: 'channel',
+        organizationId: c.get('authOrgId'),
+        createdByUserId: getRequestUserId(c, body.userId),
+      })
+      .returning();
+    created = row;
+  } catch (err) {
+    const pgCode =
+      (err as { code?: string; cause?: { code?: string } })?.code ||
+      (err as { cause?: { code?: string } })?.cause?.code;
+    if (pgCode === '23505') {
+      const [existing] = await db
+        .select({ archived: channels.archived })
+        .from(channels)
+        .where(eq(channels.name, cleanName));
+      return c.json(
+        {
+          error: existing?.archived
+            ? `频道「${cleanName}」已存在（位于已归档频道中）`
+            : `频道「${cleanName}」已存在`,
+        },
+        409
+      );
+    }
+    throw err;
+  }
 
   const dto = {
     id: created.id,
@@ -1397,12 +1882,9 @@ app.patch('/api/channels/:channelId/settings', async (c) => {
 
 /** Explicit outbound endpoint for Bots / automated tasks to post into main timeline or a Thread */
 app.post('/api/bot/messages', async (c) => {
-  if (BUZZ_BOT_TOKEN) {
-    const auth = c.req.header('authorization') || '';
-    const token = auth.startsWith('Bearer ') ? auth.slice(7).trim() : '';
-    if (token !== BUZZ_BOT_TOKEN) {
-      return c.json({ error: 'Unauthorized' }, 401);
-    }
+  const botAuth = await verifyBotRequest(auth, c.req.raw.headers, BUZZ_BOT_TOKEN);
+  if (!botAuth.ok) {
+    return c.json({ error: 'Unauthorized' }, 401);
   }
 
   const body = await c.req.json<{
@@ -1509,7 +1991,7 @@ app.post('/api/bot/messages', async (c) => {
 
     if (settled) {
       const reactions = (await getReactionsForMessages([settled.id])).get(settled.id) || [];
-      const dto = formatMessageRow(settled, 0, reactions);
+      const dto = { ...formatMessageRow(settled, 0, reactions), justCompleted: true };
       broadcast({ type: 'message.updated', payload: dto });
       return c.json({ message: dto, settledPlaceholder: true }, 200);
     }
@@ -1535,12 +2017,9 @@ app.post('/api/bot/messages', async (c) => {
 
 /** Fixed-contract progress endpoint for external adapters / runners to push live tool steps */
 app.post('/api/bot/messages/:messageId/progress', async (c) => {
-  if (BUZZ_BOT_TOKEN) {
-    const auth = c.req.header('authorization') || '';
-    const token = auth.startsWith('Bearer ') ? auth.slice(7).trim() : '';
-    if (token !== BUZZ_BOT_TOKEN) {
-      return c.json({ error: 'Unauthorized' }, 401);
-    }
+  const botAuth = await verifyBotRequest(auth, c.req.raw.headers, BUZZ_BOT_TOKEN);
+  if (!botAuth.ok) {
+    return c.json({ error: 'Unauthorized' }, 401);
   }
 
   const messageId = c.req.param('messageId')?.trim();
@@ -1581,7 +2060,7 @@ app.post('/api/dms', async (c) => {
     targetRole?: 'human' | 'agent';
     targetName?: string;
   }>();
-  const userId = body.userId || 'u-owner';
+  const userId = getRequestUserId(c, body.userId);
   const targetId = body.targetId;
   const targetRole = body.targetRole || 'agent';
   if (!targetId) return c.json({ error: 'targetId required' }, 400);
@@ -1626,6 +2105,7 @@ app.post('/api/dms', async (c) => {
       kind: 'dm',
       visibility: 'private',
       dmKey,
+      organizationId: c.get('authOrgId'),
       createdByUserId: userId,
     })
     .returning();
@@ -1660,14 +2140,13 @@ app.post('/api/dms', async (c) => {
   return c.json({ channel: dto }, 201);
 });
 
-app.get('/api/channels/:channelId/members', async (c) => {
-  const channelId = c.req.param('channelId');
+async function listChannelMembers(channelId: string) {
   const [[channel], rows] = await Promise.all([
     db.select().from(channels).where(eq(channels.id, channelId)),
     db.select().from(channelMembers).where(eq(channelMembers.channelId, channelId))
       .orderBy(asc(channelMembers.createdAt)),
   ]);
-  if (!channel) return c.json({ error: 'Channel not found' }, 404);
+  if (!channel) return null;
 
   // Seeded channels predate explicit roster entries for their creators.
   const ownerId = channel.createdByUserId;
@@ -1681,7 +2160,23 @@ app.get('/api/channels/:channelId/members', async (c) => {
       createdAt: channel.createdAt,
     });
   }
-  return c.json({ members: rows, ownerId });
+  return { members: rows, ownerId };
+}
+
+async function broadcastChannelMembers(channelId: string) {
+  const roster = await listChannelMembers(channelId);
+  if (!roster) return;
+  broadcast({
+    type: 'channel.members.updated',
+    payload: { channelId, members: roster.members, ownerId: roster.ownerId },
+  });
+}
+
+app.get('/api/channels/:channelId/members', async (c) => {
+  const channelId = c.req.param('channelId');
+  const roster = await listChannelMembers(channelId);
+  if (!roster) return c.json({ error: 'Channel not found' }, 404);
+  return c.json(roster);
 });
 
 app.post('/api/channels/:channelId/members', async (c) => {
@@ -1704,12 +2199,14 @@ app.post('/api/channels/:channelId/members', async (c) => {
         .set({ autoReply: Boolean(body.autoReply) })
         .where(eq(channelMembers.id, existing[0].id))
         .returning();
+      await broadcastChannelMembers(channelId);
       return c.json({ member: row });
     }
     const [row] = await db
       .insert(channelMembers)
       .values({ channelId, agentId: body.agentId, autoReply: Boolean(body.autoReply) })
       .returning();
+    await broadcastChannelMembers(channelId);
     return c.json({ member: row });
   }
 
@@ -1732,6 +2229,7 @@ app.post('/api/channels/:channelId/members', async (c) => {
       target: [channelReads.channelId, channelReads.userId],
       set: { hidden: false },
     });
+  await broadcastChannelMembers(channelId);
   return c.json({ member: row });
 });
 
@@ -1756,10 +2254,14 @@ app.delete('/api/channels/:channelId/members', async (c) => {
         set: { hidden: true },
       });
   }
+  await broadcastChannelMembers(channelId);
   return c.json({ ok: true });
 });
 
 app.post('/api/humans', async (c) => {
+  if (AUTH_REQUIRED) {
+    return c.json({ error: 'Legacy human creation is disabled when auth is required' }, 403);
+  }
   const body = await c.req.json<{ name?: string }>();
   const name = body.name?.trim();
   if (!name) return c.json({ error: 'Name required' }, 400);
@@ -1775,6 +2277,10 @@ app.post('/api/humans', async (c) => {
 
 app.patch('/api/humans/:userId', async (c) => {
   const userId = c.req.param('userId');
+  const authedUserId = c.get('authUserId');
+  if ((AUTH_REQUIRED || authedUserId) && authedUserId !== userId) {
+    return c.json({ error: 'Forbidden' }, 403);
+  }
   const body = await c.req.json<{ name?: string; avatarUrl?: string | null }>();
   const [existing] = await db.select().from(users).where(eq(users.id, userId));
   if (!existing) return c.json({ error: 'User not found' }, 404);
@@ -1810,7 +2316,7 @@ app.patch('/api/humans/:userId', async (c) => {
 
 app.get('/api/messages/:messageId', async (c) => {
   const messageId = c.req.param('messageId');
-  const userId = c.req.query('userId') || 'u-owner';
+  const userId = getRequestUserId(c, c.req.query('userId'));
   const [row] = await db
     .select()
     .from(messages)
@@ -1938,7 +2444,7 @@ app.post('/api/asks/answer', async (c) => {
 
 app.get('/api/agents/:agentId', async (c) => {
   const agentId = c.req.param('agentId');
-  const userId = c.req.query('userId');
+  const userId = getRequestUserId(c, c.req.query('userId'));
   const detail = await buildAgentDetail(agentId, userId);
   if (!detail) return c.json({ error: 'Agent not found' }, 404);
   return c.json({ agent: detail });
@@ -1946,7 +2452,7 @@ app.get('/api/agents/:agentId', async (c) => {
 
 app.patch('/api/agents/:agentId', async (c) => {
   const agentId = c.req.param('agentId');
-  const userId = c.req.query('userId');
+  const userId = getRequestUserId(c, c.req.query('userId'));
   const body = await c.req.json<{
     displayName?: string | null;
     description?: string | null;
@@ -2018,16 +2524,47 @@ botmux.subscribeEvents((eventName, data) => {
 
 Bun.serve<WsClientData>({
   port: PORT,
-  fetch(req, server) {
+  async fetch(req, server) {
     const url = new URL(req.url);
     if (url.pathname === '/ws') {
-      if (server.upgrade(req, { data: { kind: 'chat' } })) return undefined;
+      const wsHeaders = buildSessionHeaders(req.headers, url.searchParams.get('token'));
+      const identity = await resolveRequestIdentity({
+        auth,
+        db,
+        headers: wsHeaders,
+        authRequired: AUTH_REQUIRED,
+      });
+      if (!identity) {
+        return new Response('Unauthorized', { status: 401 });
+      }
+      if (
+        server.upgrade(req, {
+          data: {
+            kind: 'chat',
+            userId: identity.authenticated ? identity.userId : undefined,
+            organizationId: identity.organizationId ?? undefined,
+            authenticated: identity.authenticated,
+          },
+        })
+      ) {
+        return undefined;
+      }
       return new Response('WebSocket upgrade failed', { status: 400 });
     }
     if (
       url.pathname.startsWith('/api/terminal-proxy/') &&
       req.headers.get('upgrade')?.toLowerCase() === 'websocket'
     ) {
+      const wsHeaders = buildSessionHeaders(req.headers, url.searchParams.get('token'));
+      const identity = await resolveRequestIdentity({
+        auth,
+        db,
+        headers: wsHeaders,
+        authRequired: AUTH_REQUIRED,
+      });
+      if (!identity) {
+        return new Response('Unauthorized', { status: 401 });
+      }
       const upstreamHttp = resolveTerminalUpstreamUrl(url.pathname, url.search, BOTMUX_ENDPOINT);
       if (upstreamHttp) {
         const upstreamWsUrl = upstreamHttp.replace(/^http/i, 'ws');
@@ -2150,7 +2687,9 @@ Bun.serve<WsClientData>({
         }
 
         if (event.type === 'presence.identify') {
-          ws.data.userId = event.payload.userId;
+          if (!ws.data.authenticated) {
+            ws.data.userId = event.payload.userId;
+          }
           broadcast({
             type: 'presence.updated',
             payload: { participants: await listParticipants() },
@@ -2159,7 +2698,8 @@ Bun.serve<WsClientData>({
         }
 
         if (event.type === 'typing.start') {
-          const { channelId, userId } = event.payload || {};
+          const { channelId, userId: payloadUserId } = event.payload || {};
+          const userId = ws.data.authenticated ? ws.data.userId : payloadUserId;
           if (channelId && userId) {
             broadcast({
               type: 'typing.updated',
@@ -2170,8 +2710,16 @@ Bun.serve<WsClientData>({
         }
 
         if (event.type === 'message.send') {
-          const { messageId, channelId, senderId, content, threadId, replyToId, attachments } =
-            event.payload;
+          const {
+            messageId,
+            channelId,
+            senderId: payloadSenderId,
+            content,
+            threadId,
+            replyToId,
+            attachments,
+          } = event.payload;
+          const senderId = (ws.data.authenticated && ws.data.userId) || payloadSenderId;
           if (messageId !== undefined) {
             failSend = (message) => {
               if (ws.readyState === WebSocket.OPEN) {
@@ -2205,6 +2753,14 @@ Bun.serve<WsClientData>({
             .where(eq(channels.id, channelId));
           if (!channelRow) {
             failSend?.('This channel no longer exists.');
+            return;
+          }
+          if (
+            ws.data.organizationId &&
+            channelRow.organizationId &&
+            channelRow.organizationId !== ws.data.organizationId
+          ) {
+            failSend?.('Forbidden: channel belongs to another organization.');
             return;
           }
 
@@ -2255,7 +2811,10 @@ Bun.serve<WsClientData>({
           }
 
           failSend = undefined;
-          broadcast({ type: 'message.created', payload: formatMessageRow(saved) });
+          broadcast(
+            { type: 'message.created', payload: formatMessageRow(saved) },
+            channelRow.organizationId,
+          );
 
           // Auto-unhide DM for all participants when a new message arrives
           if (channelRow.kind === 'dm') {

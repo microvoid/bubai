@@ -9,7 +9,7 @@ import { Pool, type PoolConfig } from 'pg';
 import * as schema from './schema.js';
 
 export * from './schema.js';
-export { eq, asc, desc, and, lt, gt, isNull, inArray, ilike, sql } from 'drizzle-orm';
+export { eq, asc, desc, and, lt, gt, isNull, isNotNull, inArray, ilike, sql } from 'drizzle-orm';
 
 export type ChatDb = NodePgDatabase<typeof schema>;
 
@@ -74,20 +74,27 @@ CREATE TABLE IF NOT EXISTS users (
 
 CREATE TABLE IF NOT EXISTS channels (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-  name text NOT NULL UNIQUE,
+  name text NOT NULL,
   topic text NOT NULL DEFAULT '',
   visibility text NOT NULL DEFAULT 'public',
   kind text NOT NULL DEFAULT 'channel',
   reply_mode text NOT NULL DEFAULT 'follow_source',
   archived boolean NOT NULL DEFAULT false,
-  dm_key text UNIQUE,
+  dm_key text,
+  organization_id text,
   created_by_user_id text REFERENCES users(id) ON DELETE SET NULL,
   created_at timestamptz NOT NULL DEFAULT now()
 );
 
-ALTER TABLE channels ADD COLUMN IF NOT EXISTS dm_key text UNIQUE;
+ALTER TABLE channels ADD COLUMN IF NOT EXISTS dm_key text;
 ALTER TABLE channels ADD COLUMN IF NOT EXISTS reply_mode text NOT NULL DEFAULT 'follow_source';
 ALTER TABLE channels ADD COLUMN IF NOT EXISTS archived boolean NOT NULL DEFAULT false;
+ALTER TABLE channels ADD COLUMN IF NOT EXISTS organization_id text;
+ALTER TABLE channels DROP CONSTRAINT IF EXISTS channels_name_key;
+ALTER TABLE channels DROP CONSTRAINT IF EXISTS channels_dm_key_key;
+CREATE INDEX IF NOT EXISTS channels_organization_idx ON channels (organization_id);
+CREATE UNIQUE INDEX IF NOT EXISTS channels_org_name_uidx ON channels (COALESCE(organization_id, ''), name);
+CREATE UNIQUE INDEX IF NOT EXISTS channels_org_dm_key_uidx ON channels (COALESCE(organization_id, ''), dm_key) WHERE dm_key IS NOT NULL;
 
 CREATE TABLE IF NOT EXISTS channel_reads (
   channel_id uuid NOT NULL REFERENCES channels(id) ON DELETE CASCADE,
@@ -197,6 +204,8 @@ CREATE TABLE IF NOT EXISTS agent_profiles (
 export interface OpenChatDatabaseOptions {
   dataDir?: string;
   databaseUrl?: string;
+  /** Optional SQL DDL executed before chat tables (e.g. AUTH_DDL from @bubai/auth). */
+  beforeDdl?: string;
 }
 
 export async function openChatDatabase(
@@ -211,10 +220,11 @@ export async function openChatDatabase(
   const opts: OpenChatDatabaseOptions =
     typeof options === 'string' ? { dataDir: options } : options || {};
   const databaseUrl = opts.databaseUrl ?? process.env.DATABASE_URL?.trim();
+  const fullDdl = opts.beforeDdl ? `${opts.beforeDdl}\n${DDL}` : DDL;
 
   if (databaseUrl) {
     const pool = new Pool(buildPgPoolConfig(databaseUrl));
-    await pool.query(DDL);
+    await pool.query(fullDdl);
     const db = drizzlePg(pool, { schema });
     return {
       driver: 'postgres',
@@ -228,7 +238,7 @@ export async function openChatDatabase(
   fs.mkdirSync(dir, { recursive: true });
   const pglite = new PGlite(dir);
   await pglite.waitReady;
-  await pglite.exec(DDL);
+  await pglite.exec(fullDdl);
   const db = drizzlePglite(pglite, { schema }) as unknown as ChatDb;
   return {
     driver: 'pglite',

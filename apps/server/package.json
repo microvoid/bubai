@@ -11,6 +11,7 @@
     "lint": "echo 'ok'"
   },
   "dependencies": {
+    "@bubai/auth": "workspace:*",
     "@buzz-botmux/botmux-client": "workspace:*",
     "@buzz-botmux/db": "workspace:*",
     "hono": "^4.7.4"

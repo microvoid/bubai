@@ -257,21 +257,73 @@ export class AgentDispatcher {
     return all.find((a) => a.id === agentId) ?? null;
   }
 
-  /** Match `@mention` against all DB-known agents (name, defaultName, or id). */
+  /** Match `@mention` against all DB-known agents (name, defaultName, or id) with boundary checks. */
   findMentionedAgents(content: string, agents: ResolvedAgent[]): ResolvedAgent[] {
+    if (!content || !content.includes('@')) return [];
     const lower = content.toLowerCase();
-    const matched: ResolvedAgent[] = [];
-    for (const agent of agents) {
-      if (agent.archived) continue;
-      const candidates = [agent.name, agent.defaultName, agent.id]
-        .map((c) => c?.trim().toLowerCase())
-        .filter((c): c is string => Boolean(c));
-      const uniqueCandidates = [...new Set(candidates)];
-      if (uniqueCandidates.some((c) => lower.includes(`@${c}`))) {
-        matched.push(agent);
+    const EMAIL_LOCAL_CHAR = /[a-z0-9._+-]/;
+    const ASCII_WORD_CHAR = /[a-z0-9_]/;
+
+    const atPositions: number[] = [];
+    let idx = lower.indexOf('@');
+    while (idx !== -1) {
+      if (idx === 0 || !EMAIL_LOCAL_CHAR.test(lower[idx - 1]!)) {
+        atPositions.push(idx);
+      }
+      idx = lower.indexOf('@', idx + 1);
+    }
+    if (atPositions.length === 0) return [];
+
+    const candidatesByAgent = agents
+      .filter((agent) => !agent.archived)
+      .map((agent) => {
+        const tokens = [
+          ...new Set(
+            [agent.name, agent.defaultName, agent.id]
+              .map((c) => c?.trim().toLowerCase())
+              .filter((c): c is string => Boolean(c)),
+          ),
+        ];
+        return { agent, tokens };
+      });
+
+    const matchedIds = new Set<string>();
+    for (const atPos of atPositions) {
+      const start = atPos + 1;
+      let bestLen = 0;
+      const bestAgents: ResolvedAgent[] = [];
+
+      for (const { agent, tokens } of candidatesByAgent) {
+        let agentBestLen = 0;
+        for (const token of tokens) {
+          if (token.length < bestLen || token.length <= agentBestLen) continue;
+          if (!lower.startsWith(token, start)) continue;
+          const end = start + token.length;
+          const lastChar = token[token.length - 1]!;
+          if (
+            end < lower.length &&
+            ASCII_WORD_CHAR.test(lastChar) &&
+            ASCII_WORD_CHAR.test(lower[end]!)
+          ) {
+            continue;
+          }
+          agentBestLen = token.length;
+        }
+        if (agentBestLen > bestLen) {
+          bestLen = agentBestLen;
+          bestAgents.length = 0;
+          bestAgents.push(agent);
+        } else if (agentBestLen > 0 && agentBestLen === bestLen) {
+          bestAgents.push(agent);
+        }
+      }
+
+      for (const agent of bestAgents) {
+        matchedIds.add(agent.id);
       }
     }
-    return matched;
+
+    return agents.filter((agent) => matchedIds.has(agent.id));
   }
 
   /** Route a turn to the active adapter for this agent (Gateway WS → Webhook → Botmux). */

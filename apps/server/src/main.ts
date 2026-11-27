@@ -71,6 +71,12 @@ import { BotmuxAgentAdapter } from './adapters/botmux-adapter';
 import { BotGatewayAdapter, type BotGatewayWsData } from './adapters/gateway-adapter';
 import { WebhookAgentAdapter, validateWebhookUrl } from './adapters/webhook-adapter';
 import type { AgentRegistrationInput, ResolvedAgent } from './adapters/types';
+import {
+  getAgentMentionHop,
+  mergeAgentMentionHop,
+  parseMaxAgentMentionHops,
+  selectAgentReplyTargets,
+} from './agent-mentions';
 
 const PORT = Number(process.env.PORT || 4000);
 const AUTH_REQUIRED = process.env.BUBAI_AUTH_REQUIRED !== 'false';
@@ -93,6 +99,7 @@ const BOT_TURN_TIMEOUT_MS = Number.isSafeInteger(configuredBotTurnTimeoutMs) && 
 const BOTMUX_TRIGGER_SUMMARY_PREFIX = 'triggerId: ';
 const isLocalBotmux = isLocalBotmuxEndpoint(BOTMUX_ENDPOINT);
 const BOT_TURN_TERMINAL_STATUSES = ['completed', 'failed', 'interrupted', 'timeout', 'dispatch_failed'] as const;
+const MAX_AGENT_MENTION_HOPS = parseMaxAgentMentionHops(process.env.BUBAI_MAX_AGENT_MENTION_HOPS);
 const MESSAGE_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 type BotTurnCompletion = {
@@ -1024,6 +1031,286 @@ async function applyMessageProgress(
   return null;
 }
 
+async function dispatchAgentTurnsForMessage(params: {
+  channelRow: typeof channels.$inferSelect;
+  saved: typeof messages.$inferSelect;
+}) {
+  const { channelRow, saved } = params;
+  const channelId = channelRow.id;
+  const threadId = saved.threadId ?? undefined;
+  const trimmed = saved.content.trim();
+  const attachments = Array.isArray(saved.attachments) ? saved.attachments : [];
+  const hasFiles = attachments.length > 0;
+  const senderAgentId = saved.senderAgentId ?? null;
+
+  if (senderAgentId && !trimmed) return;
+
+  let knownAgents = await dispatcher.listAgents();
+  if (knownAgents.length === 0 && botmuxAdapter.isEnabled()) {
+    await dispatcher.syncBotmuxAgents();
+    knownAgents = await dispatcher.listAgents();
+  }
+
+  const channelMemberRows = await db
+    .select()
+    .from(channelMembers)
+    .where(eq(channelMembers.channelId, channelId));
+  const channelAgentIds = new Set(
+    channelMemberRows.map((m) => m.agentId).filter((id): id is string => Boolean(id)),
+  );
+  const autoReplyBotIds = new Set(
+    channelMemberRows
+      .filter((m) => m.autoReply)
+      .map((m) => m.agentId)
+      .filter((id): id is string => Boolean(id)),
+  );
+
+  const { targets, nextHop, hopLimitReached } = selectAgentReplyTargets({
+    content: trimmed,
+    knownAgents,
+    channelAgentIds,
+    autoReplyBotIds,
+    enforceChannelMembership: AUTH_REQUIRED || channelRow.kind === 'dm',
+    senderAgentId,
+    currentHop: getAgentMentionHop(saved.adapterMeta),
+    maxAgentMentionHops: MAX_AGENT_MENTION_HOPS,
+    findMentionedAgents: (content, agents) => dispatcher.findMentionedAgents(content, agents),
+  });
+
+  if (hopLimitReached) {
+    console.warn(
+      `[Server] Skipped agent-to-agent @mention dispatch in channel ${channelId}: hop limit (${MAX_AGENT_MENTION_HOPS}) reached`,
+    );
+    return;
+  }
+  if (targets.length === 0) return;
+
+  const botNameMap = new Map(knownAgents.map((a) => [a.id, a.name]));
+  let senderId: string;
+  let senderName: string;
+  if (senderAgentId) {
+    senderId = senderAgentId;
+    senderName = botNameMap.get(senderAgentId) || senderAgentId;
+  } else {
+    senderId = saved.senderUserId || 'anonymous';
+    const [senderUser] = await db
+      .select({ id: authSchema.user.id, name: authSchema.user.name, email: authSchema.user.email })
+      .from(authSchema.user)
+      .where(eq(authSchema.user.id, senderId));
+    senderName = senderUser ? resolveDisplayName(senderUser.name, senderUser.email) : senderId;
+  }
+
+  const attachmentNote = hasFiles
+    ? `\n\n[附件]\n${attachments.map((a) => `- ${a.name} (${a.mimeType}, http://localhost:${PORT}${a.url})`).join('\n')}`
+    : '';
+
+  // Build recent conversation history context for agent turns
+  const historyWhere = threadId
+    ? and(
+        eq(messages.channelId, channelId),
+        eq(messages.threadId, threadId),
+        isNull(messages.deletedAt)
+      )
+    : and(
+        eq(messages.channelId, channelId),
+        isNull(messages.threadId),
+        isNull(messages.deletedAt)
+      );
+
+  const [historyRowsDesc, threadRootRows, allUsers] = await Promise.all([
+    db
+      .select()
+      .from(messages)
+      .where(historyWhere)
+      .orderBy(desc(messages.createdAt))
+      .limit(CONTEXT_HISTORY_LIMIT + 1),
+    threadId
+      ? db
+          .select()
+          .from(messages)
+          .where(and(eq(messages.id, threadId), isNull(messages.deletedAt)))
+      : Promise.resolve([]),
+    db
+      .select({ id: authSchema.user.id, name: authSchema.user.name, email: authSchema.user.email })
+      .from(authSchema.user),
+  ]);
+
+  const userNameMap = new Map(
+    allUsers.map((u) => [u.id, resolveDisplayName(u.name, u.email)]),
+  );
+
+  const rawHistoryRows = [
+    ...threadRootRows,
+    ...historyRowsDesc
+      .filter((row) => row.id !== saved.id && row.id !== threadId)
+      .slice(0, CONTEXT_HISTORY_LIMIT)
+      .reverse(),
+  ];
+
+  const historyMessages: BuzzTurnContext['messages'] = rawHistoryRows
+    .filter(
+      (row) =>
+        row.card?.status !== 'running' &&
+        row.content.trim().length > 0 &&
+        !row.content.startsWith('正在向本地 Botmux') &&
+        !row.content.startsWith('已在本地 Botmux 启动会话') &&
+        !row.content.startsWith('主会话正忙，正在并行启动')
+    )
+    .map((row) => ({
+      sender: row.senderAgentId
+        ? botNameMap.get(row.senderAgentId) || row.senderAgentId
+        : userNameMap.get(row.senderUserId || '') || row.senderUserId || 'User',
+      role: row.senderAgentId ? ('agent' as const) : ('human' as const),
+      content: row.content,
+    }));
+
+  const channelReplyMode = parseReplyMode(channelRow.replyMode, DEFAULT_REPLY_MODE);
+  const initialAdapterMeta = nextHop > 0 ? { agentMentionHop: nextHop } : null;
+
+  for (const agent of targets) {
+    const replyThreadId = resolveReplyThreadId(
+      channelReplyMode,
+      channelRow.kind,
+      threadId,
+      saved.id
+    );
+
+    const turnStartedAt = Date.now();
+    const [placeholder] = await db
+      .insert(messages)
+      .values({
+        channelId,
+        threadId: replyThreadId,
+        senderAgentId: agent.id,
+        content: '',
+        adapterMeta: initialAdapterMeta,
+        card: {
+          title: agent.name,
+          status: 'running',
+          phase: 'connecting',
+          startedAt: turnStartedAt,
+        },
+      })
+      .returning();
+    broadcast(
+      { type: 'message.created', payload: formatMessageRow(placeholder) },
+      channelRow.organizationId,
+    );
+
+    const dispatched = await dispatcher.dispatchTurn({
+      agent,
+      turnId: placeholder.id,
+      channel: {
+        id: channelId,
+        name: channelRow.name || channelId,
+        kind: channelRow.kind || 'channel',
+        topic: channelRow.topic || '',
+        replyMode: channelReplyMode,
+      },
+      ...(threadId ? { threadId } : {}),
+      replyThreadId,
+      triggerMessage: {
+        id: saved.id,
+        senderId,
+        senderName,
+        content: trimmed,
+        attachments,
+      },
+      promptWithAttachments: `${trimmed}${attachmentNote}`,
+      history: historyMessages,
+      outboundApi: {
+        endpoint: `${(process.env.PUBLIC_URL || `http://127.0.0.1:${PORT}`).replace(/\/+$/, '')}/api/bot/messages`,
+        progressEndpoint: `${(process.env.PUBLIC_URL || `http://127.0.0.1:${PORT}`).replace(/\/+$/, '')}/api/bot/messages/${placeholder.id}/progress`,
+        cliScriptPath: BUZZ_SEND_CLI_PATH,
+        botId: agent.id,
+        channelId,
+        ...(replyThreadId ? { threadId: replyThreadId } : {}),
+        placeholderMessageId: placeholder.id,
+      },
+      turnStartedAt,
+    });
+
+    if (!dispatched.ok) {
+      const errMsg = dispatched.error || 'Agent 派发失败';
+      const [failed] = await db
+        .update(messages)
+        .set({
+          content: errMsg,
+          card: {
+            title: agent.name,
+            status: 'dispatch_failed',
+            ...(dispatched.parallel ? { parallel: true } : {}),
+            startedAt: turnStartedAt,
+            finishedAt: Date.now(),
+            summary: errMsg,
+          },
+        })
+        .where(and(
+          eq(messages.id, placeholder.id),
+          isNull(messages.deletedAt),
+          sql`${messages.card}->>'status' = 'running'`,
+        ))
+        .returning();
+      if (failed) {
+        broadcast(
+          { type: 'message.updated', payload: formatMessageRow(failed) },
+          channelRow.organizationId,
+        );
+      }
+      continue;
+    }
+
+    const summary = dispatched.triggerId
+      ? `${BOTMUX_TRIGGER_SUMMARY_PREFIX}${dispatched.triggerId}`
+      : `adapter: ${dispatched.adapterType}`;
+
+    const [running] = await db
+      .update(messages)
+      .set({
+        botmuxSessionId: dispatched.sessionId || null,
+        adapterMeta: mergeAgentMentionHop(dispatched.adapterMeta, placeholder.adapterMeta, nextHop),
+        content: '',
+        updatedAt: new Date(),
+        card: {
+          title: agent.name,
+          status: 'running',
+          phase: 'thinking',
+          ...(dispatched.parallel ? { parallel: true } : {}),
+          startedAt: turnStartedAt,
+          summary,
+        },
+      })
+      .where(and(eq(messages.id, placeholder.id), sql`${messages.card}->>'status' = 'running'`))
+      .returning();
+    if (running) {
+      broadcast(
+        { type: 'message.updated', payload: formatMessageRow(running) },
+        channelRow.organizationId,
+      );
+    }
+
+    if (dispatched.adapterType === 'botmux') {
+      void dispatcher.getSessions().then((sessions) => broadcastSessionsUpdated(sessions));
+    }
+  }
+}
+
+function queueAgentMentionDispatch(
+  saved: typeof messages.$inferSelect,
+  preloadedChannel?: typeof channels.$inferSelect,
+) {
+  if (!saved.senderAgentId || !saved.content.trim()) return;
+  void (async () => {
+    const channelRow =
+      preloadedChannel ??
+      (await db.select().from(channels).where(eq(channels.id, saved.channelId)).limit(1))[0];
+    if (!channelRow || channelRow.archived) return;
+    await dispatchAgentTurnsForMessage({ channelRow, saved });
+  })().catch((err) => {
+    console.error('[Server] Agent-to-agent @mention dispatch failed:', err);
+  });
+}
+
 async function reconcileBotmuxTurn(
   row: typeof messages.$inferSelect,
   getSessions: () => Promise<BotmuxSession[]>
@@ -1138,6 +1425,9 @@ async function reconcileBotmuxTurn(
     const reactions = (await getReactionsForMessages([updated.id])).get(updated.id) || [];
     const orgId = await getChannelOrgId(updated.channelId);
     broadcast({ type: 'message.updated', payload: formatMessageRow(updated, 0, reactions) }, orgId);
+    if (status === 'completed') {
+      queueAgentMentionDispatch(updated);
+    }
     return true;
   }
 }
@@ -1669,12 +1959,47 @@ app.get('/healthz', (c) =>
   c.json({ ok: true, db: dbDriver, storage: uploadStorage.driver }),
 );
 
-/** File / Image Attachment Upload & Serving (S3 when configured, local disk fallback) */
+async function notifyMobileMembers(channel: typeof channels.$inferSelect, message: typeof messages.$inferSelect) {
+  if (!channel.organizationId) return;
+  const recipients = channel.kind === 'dm'
+    ? (channel.dmKey || '').split('|').filter(key => key.startsWith('u:')).map(key => key.slice(2))
+    : (await db.select({ userId: channelMembers.userId }).from(channelMembers)
+        .where(eq(channelMembers.channelId, channel.id))).flatMap(row => row.userId ? [row.userId] : []);
+  const peers = recipients.filter(id => id !== message.senderUserId && id !== message.senderAgentId);
+  if (!peers.length) return;
+  const devices = await db.select({ token: pushDevices.token }).from(pushDevices)
+    .innerJoin(authSchema.member, and(eq(authSchema.member.userId, pushDevices.userId),
+      eq(authSchema.member.organizationId, channel.organizationId)))
+    .leftJoin(channelReads, and(eq(channelReads.userId, pushDevices.userId), eq(channelReads.channelId, channel.id)))
+    .where(and(inArray(pushDevices.userId, peers), sql`coalesce(${channelReads.muted}, false) = false`));
+  const endpoint = process.env.EXPO_PUSH_ENDPOINT || 'https://exp.host/--/api/v2/push/send';
+  const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+  if (process.env.EXPO_ACCESS_TOKEN) headers.Authorization = 'Bearer ' + process.env.EXPO_ACCESS_TOKEN;
+  for (let offset = 0; offset < devices.length; offset += 100) {
+    const batch = devices.slice(offset, offset + 100).map(({token}) => ({
+      to: token, title: 'Bubai', body: '你有一条新消息', channelId: 'messages', sound: 'default',
+      data: { channelId: channel.id, threadId: message.threadId, messageId: message.id },
+    }));
+    const response = await fetch(endpoint, { method: 'POST', headers, body: JSON.stringify(batch), signal: AbortSignal.timeout(10000) });
+    if (!response.ok) throw new Error('Push relay returned HTTP ' + response.status);
+    const result = await response.json() as { data?: {status: string; details?: {error?: string}}[] };
+    for (const [index, ticket] of (result.data || []).entries()) {
+      if (ticket.details?.error === 'DeviceNotRegistered' && batch[index]) {
+        await db.delete(pushDevices).where(eq(pushDevices.token, batch[index]!.to));
+      }
+    }
+  }
+}
+
+function queueMobileNotifications(channel: typeof channels.$inferSelect, message: typeof messages.$inferSelect) {
+  void notifyMobileMembers(channel, message).catch(error => console.warn('Mobile push delivery failed', String(error)));
+}
+
 app.post('/api/push/register', async c => {
   const userId = c.get('authUserId');
   if (!userId) return c.json({ error: 'Sign in to register notifications' }, 401);
   const body = await c.req.json<{ token?: string; platform?: string }>().catch(() => null);
-  if (!body || typeof body.token !== 'string' || !body.token.trim() || body.token.length > 4096 ||
+  if (!body || typeof body.token !== 'string' || !/^(?:Expo|Exponent)PushToken\[[\w-]+\]$/.test(body.token) || body.token.length > 4096 ||
       (body.platform !== 'ios' && body.platform !== 'android')) {
     return c.json({ error: 'Invalid device registration' }, 400);
   }
@@ -2409,7 +2734,7 @@ app.post('/api/bot/messages', async (c) => {
         content: trimmed,
         attachments: hasFiles ? body.attachments! : pendingPlaceholder.attachments,
         botmuxSessionId: body.botmuxSessionId || pendingPlaceholder.botmuxSessionId,
-        adapterMeta: body.adapterMeta ?? pendingPlaceholder.adapterMeta,
+        adapterMeta: mergeAgentMentionHop(body.adapterMeta, pendingPlaceholder.adapterMeta),
         updatedAt: new Date(),
         card: {
           title: pendingPlaceholder.card?.title || matchedAgent?.name || botId,
@@ -2427,8 +2752,46 @@ app.post('/api/bot/messages', async (c) => {
     if (settled) {
       const reactions = (await getReactionsForMessages([settled.id])).get(settled.id) || [];
       const dto = { ...formatMessageRow(settled, 0, reactions), justCompleted: true };
+      queueMobileNotifications(channelRow, settled);
       broadcast({ type: 'message.updated', payload: dto }, channelRow.organizationId);
+      queueAgentMentionDispatch(settled, channelRow);
       return c.json({ message: dto, settledPlaceholder: true }, 200);
+    }
+  }
+
+  let standaloneAdapterMeta = body.adapterMeta ?? null;
+  if (getAgentMentionHop(standaloneAdapterMeta) === 0) {
+    const [activeTurn] = await db
+      .select({ adapterMeta: messages.adapterMeta })
+      .from(messages)
+      .where(
+        and(
+          eq(messages.channelId, channelRow.id),
+          eq(messages.senderAgentId, botId),
+          isNull(messages.deletedAt),
+          sql`${messages.card}->>'status' = 'running'`,
+        ),
+      )
+      .orderBy(desc(messages.createdAt))
+      .limit(1);
+    const [latestInScope] = await db
+      .select({ senderAgentId: messages.senderAgentId, adapterMeta: messages.adapterMeta })
+      .from(messages)
+      .where(
+        and(
+          eq(messages.channelId, channelRow.id),
+          resolvedThreadId ? eq(messages.threadId, resolvedThreadId) : isNull(messages.threadId),
+          isNull(messages.deletedAt),
+        ),
+      )
+      .orderBy(desc(messages.createdAt))
+      .limit(1);
+    const inheritedHop = Math.max(
+      getAgentMentionHop(activeTurn?.adapterMeta),
+      latestInScope?.senderAgentId ? getAgentMentionHop(latestInScope.adapterMeta) : 0,
+    );
+    if (inheritedHop > 0) {
+      standaloneAdapterMeta = mergeAgentMentionHop(standaloneAdapterMeta, null, inheritedHop);
     }
   }
 
@@ -2442,12 +2805,14 @@ app.post('/api/bot/messages', async (c) => {
       content: trimmed,
       attachments: hasFiles ? body.attachments! : null,
       botmuxSessionId: body.botmuxSessionId || null,
-      adapterMeta: body.adapterMeta || null,
+      adapterMeta: standaloneAdapterMeta,
     })
     .returning();
 
   const dto = formatMessageRow(saved);
+  queueMobileNotifications(channelRow, saved);
   broadcast({ type: 'message.created', payload: dto }, channelRow.organizationId);
+  queueAgentMentionDispatch(saved, channelRow);
   return c.json({ message: dto }, 201);
 });
 
@@ -2516,7 +2881,7 @@ async function settleBotTurn(
     .update(messages)
     .set({
       content: content.trim() || (status === 'completed' ? '' : `Agent turn ${status}`),
-      adapterMeta: adapterMeta ?? row.adapterMeta,
+      adapterMeta: mergeAgentMentionHop(adapterMeta, row.adapterMeta),
       updatedAt: new Date(finishedAt),
       card: {
         title: row.card.title || row.senderAgentId,
@@ -2546,6 +2911,9 @@ async function settleBotTurn(
   const orgId = await getChannelOrgId(settled.channelId);
   const message = { ...formatMessageRow(settled, 0, reactions), justCompleted: true };
   broadcast({ type: 'message.updated', payload: message }, orgId);
+  if (status === 'completed') {
+    queueAgentMentionDispatch(settled);
+  }
   return message;
 }
 
@@ -2650,19 +3018,38 @@ app.patch('/api/bot/messages/:messageId', async (c) => {
       }
     : null;
 
+  const transitioningCardToCompleted = Boolean(
+    row.card && row.card.status !== 'completed' && nextStatus === 'completed',
+  );
+
   const [updated] = await db
     .update(messages)
     .set({
       ...(body.content !== undefined ? { content: body.content } : {}),
       ...(body.attachments !== undefined ? { attachments: body.attachments } : {}),
-      ...(body.adapterMeta !== undefined ? { adapterMeta: body.adapterMeta } : {}),
+      ...(body.adapterMeta !== undefined
+        ? { adapterMeta: mergeAgentMentionHop(body.adapterMeta, row.adapterMeta) }
+        : {}),
       ...(nextCard ? { card: nextCard } : {}),
       updatedAt: new Date(),
     })
-    .where(eq(messages.id, messageId))
+    .where(
+      transitioningCardToCompleted
+        ? and(eq(messages.id, messageId), sql`coalesce(${messages.card}->>'status', '') != 'completed'`)
+        : eq(messages.id, messageId),
+    )
     .returning();
 
-  if (!updated) return c.json({ error: 'Message update failed' }, 500);
+  if (!updated) {
+    if (transitioningCardToCompleted) {
+      const latest = await findBotTurnMessage(messageId);
+      if (latest) {
+        const reactions = (await getReactionsForMessages([latest.id])).get(latest.id) || [];
+        return c.json({ ok: true, message: formatMessageRow(latest, 0, reactions) });
+      }
+    }
+    return c.json({ error: 'Message update failed' }, 500);
+  }
   const reactions = (await getReactionsForMessages([updated.id])).get(updated.id) || [];
   const dto = {
     ...formatMessageRow(updated, 0, reactions),
@@ -2670,6 +3057,9 @@ app.patch('/api/bot/messages/:messageId', async (c) => {
   };
   const orgId = await getChannelOrgId(updated.channelId);
   broadcast({ type: 'message.updated', payload: dto }, orgId);
+  if (transitioningCardToCompleted) {
+    queueAgentMentionDispatch(updated);
+  }
   return c.json({ ok: true, message: dto });
 });
 
@@ -3936,6 +4326,8 @@ Bun.serve<WsClientData>({
             channelRow.organizationId,
           );
 
+          queueMobileNotifications(channelRow, saved);
+
           // Auto-unhide DM for all participants when a new message arrives
           if (channelRow.kind === 'dm') {
             await db
@@ -3972,239 +4364,7 @@ Bun.serve<WsClientData>({
               });
           }
 
-          let knownAgents = await dispatcher.listAgents();
-          if (knownAgents.length === 0 && botmuxAdapter.isEnabled()) {
-            await dispatcher.syncBotmuxAgents();
-            knownAgents = await dispatcher.listAgents();
-          }
-
-          const channelMemberRows = await db
-            .select()
-            .from(channelMembers)
-            .where(eq(channelMembers.channelId, channelId));
-          const channelAgentIds = new Set(
-            channelMemberRows.map((m) => m.agentId).filter((id): id is string => Boolean(id)),
-          );
-          const autoReplyBotIds = new Set(
-            channelMemberRows
-              .filter((m) => m.autoReply)
-              .map((m) => m.agentId)
-              .filter((id): id is string => Boolean(id)),
-          );
-
-          // Enforce channel membership for @mention under strict auth (or private DMs)
-          const mentionEligibleAgents =
-            AUTH_REQUIRED || channelRow.kind === 'dm'
-              ? knownAgents.filter((a) => channelAgentIds.has(a.id))
-              : knownAgents;
-
-          const mentioned = dispatcher.findMentionedAgents(trimmed, mentionEligibleAgents);
-
-          const targetAgentMap = new Map<string, ResolvedAgent>();
-          for (const a of mentioned) targetAgentMap.set(a.id, a);
-          for (const a of knownAgents) {
-            if (!a.archived && autoReplyBotIds.has(a.id)) targetAgentMap.set(a.id, a);
-          }
-
-          if (targetAgentMap.size === 0) return;
-
-          const [senderUser] = await db
-            .select({ id: authSchema.user.id, name: authSchema.user.name, email: authSchema.user.email })
-            .from(authSchema.user)
-            .where(eq(authSchema.user.id, senderId));
-
-          const attachmentNote = hasFiles
-            ? `\n\n[附件]\n${attachments!.map((a) => `- ${a.name} (${a.mimeType}, http://localhost:${PORT}${a.url})`).join('\n')}`
-            : '';
-
-          // Build recent conversation history context for agent turns
-          const historyWhere = threadId
-            ? and(
-                eq(messages.channelId, channelId),
-                eq(messages.threadId, threadId),
-                isNull(messages.deletedAt)
-              )
-            : and(
-                eq(messages.channelId, channelId),
-                isNull(messages.threadId),
-                isNull(messages.deletedAt)
-              );
-
-          const [historyRowsDesc, threadRootRows, allUsers] = await Promise.all([
-            db
-              .select()
-              .from(messages)
-              .where(historyWhere)
-              .orderBy(desc(messages.createdAt))
-              .limit(CONTEXT_HISTORY_LIMIT + 1),
-            threadId
-              ? db
-                  .select()
-                  .from(messages)
-                  .where(and(eq(messages.id, threadId), isNull(messages.deletedAt)))
-              : Promise.resolve([]),
-            db
-              .select({ id: authSchema.user.id, name: authSchema.user.name, email: authSchema.user.email })
-              .from(authSchema.user),
-          ]);
-
-          const userNameMap = new Map(
-            allUsers.map((u) => [u.id, resolveDisplayName(u.name, u.email)]),
-          );
-          const botNameMap = new Map(knownAgents.map((a) => [a.id, a.name]));
-
-          const rawHistoryRows = [
-            ...threadRootRows,
-            ...historyRowsDesc
-              .filter((row) => row.id !== saved.id && row.id !== threadId)
-              .slice(0, CONTEXT_HISTORY_LIMIT)
-              .reverse(),
-          ];
-
-          const historyMessages: BuzzTurnContext['messages'] = rawHistoryRows
-            .filter(
-              (row) =>
-                row.card?.status !== 'running' &&
-                row.content.trim().length > 0 &&
-                !row.content.startsWith('正在向本地 Botmux') &&
-                !row.content.startsWith('已在本地 Botmux 启动会话') &&
-                !row.content.startsWith('主会话正忙，正在并行启动')
-            )
-            .map((row) => ({
-              sender: row.senderAgentId
-                ? botNameMap.get(row.senderAgentId) || row.senderAgentId
-                : userNameMap.get(row.senderUserId || '') || row.senderUserId || 'User',
-              role: row.senderAgentId ? ('agent' as const) : ('human' as const),
-              content: row.content,
-            }));
-
-          const channelReplyMode = parseReplyMode(channelRow?.replyMode, DEFAULT_REPLY_MODE);
-
-          for (const agent of targetAgentMap.values()) {
-            const replyThreadId = resolveReplyThreadId(
-              channelReplyMode,
-              channelRow?.kind,
-              threadId,
-              saved.id
-            );
-
-            const turnStartedAt = Date.now();
-            const [placeholder] = await db
-              .insert(messages)
-              .values({
-                channelId,
-                threadId: replyThreadId,
-                senderAgentId: agent.id,
-                content: '',
-                card: {
-                  title: agent.name,
-                  status: 'running',
-                  phase: 'connecting',
-                  startedAt: turnStartedAt,
-                },
-              })
-              .returning();
-            broadcast(
-              { type: 'message.created', payload: formatMessageRow(placeholder) },
-              channelRow.organizationId,
-            );
-
-            const dispatched = await dispatcher.dispatchTurn({
-              agent,
-              turnId: placeholder.id,
-              channel: {
-                id: channelId,
-                name: channelRow?.name || channelId,
-                kind: channelRow?.kind || 'channel',
-                topic: channelRow?.topic || '',
-                replyMode: channelReplyMode,
-              },
-              ...(threadId ? { threadId } : {}),
-              replyThreadId,
-              triggerMessage: {
-                id: saved.id,
-                senderId,
-                senderName: senderUser ? resolveDisplayName(senderUser.name, senderUser.email) : senderId,
-                content: trimmed,
-                attachments: attachments ?? [],
-              },
-              promptWithAttachments: `${trimmed}${attachmentNote}`,
-              history: historyMessages,
-              outboundApi: {
-                endpoint: `${(process.env.PUBLIC_URL || `http://127.0.0.1:${PORT}`).replace(/\/+$/, '')}/api/bot/messages`,
-                progressEndpoint: `${(process.env.PUBLIC_URL || `http://127.0.0.1:${PORT}`).replace(/\/+$/, '')}/api/bot/messages/${placeholder.id}/progress`,
-                cliScriptPath: BUZZ_SEND_CLI_PATH,
-                botId: agent.id,
-                channelId,
-                ...(replyThreadId ? { threadId: replyThreadId } : {}),
-                placeholderMessageId: placeholder.id,
-              },
-              turnStartedAt,
-            });
-
-            if (!dispatched.ok) {
-              const errMsg = dispatched.error || 'Agent 派发失败';
-              const [failed] = await db
-                .update(messages)
-                .set({
-                  content: errMsg,
-                  card: {
-                    title: agent.name,
-                    status: 'dispatch_failed',
-                    ...(dispatched.parallel ? { parallel: true } : {}),
-                    startedAt: turnStartedAt,
-                    finishedAt: Date.now(),
-                    summary: errMsg,
-                  },
-                })
-                .where(and(
-                  eq(messages.id, placeholder.id),
-                  isNull(messages.deletedAt),
-                  sql`${messages.card}->>'status' = 'running'`,
-                ))
-                .returning();
-              if (failed) {
-                broadcast(
-                  { type: 'message.updated', payload: formatMessageRow(failed) },
-                  channelRow.organizationId,
-                );
-              }
-              continue;
-            }
-
-            const summary = dispatched.triggerId
-              ? `${BOTMUX_TRIGGER_SUMMARY_PREFIX}${dispatched.triggerId}`
-              : `adapter: ${dispatched.adapterType}`;
-
-            const [running] = await db
-              .update(messages)
-              .set({
-                botmuxSessionId: dispatched.sessionId || null,
-                adapterMeta: dispatched.adapterMeta || null,
-                content: '',
-                updatedAt: new Date(),
-                card: {
-                  title: agent.name,
-                  status: 'running',
-                  phase: 'thinking',
-                  ...(dispatched.parallel ? { parallel: true } : {}),
-                  startedAt: turnStartedAt,
-                  summary,
-                },
-              })
-              .where(and(eq(messages.id, placeholder.id), sql`${messages.card}->>'status' = 'running'`))
-              .returning();
-            if (running) {
-              broadcast(
-                { type: 'message.updated', payload: formatMessageRow(running) },
-                channelRow.organizationId,
-              );
-            }
-
-            if (dispatched.adapterType === 'botmux') {
-              void dispatcher.getSessions().then((sessions) => broadcastSessionsUpdated(sessions));
-            }
-          }
+          await dispatchAgentTurnsForMessage({ channelRow, saved });
         }
       } catch (err) {
         console.error('[Server] WS message error:', err);

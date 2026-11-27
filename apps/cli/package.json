@@ -1,21 +1,37 @@
 {
-  "name": "@bubai/cli",
-  "version": "0.1.0",
-  "private": true,
+  "name": "@bubx/cli",
+  "version": "0.1.2",
+  "description": "BubAI CLI and Botmux bridge",
   "type": "module",
   "bin": {
-    "bubai": "./src/index.ts"
+    "bub": "dist/main.js"
+  },
+  "files": [
+    "dist/main.js"
+  ],
+  "engines": {
+    "node": ">=22"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/microvoid/bubai.git",
+    "directory": "apps/cli"
+  },
+  "publishConfig": {
+    "access": "public",
+    "registry": "https://registry.npmjs.org/"
   },
   "scripts": {
     "dev": "bun run src/index.ts",
+    "build": "esbuild src/index.ts --bundle --platform=node --format=esm --target=node22 --outfile=dist/main.js",
+    "prepack": "npm run build",
     "typecheck": "tsc --noEmit"
   },
-  "dependencies": {
-    "@buzz-botmux/botmux-client": "workspace:*",
-    "@buzz-botmux/chat-client": "workspace:*"
-  },
   "devDependencies": {
+    "@buzz-botmux/botmux-client": "workspace:*",
+    "@buzz-botmux/chat-client": "workspace:*",
     "@types/bun": "^1.2.15",
+    "esbuild": "0.28.2",
     "typescript": "^5.8.2"
   }
 }

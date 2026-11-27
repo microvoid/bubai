@@ -20,7 +20,8 @@ export interface BuzzTurnContext {
   channel: { id?: string; name: string; kind: string; topic: string; replyMode?: string };
   threadId?: string;
   outboundApi?: {
-    endpoint: string;
+    /** Set only when the runtime should be given a direct reply URL. */
+    endpoint?: string;
     cliScriptPath?: string;
     botId: string;
     channelId: string;
@@ -455,7 +456,7 @@ export class BotmuxClient {
     context?: BuzzTurnContext;
   }): Promise<TriggerResponse> {
     const trimmedSystemPrompt = params.systemPrompt?.trim();
-    const outbound = params.context?.outboundApi;
+    const outbound = params.context?.outboundApi?.endpoint ? params.context.outboundApi : undefined;
     const requiresExplicitOutbound = Boolean(
       outbound && params.cliId && EXPLICIT_OUTBOUND_CLIS.has(params.cliId.toLowerCase()),
     );

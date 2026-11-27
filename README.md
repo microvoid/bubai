@@ -31,6 +31,17 @@ pnpm dev
 * **Web 前端** 默认运行于：`http://localhost:5173`
 * **Gateway 网关** 默认运行于：`http://localhost:4000`（对接本地 Botmux）
 
+## CLI
+
+使用 Node.js 22 或更新版本安装 CLI。
+
+```bash
+npm install -g @bubx/cli
+bub login
+```
+
+`bub` 默认连接 `https://bubai.app/`。使用 `--server` 或 `BUBAI_URL` 可指定其他服务地址。
+
 ## Docker Compose 部署
 
 1. 按 `.env.example` 配置 `PUBLIC_URL`、`DATABASE_URL` 和 `BETTER_AUTH_SECRET`。生产环境默认要求登录，验证码通过 [Cloudflare Email Sending](https://developers.cloudflare.com/email-service/get-started/send-emails/) 发出。在 Cloudflare 启用发件域名后，配置 `CLOUDFLARE_ACCOUNT_ID`、有 `Email Sending: Edit` 权限的 `CLOUDFLARE_EMAIL_API_TOKEN`，以及该域名下的 `EMAIL_FROM`。向任意收件人发信需要 Workers Paid。

@@ -1,0 +1,71 @@
+name: Publish Bubai CLI
+
+on:
+  push:
+    tags:
+      - 'cli-v*'
+
+permissions: {}
+
+jobs:
+  package:
+    if: github.repository == 'microvoid/bubai'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: '24'
+          package-manager-cache: false
+      - name: Check the release tag
+        run: |
+          git merge-base --is-ancestor HEAD origin/main || {
+            echo 'The release tag must point to a commit on main.'
+            exit 1
+          }
+          node <<'NODE'
+          const pkg = require('./apps/cli/package.json');
+          const tag = process.env.GITHUB_REF_NAME;
+          if (pkg.name !== '@bubx/cli' || pkg.private || tag !== `cli-v${pkg.version}`) {
+            console.error(`Expected tag cli-v${pkg.version} for the public @bubx/cli package, got ${tag}`);
+            process.exitCode = 1;
+          }
+          NODE
+      - uses: pnpm/action-setup@73e46992e05b19abd31f2f3c20e0e7370d762115 # v6
+      - run: pnpm --filter '@bubx/cli...' install --frozen-lockfile
+      - run: pnpm --filter @bubx/cli typecheck
+      - name: Pack and check the CLI
+        working-directory: apps/cli
+        run: |
+          version=${GITHUB_REF_NAME#cli-v}
+          npm pack --pack-destination "$RUNNER_TEMP"
+          mv "$RUNNER_TEMP/bubx-cli-$version.tgz" "$RUNNER_TEMP/bubai-cli.tgz"
+          tar -xzf "$RUNNER_TEMP/bubai-cli.tgz" -C "$RUNNER_TEMP" package/dist/main.js
+          test "$(node "$RUNNER_TEMP/package/dist/main.js" --version)" = "$version"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: bubai-cli
+          path: ${{ runner.temp }}/bubai-cli.tgz
+          if-no-files-found: error
+          overwrite: true
+
+  publish:
+    needs: package
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
+        with:
+          name: bubai-cli
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: '24'
+          package-manager-cache: false
+      - name: Publish to npm with OIDC
+        run: npm publish ./bubai-cli.tgz --access public --ignore-scripts

@@ -14,11 +14,16 @@ export interface BotmuxBridgeOptions {
   botToken?: string;
   botmuxEndpoint: string;
   botmuxToken?: string;
+  botIds?: string[];
   channelRef?: string;
   autoReply?: boolean;
   pollMs?: number;
+  turnTimeoutMs?: number;
   onReady?: (info: { agentIds: string[]; connectionId: string }) => void;
 }
+
+const TURN_TIMEOUT_MS = 30 * 60_000;
+const RESULT_NOT_FOUND_GRACE_MS = 10_000;
 
 const BOTMUX_CAPABILITIES = [
   'progress_steps',
@@ -29,6 +34,26 @@ const BOTMUX_CAPABILITIES = [
 
 function isBotCredential(token?: string): boolean {
   return Boolean(token && (token.startsWith('bot_') || token.startsWith('bot-server_')));
+}
+
+async function completeTurn(
+  sdk: BubaiClient,
+  messageId: string,
+  result: Parameters<BubaiClient['completeBotTurn']>[1],
+): Promise<void> {
+  for (let attempt = 1; ; attempt++) {
+    try {
+      await sdk.completeBotTurn(messageId, result, { signal: AbortSignal.timeout(5_000) });
+      return;
+    } catch (error) {
+      const status = error instanceof Error && 'status' in error && typeof error.status === 'number'
+        ? error.status
+        : undefined;
+      const permanentError = status !== undefined && status >= 400 && status < 500 && status !== 408 && status !== 429;
+      if (permanentError || attempt === 3) throw error;
+      await new Promise((resolve) => setTimeout(resolve, attempt * 250));
+    }
+  }
 }
 
 /**
@@ -46,10 +71,22 @@ export async function startBotmuxBridge(options: BotmuxBridgeOptions): Promise<{
 }> {
   const botmux = new BotmuxClient(options.botmuxEndpoint, options.botmuxToken);
   const pollMs = options.pollMs ?? 500;
+  const turnTimeoutMs = options.turnTimeoutMs ?? TURN_TIMEOUT_MS;
   const sessionBindings = new Map<string, string>();
   let stopped = false;
 
-  const bots: BotmuxBot[] = await botmux.getBots();
+  const requestedIds = new Set(options.botIds);
+  if (options.botIds && requestedIds.size === 0) {
+    throw new Error('Specify at least one Botmux bot ID');
+  }
+  const discoveredBots: BotmuxBot[] = await botmux.getBots();
+  const missingIds = [...requestedIds].filter((id) => !discoveredBots.some((bot) => bot.larkAppId === id));
+  if (missingIds.length > 0) {
+    throw new Error('Botmux bot IDs not found: ' + missingIds.join(', '));
+  }
+  const bots = requestedIds.size > 0
+    ? discoveredBots.filter((bot) => requestedIds.has(bot.larkAppId))
+    : discoveredBots;
   const explicitBotToken = options.botToken || (isBotCredential(options.token) ? options.token : undefined);
   const humanToken = !isBotCredential(options.token) ? options.token : undefined;
 
@@ -115,8 +152,7 @@ export async function startBotmuxBridge(options: BotmuxBridgeOptions): Promise<{
 
   const handleTurn = async (
     event: BotTurnRequestedEvent,
-    gateway: BotGatewayHandle,
-    fallbackSdk: BubaiClient,
+    sdk: BubaiClient,
   ) => {
     const externalBotId = event.externalId || event.botId;
     const bot = bots.find((b) => b.larkAppId === externalBotId);
@@ -141,7 +177,6 @@ export async function startBotmuxBridge(options: BotmuxBridgeOptions): Promise<{
             channel: event.channel,
             ...(event.threadId ? { threadId: event.threadId } : {}),
             outboundApi: {
-              endpoint: event.outboundApi.endpoint,
               botId: event.botId,
               channelId: event.replyTarget.channelId,
               ...(event.replyTarget.threadId ? { threadId: event.replyTarget.threadId } : {}),
@@ -171,76 +206,60 @@ export async function startBotmuxBridge(options: BotmuxBridgeOptions): Promise<{
       'target' in triggered ? triggered.target?.sessionId || existingSessionId : existingSessionId;
     const triggerId = 'triggerId' in triggered ? triggered.triggerId : undefined;
 
+    const messageId = event.replyTarget.messageId;
     if (!triggered.ok || !sessionId || !triggerId) {
-      const errMsg = triggered.error || 'Botmux dispatch failed';
-      if (
-        !gateway.sendTurnComplete({
-          botId: event.botId,
-          messageId: event.replyTarget.messageId,
-          content: errMsg,
-          status: 'failed',
-        })
-      ) {
-        await fallbackSdk.updateBotMessage(event.replyTarget.messageId, {
-          content: errMsg,
-          status: 'failed',
-        });
-      }
+      await completeTurn(sdk, messageId, {
+        content: triggered.error || 'Botmux dispatch failed',
+        status: 'failed',
+      });
       return;
     }
 
     sessionBindings.set(bindingKey, sessionId);
 
-    const deadline = Date.now() + 30 * 60_000;
+    const adapterMeta = { adapter: 'bubai-cli-botmux', sessionId, triggerId };
+    const startedAt = Date.now();
+    const deadline = startedAt + turnTimeoutMs;
     while (!stopped && Date.now() < deadline) {
-      await new Promise((r) => setTimeout(r, pollMs));
+      await new Promise((resolve) => setTimeout(resolve, Math.min(pollMs, deadline - Date.now())));
+      if (stopped || Date.now() >= deadline) break;
       const result = await botmux.pollTriggerResult(sessionId, triggerId).catch(() => undefined);
       if (!result) continue;
 
       if (result.state === 'completed') {
-        const content = result.output?.content?.trim() || '（任务已完成，无文本输出）';
-        const meta = { adapter: 'bubai-cli-botmux', sessionId, triggerId };
-        if (
-          !gateway.sendTurnComplete({
-            botId: event.botId,
-            messageId: event.replyTarget.messageId,
-            content,
-            status: 'completed',
-            adapterMeta: meta,
-          })
-        ) {
-          await fallbackSdk.sendBotMessage({
-            botId: event.botId,
-            channelId: event.replyTarget.channelId,
-            threadId: event.replyTarget.threadId,
-            messageId: event.replyTarget.messageId,
-            content,
-            adapterMeta: meta,
-          });
-        }
+        await completeTurn(sdk, messageId, {
+          content: result.output?.content?.trim() || '（任务已完成，无文本输出）',
+          status: 'completed',
+          adapterMeta,
+        });
         return;
       }
 
       if (result.state === 'failed' || result.state === 'interrupted') {
-        const errText = result.error || `Botmux turn ${result.state}`;
-        const meta = { adapter: 'bubai-cli-botmux', sessionId, triggerId };
-        if (
-          !gateway.sendTurnComplete({
-            botId: event.botId,
-            messageId: event.replyTarget.messageId,
-            content: errText,
-            status: result.state,
-            adapterMeta: meta,
-          })
-        ) {
-          await fallbackSdk.updateBotMessage(event.replyTarget.messageId, {
-            content: errText,
-            status: result.state,
-            adapterMeta: meta,
-          });
-        }
+        await completeTurn(sdk, messageId, {
+          content: result.error || 'Botmux turn ' + result.state,
+          status: result.state,
+          adapterMeta,
+        });
         return;
       }
+
+      if (result.state === 'not_found' && Date.now() - startedAt >= RESULT_NOT_FOUND_GRACE_MS) {
+        await completeTurn(sdk, messageId, {
+          content: 'Botmux 未找到本轮执行记录',
+          status: 'failed',
+          adapterMeta,
+        });
+        return;
+      }
+    }
+
+    if (!stopped) {
+      await completeTurn(sdk, messageId, {
+        content: '等待 Botmux 回复超时',
+        status: 'timeout',
+        adapterMeta,
+      });
     }
   };
 
@@ -272,7 +291,9 @@ export async function startBotmuxBridge(options: BotmuxBridgeOptions): Promise<{
         options.onReady?.(info);
       },
       onTurnRequested: (event) => {
-        void handleTurn(event, gw, groupSdk);
+        void handleTurn(event, groupSdk).catch((error) => {
+          console.error('Botmux bridge could not settle message ' + event.replyTarget.messageId + ':', error);
+        });
       },
       onAskAnswered: (answer) => {
         void botmux.answerAsk(answer);

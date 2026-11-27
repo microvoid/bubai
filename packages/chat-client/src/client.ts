@@ -104,7 +104,7 @@ export class BubaiClient {
         typeof parsed === 'object' && parsed !== null && 'error' in parsed
           ? String((parsed as { error: unknown }).error)
           : `HTTP ${res.status}`;
-      throw new Error(msg);
+      throw Object.assign(new Error(msg), { status: res.status });
     }
     return parsed as T;
   }
@@ -498,6 +498,22 @@ export class BubaiClient {
     return this.requestJson(`/api/bot/messages/${encodeURIComponent(messageId)}`, {
       method: 'PATCH',
       body: JSON.stringify(patch),
+    });
+  }
+
+  completeBotTurn(
+    messageId: string,
+    input: {
+      content: string;
+      status: Exclude<MessageCardStatus, 'running' | 'waiting_approval'>;
+      adapterMeta?: Record<string, unknown>;
+    },
+    options?: { signal?: AbortSignal },
+  ): Promise<{ ok: true; settled: boolean; message: ChatMessage }> {
+    return this.requestJson(`/api/bot/messages/${encodeURIComponent(messageId)}/complete`, {
+      method: 'POST',
+      body: JSON.stringify(input),
+      signal: options?.signal,
     });
   }
 

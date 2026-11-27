@@ -21,17 +21,19 @@ importers:
         version: 5.9.3
 
   apps/cli:
-    dependencies:
+    devDependencies:
       '@buzz-botmux/botmux-client':
         specifier: workspace:*
         version: link:../../packages/botmux-client
       '@buzz-botmux/chat-client':
         specifier: workspace:*
         version: link:../../packages/chat-client
-    devDependencies:
       '@types/bun':
         specifier: ^1.2.15
         version: 1.4.5
+      esbuild:
+        specifier: 0.28.2
+        version: 0.28.2
       typescript:
         specifier: ^5.8.2
         version: 5.9.3

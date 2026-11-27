@@ -3,7 +3,8 @@ import { mobileGetSession, mobileListOrganizations } from '../../apps/mobile/src
 
 async function withResponse(body: unknown, status: number, run: (url: string) => Promise<void>) {
   const server = Bun.serve({
-    hostname: '127.0.0.1', port: 0,
+    hostname: '127.0.0.1',
+    port: 0,
     fetch: () => Response.json(body, { status }),
   });
   try {
@@ -14,16 +15,28 @@ async function withResponse(body: unknown, status: number, run: (url: string) =>
 }
 
 test('a temporary server outage does not invalidate the mobile session', () =>
-  withResponse({}, 503, async url => {
+  withResponse({}, 503, async (url) => {
     await expect(mobileGetSession(url, 'fixture')).rejects.toThrow();
   }));
 
 test('an expired session requires sign-in', () =>
-  withResponse({}, 401, async url => {
+  withResponse({}, 401, async (url) => {
     expect(await mobileGetSession(url, 'fixture')).toBeNull();
   }));
 
 test('an invalid organization response cannot start community creation', () =>
-  withResponse({}, 200, async url => {
+  withResponse({}, 200, async (url) => {
+    await expect(mobileListOrganizations(url, 'fixture')).rejects.toThrow();
+  }));
+
+test('an offline cold start leaves session validation retryable', async () => {
+  const server = Bun.serve({ hostname: '127.0.0.1', port: 0, fetch: () => new Response() });
+  const url = server.url.href;
+  await server.stop(true);
+  await expect(mobileGetSession(url, 'fixture')).rejects.toThrow();
+});
+
+test('an HTTP error while listing communities cannot be mistaken for an empty workspace', () =>
+  withResponse({ error: 'temporarily unavailable' }, 503, async (url) => {
     await expect(mobileListOrganizations(url, 'fixture')).rejects.toThrow();
   }));

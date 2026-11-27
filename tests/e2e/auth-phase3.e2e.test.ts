@@ -70,11 +70,18 @@ async function signUpAndCreateOrg(email: string, name: string, orgName: string, 
 
 describe('Phase 3 E2E: Bot Convergence, Strict Bot API Key, CLI Device Auth, and Mobile Auth', () => {
   let tempDir = '';
+  const notifications: { to: string; data: { messageId: string } }[] = [];
+  let pushRelay: ReturnType<typeof Bun.serve>;
   let cliConfigDir = '';
   let serverProc: ChildProcess | null = null;
 
 
   before(async () => {
+    pushRelay = Bun.serve({ hostname: '127.0.0.1', port: 0, async fetch(request) {
+      const batch = await request.json();
+      notifications.push(...batch);
+      return Response.json({ data: batch.map(() => ({ status: 'ok', id: crypto.randomUUID() })) });
+    } });
     tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'bubai-auth-phase3-'));
     cliConfigDir = path.join(tempDir, 'cli-config');
     // Note: BUZZ_BOT_TOKEN is intentionally EMPTY while BUBAI_AUTH_REQUIRED=true
@@ -85,6 +92,7 @@ describe('Phase 3 E2E: Bot Convergence, Strict Bot API Key, CLI Device Auth, and
       env: {
         ...process.env,
         PORT: String(PORT),
+        EXPO_PUSH_ENDPOINT: pushRelay.url.href,
         CLOUDFLARE_ACCOUNT_ID: '', CLOUDFLARE_EMAIL_API_TOKEN: '', EMAIL_FROM: '',
         DATABASE_URL: '',
         BUBAI_AUTH_REQUIRED: 'true',
@@ -99,6 +107,7 @@ describe('Phase 3 E2E: Bot Convergence, Strict Bot API Key, CLI Device Auth, and
   });
 
   after(() => {
+    pushRelay?.stop(true);
     if (serverProc && !serverProc.killed) {
       serverProc.kill('SIGKILL');
     }
@@ -397,9 +406,9 @@ describe('Phase 3 E2E: Bot Convergence, Strict Bot API Key, CLI Device Auth, and
 
     // (c) Authenticated BubaiClient bootstrap succeeds with Bearer token
     const client = new BubaiClient({ baseUrl: BASE_URL, token: otpSession.token });
-    assert.equal((await client.registerPush('native-e2e-device', 'ios')).ok, true);
-    assert.equal((await client.registerPush('native-e2e-device', 'ios')).ok, true);
-    assert.equal((await client.unregisterPush('native-e2e-device')).ok, true);
+    assert.equal((await client.registerPush('ExpoPushToken[native-e2e-device]', 'ios')).ok, true);
+    assert.equal((await client.registerPush('ExpoPushToken[native-e2e-device]', 'ios')).ok, true);
+    assert.equal((await client.unregisterPush('ExpoPushToken[native-e2e-device]')).ok, true);
     const boot = await client.bootstrap(otpSession.user.id);
     assert.ok(boot.channels.some((c) => c.name === 'general'), 'Expected org #general channel in mobile bootstrap');
 
@@ -417,4 +426,70 @@ describe('Phase 3 E2E: Bot Convergence, Strict Bot API Key, CLI Device Auth, and
     assert.ok(pwSession.token);
     assert.equal(pwSession.user.email, 'phase3-alice@example.com');
   });
+  it('mobile workspace owners invite, accept, manage and remove a member', async () => {
+    const mobile = await import('../../apps/mobile/src/services/auth');
+    const owner = await signUpAndCreateOrg('native-owner@example.test', 'Native Owner', 'Native Team', 'native-team');
+    const deviceResponse = await fetch(BASE_URL + '/api/auth/device/code', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ client_id: 'bubai-cli' }),
+    });
+    assert.ok(deviceResponse.ok);
+    const device = await deviceResponse.json() as { user_code: string; device_code: string };
+    await mobile.mobileDeviceDecision(BASE_URL, owner.token, device.user_code, true);
+    const approved = await fetch(BASE_URL + '/api/auth/device/token', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ grant_type: 'urn:ietf:params:oauth:grant-type:device_code', device_code: device.device_code, client_id: 'bubai-cli' }),
+    });
+    assert.ok(approved.ok);
+    const guest = await signUpAndCreateOrg('native-guest@example.test', 'Native Guest', 'Guest Team', 'guest-team');
+    const invite = await mobile.mobileInviteMember(BASE_URL, owner.token, owner.org.id, 'native-guest@example.test');
+    const info = await mobile.mobileGetInvite(BASE_URL, guest.token, invite.id);
+    assert.equal(info.organizationName, owner.org.name);
+    await mobile.mobileInviteDecision(BASE_URL, guest.token, invite.id, true);
+    await mobile.mobileSetActiveOrganization(BASE_URL, guest.token, owner.org.id);
+    const ownerClient = new BubaiClient({ baseUrl: BASE_URL, token: owner.token });
+    const guestClient = new BubaiClient({ baseUrl: BASE_URL, token: guest.token });
+    const { channel: dm } = await ownerClient.openDm({
+      userId: owner.user.id, targetId: guest.user.id, targetName: guest.user.name, targetRole: 'human',
+    });
+    assert.equal(dm.kind, 'dm');
+    const { buildMentionCandidates } = await import('../../packages/chat-client/src/mention-candidates');
+    const boot = await ownerClient.bootstrap(owner.user.id);
+    const candidates = buildMentionCandidates({
+      participants: boot.participants, currentUserId: owner.user.id, channelKind: 'dm', dmKey: dm.dmKey,
+    });
+    assert.deepEqual(candidates.map(candidate => candidate.id), [guest.user.id]);
+    let guestReady = false;
+    let ownerReady = false;
+    let typing = false;
+    const guestSocket = guestClient.connectWebSocket({ userId: guest.user.id, onEvent: () => {},
+      onStateChange: state => { guestReady = state === 'open'; } });
+    const ownerSocket = ownerClient.connectWebSocket({ userId: owner.user.id,
+      onStateChange: state => { ownerReady = state === 'open'; },
+      onEvent: event => { if (event.type === 'typing.updated' && event.payload.channelId === dm.id && event.payload.userId === guest.user.id) typing = true; },
+    });
+    try {
+      for (let n = 0; n < 100 && !(ownerReady && guestReady); n++) await Bun.sleep(30);
+      guestSocket.send({ type: 'typing.start', payload: { channelId: dm.id, userId: guest.user.id } });
+      for (let n = 0; n < 100 && !typing; n++) await Bun.sleep(30);
+      assert.equal(typing, true);
+      const device = 'ExpoPushToken[native-recipient]';
+      await ownerClient.registerPush(device, 'ios');
+      const messageId = crypto.randomUUID();
+      await guestSocket.sendMessage({ channelId: dm.id, senderId: guest.user.id, messageId, content: 'Mobile notification' });
+      for (let n = 0; n < 50 && !notifications.some(entry => entry.data.messageId === messageId); n++) await Bun.sleep(30);
+      assert.deepEqual(notifications.filter(entry => entry.data.messageId === messageId).map(entry => entry.to), [device]);
+      await ownerClient.unregisterPush(device);
+    } finally { guestSocket.close(); ownerSocket.close(); }
+    const roster = () => mobile.mobileCommunityRoster(BASE_URL, owner.token, owner.org.id);
+    const member = (await roster()).members.find(m => m.userId === guest.user.id);
+    assert.ok(member);
+    await mobile.mobileSetMemberRole(BASE_URL, owner.token, owner.org.id, member.id, 'admin');
+    assert.equal((await roster()).members.find(m => m.id === member.id)?.role, 'admin');
+    await mobile.mobileRemoveMember(BASE_URL, owner.token, owner.org.id, member.id);
+    assert.ok(!(await roster()).members.some(m => m.id === member.id));
+    const second = await mobile.mobileInviteMember(BASE_URL, owner.token, owner.org.id, 'native-guest@example.test');
+    await mobile.mobileCancelInvitation(BASE_URL, owner.token, second.id);
+    await assert.rejects(mobile.mobileInviteDecision(BASE_URL, guest.token, second.id, true));
+  });
+
 });

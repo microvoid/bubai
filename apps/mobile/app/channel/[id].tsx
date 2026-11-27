@@ -1,3 +1,7 @@
+import { attachmentSource } from '@/services/attachments';
+import { ChannelSettings } from '@/components/ChannelSettings';
+import { useDraft } from '@/store/useDraft';
+import { pickAttachments } from '@/services/pickAttachments';
 import type {
   ChannelMemberRow,
   ChatMessage,
@@ -7,9 +11,8 @@ import type {
 import { buzzGrid, buzzRadii, buzzTypography } from '@buzz-botmux/design-tokens';
 import { Ionicons } from '@expo/vector-icons';
 import * as Haptics from 'expo-haptics';
-import * as ImagePicker from 'expo-image-picker';
-import { useLocalSearchParams, useRouter } from 'expo-router';
-import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import { useFocusEffect, useLocalSearchParams, useRouter } from 'expo-router';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   ActivityIndicator,
   Alert,
@@ -23,6 +26,8 @@ import {
   StyleSheet,
   Switch,
   Text,
+  TextInput,
+  Button,
   View,
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
@@ -43,20 +48,25 @@ function sameGroup(prev: ChatMessage | undefined, curr: ChatMessage): boolean {
 }
 
 export default function ChannelScreen() {
-  const { id } = useLocalSearchParams<{ id: string }>();
+  const { id, messageId } = useLocalSearchParams<{ id: string; messageId?: string }>();
+  const list = useRef<FlatList<ChatMessage>>(null);
+  const jumped = useRef<string | undefined>(undefined);
+  const focused = useRef(false);
   const channelId = Array.isArray(id) ? id[0] : id || '';
   const router = useRouter();
   const insets = useSafeAreaInsets();
   const { colors } = useBuzzTheme();
   const {
     client,
-    serverUrl,
+    serverUrl, authToken,
+    activeOrgId,
     currentUserId,
     channels,
     participants,
     asks,
     answerAsk,
     sendWsMessage,
+    wsState,
     subscribeWsEvents,
     clearChannelUnread,
   } = useBubai();
@@ -83,9 +93,10 @@ export default function ChannelScreen() {
   const [loading, setLoading] = useState(true);
   const [hasMore, setHasMore] = useState(false);
   const [nextCursor, setNextCursor] = useState<number | null>(null);
+  const [nextCursorId, setNextCursorId] = useState<string>();
   const [loadingOlder, setLoadingOlder] = useState(false);
 
-  const [draft, setDraft] = useState('');
+  const [draft, setDraft] = useDraft(serverUrl, activeOrgId, currentUserId, channelId);
   const [uploading, setUploading] = useState(false);
   const [editingMessage, setEditingMessage] = useState<ChatMessage | null>(null);
   const [actionMessage, setActionMessage] = useState<ChatMessage | null>(null);
@@ -94,6 +105,7 @@ export default function ChannelScreen() {
   const [pins, setPins] = useState<ChatMessage[]>([]);
   const [pinsOpen, setPinsOpen] = useState(false);
   const [members, setMembers] = useState<ChannelMemberRow[]>([]);
+  const [memberSearch, setMemberSearch] = useState('');
   const [membersOpen, setMembersOpen] = useState(false);
 
   const loadInitial = useCallback(async () => {
@@ -101,24 +113,37 @@ export default function ChannelScreen() {
     setLoading(true);
     try {
       const [msgRes, pinRes, memRes] = await Promise.all([
-        client.getChannelMessages(channelId, { limit: 50 }),
+        client.getChannelMessages(channelId, { limit: 50, userId: currentUserId }),
         client.getPins(channelId).catch(() => ({ pins: [] })),
         client.getChannelMembers(channelId).catch(() => ({ members: [] })),
       ]);
-      setMessages(msgRes.messages ?? []);
-      setHasMore(Boolean(msgRes.hasMore));
-      setNextCursor(msgRes.nextCursor ?? null);
+      if (!focused.current) return;
+      let page = msgRes;
+      let history = page.messages;
+      while (messageId && !history.some(m => m.id === messageId) && page.hasMore && page.nextCursor != null) {
+        const older = await client.getChannelMessages(channelId, { userId: currentUserId, before: page.nextCursor, beforeId: page.nextCursorId, limit: 50 });
+        if (!focused.current || !older.messages.length) break;
+        history = [...older.messages, ...history];
+        page = older;
+      }
+      if (!focused.current) return;
+      setMessages(history);
+      setHasMore(Boolean(page.hasMore));
+      setNextCursorId(page.nextCursorId);
+      setNextCursor(page.nextCursor ?? null);
       setPins(pinRes.pins ?? []);
       setMembers(memRes.members ?? []);
       clearChannelUnread(channelId);
     } finally {
       setLoading(false);
     }
-  }, [channelId, clearChannelUnread, client]);
+  }, [channelId, clearChannelUnread, client, currentUserId, messageId]);
 
-  useEffect(() => {
-    void loadInitial();
-  }, [loadInitial]);
+  useFocusEffect(useCallback(() => {
+    focused.current = true;
+    if (wsState === 'open') void loadInitial().catch(error => Alert.alert('加载失败', String(error)));
+    return () => { focused.current = false; };
+  }, [loadInitial, wsState]));
 
   // Live WS updates for this channel
   useEffect(() => {
@@ -135,7 +160,9 @@ export default function ChannelScreen() {
           return;
         }
         setMessages((prev) => (prev.some((m) => m.id === msg.id) ? prev : [...prev, msg]));
-        clearChannelUnread(channelId);
+        if (focused.current) clearChannelUnread(channelId);
+      } else if (event.type === 'channel.members.updated' && event.payload.channelId === channelId) {
+        setMembers(event.payload.members);
       } else if (event.type === 'message.updated') {
         const msg = event.payload;
         if (msg.channelId !== channelId) return;
@@ -161,13 +188,14 @@ export default function ChannelScreen() {
     if (!client || !channelId || !hasMore || !nextCursor || loadingOlder) return;
     setLoadingOlder(true);
     try {
-      const res = await client.getChannelMessages(channelId, { before: nextCursor, limit: 50 });
+      const res = await client.getChannelMessages(channelId, { before: nextCursor, beforeId: nextCursorId, userId: currentUserId, limit: 50 });
       setMessages((prev) => {
         const seen = new Set(prev.map((m) => m.id));
         const older = (res.messages ?? []).filter((m) => !seen.has(m.id));
         return [...older, ...prev];
       });
       setHasMore(Boolean(res.hasMore));
+      setNextCursorId(res.nextCursorId);
       setNextCursor(res.nextCursor ?? null);
     } finally {
       setLoadingOlder(false);
@@ -180,10 +208,10 @@ export default function ChannelScreen() {
 
     if (editingMessage && client) {
       const target = editingMessage;
-      setDraft('');
-      setEditingMessage(null);
       try {
         const { message } = await client.editMessage(target.id, trimmed);
+        setEditingMessage(null);
+        setDraft(current => current.trim() === trimmed ? '' : current);
         setMessages((prev) => prev.map((m) => (m.id === message.id ? { ...m, ...message } : m)));
       } catch (err) {
         Alert.alert('编辑失败', err instanceof Error ? err.message : '无法保存编辑');
@@ -191,44 +219,27 @@ export default function ChannelScreen() {
       return;
     }
 
-    const ok = sendWsMessage({ channelId, content: trimmed });
-    if (ok) {
-      setDraft('');
-    } else {
-      Alert.alert('未连接', 'WebSocket 正在重连，请稍后再试。');
+    try {
+      await sendWsMessage({ channelId, content: trimmed });
+      setDraft(current => current.trim() === trimmed ? '' : current);
+    } catch (error) {
+      Alert.alert('发送失败', error instanceof Error ? error.message : String(error));
     }
   };
 
   const handlePickAttachment = async () => {
     if (!client || !channelId || uploading) return;
     try {
-      const perm = await ImagePicker.requestMediaLibraryPermissionsAsync();
-      if (!perm.granted) {
-        Alert.alert('需要相册权限', '请在系统设置中允许 Bubai 访问照片以发送图片。');
-        return;
-      }
-      const result = await ImagePicker.launchImageLibraryAsync({
-        mediaTypes: ['images'],
-        quality: 0.85,
-      });
-      if (result.canceled || !result.assets[0]) return;
-      const asset = result.assets[0];
       setUploading(true);
-      const formData = new FormData();
-      formData.append('file', {
-        uri: asset.uri,
-        name: asset.fileName || `photo-${Date.now()}.jpg`,
-        type: asset.mimeType || 'image/jpeg',
-      } as unknown as Blob);
-      const attachment = await client.uploadFile(formData);
+      const attachments = await pickAttachments(client);
+      if (!attachments.length) return;
       const caption = draft.trim();
-      const ok = sendWsMessage({
+      await sendWsMessage({
         channelId,
-        content: caption || `[Image: ${attachment.name}]`,
-        attachments: [attachment],
+        content: caption,
+        attachments,
       });
-      if (ok && caption) setDraft('');
-      if (!ok) Alert.alert('未连接', '图片已上传，但 WebSocket 正在重连，请稍后重试。');
+      if (caption) setDraft(current => current.trim() === caption ? '' : current);
     } catch (err) {
       Alert.alert('上传失败', err instanceof Error ? err.message : '无法上传附件');
     } finally {
@@ -355,8 +366,8 @@ export default function ChannelScreen() {
               </Text>
             )}
           </Pressable>
-          {channel?.kind !== 'dm' && (
-            <Pressable onPress={() => setMembersOpen(true)} style={styles.iconBtn} hitSlop={6}>
+          {channel && (
+            <Pressable accessibilityLabel="频道设置与成员" onPress={() => setMembersOpen(true)} style={styles.iconBtn} hitSlop={6}>
               <Ionicons name="people-outline" size={20} color={colors.onSurface} />
             </Pressable>
           )}
@@ -407,7 +418,14 @@ export default function ChannelScreen() {
           </View>
         ) : (
           <FlatList
+            ref={list}
             inverted
+            onScrollToIndexFailed={info => list.current?.scrollToOffset({offset: info.averageItemLength * info.index, animated: false})}
+            onContentSizeChange={() => {
+              if (!messageId || jumped.current === messageId) return;
+              const index = invertedMessages.findIndex(message => message.id === messageId);
+              if (index >= 0) { jumped.current = messageId; list.current?.scrollToIndex({index, animated: false}); }
+            }}
             data={invertedMessages}
             keyExtractor={(item) => item.id}
             contentContainerStyle={styles.listContent}
@@ -491,6 +509,8 @@ export default function ChannelScreen() {
               ? `Message ${dmAgent?.name || 'Agent'}…`
               : `Message #${channel?.name || 'channel'}… (输入 @ 召唤 Agent)`
           }
+          currentUserId={currentUserId}
+          channel={channel} messages={messages}
           participants={participants}
           editingLabel={editingMessage ? `正在编辑消息…` : null}
           onCancelEdit={() => {
@@ -564,15 +584,18 @@ export default function ChannelScreen() {
         <View style={[styles.root, { backgroundColor: colors.surface, paddingTop: Platform.OS === 'android' ? insets.top : 8 }]}>
           <View style={[styles.header, { borderBottomColor: colors.outline }]}>
             <Text style={[buzzTypography.title, { color: colors.onSurface, flex: 1 }]}>
-              Channel Agents & Auto-Reply
+              频道设置与成员
             </Text>
             <Pressable onPress={() => setMembersOpen(false)} style={styles.iconBtn}>
               <Ionicons name="close" size={22} color={colors.onSurface} />
             </Pressable>
           </View>
           <ScrollView contentContainerStyle={[styles.sheetScroll, { paddingBottom: Math.max(insets.bottom, 20) }]}>
-            {agents.map((agent) => {
-              const row = members.find((m) => m.agentId === agent.id);
+            {channel && <ChannelSettings channel={channel} leave={() => { setMembersOpen(false); router.replace('/(tabs)'); }} />}
+            <TextInput placeholder="搜索成员" value={memberSearch} onChangeText={setMemberSearch} style={{ color: colors.onSurface }} />
+            {participants.filter(p => !p.archived && p.name.toLowerCase().includes(memberSearch.toLowerCase())).map((agent) => {
+              const row = members.find(m => (m.agentId || m.userId) === agent.id);
+              const identity = agent.role === 'agent' ? { agentId: agent.id } : { userId: agent.id };
               const enabled = Boolean(row?.autoReply);
               return (
                 <View
@@ -594,13 +617,21 @@ export default function ChannelScreen() {
                       {agent.name}
                     </Text>
                     <Text style={[buzzTypography.caption, { color: colors.onSurfaceVariant }]}>
-                      自动响应频道消息（无需 @）
+                      {agent.role} · {row ? '频道成员' : '频道外'}
                     </Text>
                   </View>
-                  <Switch
+                  <Button title={row ? '移除' : '添加'} onPress={async () => {
+                    if (!client) return;
+                    try {
+                      if (row) await client.removeChannelMember(channelId, identity);
+                      else await client.upsertChannelMember(channelId, identity);
+                      setMembers((await client.getChannelMembers(channelId)).members);
+                    } catch (error) { Alert.alert('成员更新失败', String(error)); }
+                  }} />
+                  {row && agent.role === 'agent' && <Switch
                     value={enabled}
                     onValueChange={(v) => void handleToggleAutoReply(agent.id, v)}
-                  />
+                  />}
                 </View>
               );
             })}
@@ -638,11 +669,7 @@ export default function ChannelScreen() {
           </Pressable>
           {previewAttachment && (
             <Image
-              source={{
-                uri: /^https?:\/\//i.test(previewAttachment.url)
-                  ? previewAttachment.url
-                  : `${serverUrl || ''}${previewAttachment.url}`,
-              }}
+              source={attachmentSource(serverUrl!, previewAttachment.url, authToken)}
               style={styles.fullImage}
               resizeMode="contain"
             />

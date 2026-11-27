@@ -1,3 +1,4 @@
+import type { Participant } from '@buzz-botmux/chat-client';
 import { buzzGrid, buzzRadii, buzzTypography } from '@buzz-botmux/design-tokens';
 import type { Channel } from '@buzz-botmux/chat-client';
 import { Ionicons } from '@expo/vector-icons';
@@ -35,10 +36,9 @@ export default function MessagesScreen() {
   const {
     client,
     currentUserId,
-    channels,
+    channels, sidebarGroups,
     participants,
     wsState,
-    botmuxConnected,
     isLoading,
     error,
     serverUrl,
@@ -59,7 +59,7 @@ export default function MessagesScreen() {
   const filtered = useMemo(() => {
     switch (filter) {
       case 'unread':
-        return visibleChannels.filter((c) => (c.unreadCount || 0) > 0);
+        return visibleChannels.filter((c) => Boolean(c.unreadCount || c.threadUnreadCount || c.mentionCount || c.markedUnread));
       case 'channels':
         return visibleChannels.filter((c) => c.kind !== 'dm');
       case 'dms':
@@ -78,7 +78,7 @@ export default function MessagesScreen() {
     [filtered],
   );
   const unreadCount = useMemo(
-    () => visibleChannels.filter((c) => (c.unreadCount || 0) > 0).length,
+    () => visibleChannels.filter((c) => Boolean(c.unreadCount || c.threadUnreadCount || c.mentionCount || c.markedUnread)).length,
     [visibleChannels],
   );
 
@@ -118,13 +118,13 @@ export default function MessagesScreen() {
     }
   };
 
-  const handleStartDmWithAgent = async (agentId: string, agentName: string) => {
+  const handleStartDm = async (agentId: string, agentName: string, role: Participant['role']) => {
     if (!client) return;
     try {
       const { channel } = await client.openDm({
         userId: currentUserId,
         targetId: agentId,
-        targetRole: 'agent',
+        targetRole: role,
         targetName: agentName,
       });
       setCreateOpen(false);
@@ -142,12 +142,10 @@ export default function MessagesScreen() {
         <Text style={[buzzTypography.largeTitle, { color: colors.onSurface }]}>Messages</Text>
         <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
           <BuzzConnectionPill
-            connected={wsState === 'open' && botmuxConnected}
+            connected={wsState === 'open'}
             label={
               wsState === 'open'
-                ? botmuxConnected
-                  ? 'Live'
-                  : 'No Botmux'
+                ? 'Live'
                 : wsState === 'reconnecting'
                   ? 'Reconnecting'
                   : 'Offline'
@@ -229,11 +227,12 @@ export default function MessagesScreen() {
           </TouchableOpacity>
         )}
 
-        {regularChannels.length > 0 && (
-          <BuzzSectionGroup title="Channels">
-            {regularChannels.map((ch, idx) => (
+        {[{ id: 'starred', name: 'Starred' }, ...sidebarGroups, { id: '', name: 'Channels' }].map(group => {
+          const rows = regularChannels.filter(ch => (ch.starred ? 'starred' : ch.groupId || '') === group.id);
+          return rows.length > 0 && <BuzzSectionGroup key={group.id} title={group.name}>
+            {rows.map((ch, idx) => (
               <TouchableOpacity
-                key={ch.id}
+                key={ch.id} testID={`channel-row-${ch.name}`}
                 onPress={() => handleOpenChannel(ch)}
                 style={[
                   styles.row,
@@ -270,11 +269,12 @@ export default function MessagesScreen() {
                     </Text>
                   )}
                 </View>
-                <BuzzCountBadge count={ch.unreadCount} />
+                {Boolean(ch.mentionCount) && <Text style={{ color: colors.primary }}>@{ch.mentionCount}</Text>}
+                <BuzzCountBadge count={ch.unreadCount + (ch.threadUnreadCount ?? 0) || Number(Boolean(ch.markedUnread))} />
               </TouchableOpacity>
             ))}
-          </BuzzSectionGroup>
-        )}
+          </BuzzSectionGroup>;
+        })}
 
         {dmChannels.length > 0 && (
           <BuzzSectionGroup title="Direct Messages">
@@ -397,13 +397,13 @@ export default function MessagesScreen() {
               </View>
             </BuzzSectionGroup>
 
-            <BuzzSectionGroup title="Direct Message an Agent">
+            <BuzzSectionGroup title="Direct Message">
               {participants
-                .filter((p) => p.role === 'agent' && !p.archived)
+                .filter((p) => p.id !== currentUserId && !p.archived)
                 .map((agent, idx) => (
                   <TouchableOpacity
                     key={agent.id}
-                    onPress={() => void handleStartDmWithAgent(agent.id, agent.name)}
+                    onPress={() => void handleStartDm(agent.id, agent.name, agent.role)}
                     style={[
                       styles.row,
                       idx > 0 && {
@@ -416,7 +416,7 @@ export default function MessagesScreen() {
                       name={agent.name}
                       uri={agent.avatarUrl}
                       size={36}
-                      isAgent
+                      isAgent={agent.role === 'agent'}
                       status={agent.status}
                       ringColor={colors.surfaceContainerLow}
                     />
@@ -425,7 +425,7 @@ export default function MessagesScreen() {
                         {agent.name}
                       </Text>
                       <Text style={[buzzTypography.caption, { color: colors.onSurfaceVariant }]}>
-                        {agent.cliId || 'cli'}
+                        {agent.cliId || agent.role}
                       </Text>
                     </View>
                     <Ionicons name="chevron-forward" size={16} color={colors.onSurfaceVariant} />

@@ -2,12 +2,12 @@ import { buzzAccentChoices, buzzGrid, buzzRadii, buzzTypography } from '@buzz-bo
 import { Ionicons } from '@expo/vector-icons';
 import * as Haptics from 'expo-haptics';
 import { useRouter } from 'expo-router';
-import React from 'react';
-import { Alert, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
+import React, { useState } from 'react';
+import { Button, TextInput, Alert, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { BuzzAvatar } from '@/components/BuzzAvatar';
 import { BuzzSectionGroup } from '@/components/BuzzComponents';
-import { getPushRegistrationState } from '@/services/pushNotifications';
+import { mobileCreateOrganization } from '@/services/auth';
 import { useBubai } from '@/store/BubaiProvider';
 import { type ThemePreference, useBuzzTheme } from '@/theme/ThemeProvider';
 
@@ -23,10 +23,11 @@ export default function SettingsScreen() {
   const {
     serverUrl,
     authUser,
+    authRequired, authToken, reloadAccount,
     organizations,
     activeOrgId,
     switchOrganization,
-    signOut,
+    signOut, enableNotifications,
     wsState,
     botmuxConnected,
     participants,
@@ -34,6 +35,7 @@ export default function SettingsScreen() {
     setCurrentUserId,
   } = useBubai();
 
+  const [communityName, setCommunityName] = useState('');
   const humans = participants.filter((p) => p.role === 'human');
 
   return (
@@ -188,8 +190,19 @@ export default function SettingsScreen() {
           </BuzzSectionGroup>
         )}
 
-        {organizations.length > 0 && (
+        {authUser && (
           <BuzzSectionGroup title="Community">
+            <TextInput placeholder="新社区名称" value={communityName} onChangeText={setCommunityName} style={{ color: colors.onSurface }} />
+            <Button title="创建社区" disabled={!communityName.trim()} onPress={async () => {
+              if (!authToken || !serverUrl) return;
+              try {
+                const org = await mobileCreateOrganization(serverUrl, authToken, communityName);
+                await switchOrganization(org.id);
+                await reloadAccount();
+                setCommunityName('');
+              } catch (error) { Alert.alert('创建失败', String(error)); }
+            }} />
+            <Button title="CLI 设备授权" onPress={() => router.push('/device')} />
             {organizations.map((org, idx) => {
               const selected = org.id === activeOrgId;
               return (
@@ -223,7 +236,7 @@ export default function SettingsScreen() {
           </BuzzSectionGroup>
         )}
 
-        {!authUser && humans.length > 0 && (
+        {!authRequired && !authUser && humans.length > 0 && (
           <BuzzSectionGroup title="Active Identity">
             {humans.map((human, idx) => {
               const selected = human.id === currentUserId;
@@ -263,12 +276,12 @@ export default function SettingsScreen() {
             })}
           </BuzzSectionGroup>
         )}
-        <BuzzSectionGroup title="Notifications (Phase 2)">
+        <BuzzSectionGroup title="Notifications">
           <Pressable
             onPress={async () => {
               void Haptics.selectionAsync();
-              const state = await getPushRegistrationState();
-              Alert.alert('Push Notifications', state.detail);
+              try { await enableNotifications(); Alert.alert('通知设备已注册'); }
+              catch (error) { Alert.alert('通知未启用', String(error)); }
             }}
             style={styles.row}
           >
@@ -278,7 +291,7 @@ export default function SettingsScreen() {
                 Push Notifications
               </Text>
               <Text style={[buzzTypography.caption, { color: colors.onSurfaceVariant }]}>
-                APNs / FCM registration hook ready
+                启用此设备的消息通知
               </Text>
             </View>
             <Ionicons name="chevron-forward" size={18} color={colors.onSurfaceVariant} />

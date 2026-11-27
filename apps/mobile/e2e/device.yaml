@@ -1,0 +1,10 @@
+appId: com.bubai.app.dev
+---
+- launchApp
+- openLink: "bubai://device?user_code=ABCD1234"
+- assertVisible: "输入你正在登录的 CLI 上显示的设备码"
+- assertVisible: "ABCD1234"
+- assertVisible: "登录"
+- openLink: "bubai://invite/fixture-invite"
+- assertVisible: "社区邀请"
+- assertVisible: "登录后查看邀请"

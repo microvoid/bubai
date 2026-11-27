@@ -1,8 +1,9 @@
-import type { Participant } from '@buzz-botmux/chat-client';
+import { useBubai } from '../store/BubaiProvider';
+import { buildMentionCandidates, filterMentionCandidates, type Channel, type ChatMessage, type Participant } from '@buzz-botmux/chat-client';
 import { buzzGrid, buzzRadii, buzzTypography } from '@buzz-botmux/design-tokens';
 import { Ionicons } from '@expo/vector-icons';
 import * as Haptics from 'expo-haptics';
-import React, { useMemo } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
   Pressable,
   ScrollView,
@@ -22,6 +23,10 @@ interface BuzzComposerProps {
   uploading?: boolean;
   placeholder: string;
   participants: readonly Participant[];
+  channel?: Channel;
+  currentUserId: string;
+  messages: ChatMessage[];
+  threadMessages?: ChatMessage[];
   editingLabel?: string | null;
   onCancelEdit?: () => void;
   disabled?: boolean;
@@ -35,11 +40,27 @@ export function BuzzComposer({
   uploading = false,
   placeholder,
   participants,
+  channel, currentUserId, messages, threadMessages,
   editingLabel,
   onCancelEdit,
   disabled = false,
 }: BuzzComposerProps) {
   const { colors, accent } = useBuzzTheme();
+
+  const { sendTyping, subscribeWsEvents } = useBubai();
+  const [typingName, setTypingName] = useState('');
+  const lastTyped = useRef(0);
+  useEffect(() => {
+    let timer: ReturnType<typeof setTimeout>;
+    const unsubscribe = subscribeWsEvents(event => {
+      if (event.type !== 'typing.updated' || event.payload.channelId !== channel?.id || event.payload.userId === currentUserId) return;
+      const { userId } = event.payload;
+      setTypingName(participants.find(p => p.id === userId)?.name || userId);
+      clearTimeout(timer);
+      timer = setTimeout(() => setTypingName(''), 2500);
+    });
+    return () => { clearTimeout(timer); unsubscribe(); };
+  }, [channel?.id, participants, currentUserId, subscribeWsEvents]);
 
   // Detect active @mention query at the end of draft
   const mentionMatch = useMemo(() => {
@@ -49,18 +70,12 @@ export function BuzzComposer({
 
   const mentionCandidates = useMemo(() => {
     if (mentionMatch === null) return [];
-    const agentsFirst = [...participants]
-      .filter((p) => !p.archived)
-      .sort((a, b) => (a.role === 'agent' ? -1 : 1) - (b.role === 'agent' ? -1 : 1));
-    return agentsFirst
-      .filter(
-        (p) =>
-          !mentionMatch ||
-          p.name.toLowerCase().includes(mentionMatch) ||
-          p.id.toLowerCase().includes(mentionMatch),
-      )
-      .slice(0, 6);
-  }, [mentionMatch, participants]);
+    const candidates = buildMentionCandidates({
+      participants, currentUserId, channelKind: channel?.kind, dmKey: channel?.dmKey,
+      channelMemberIds: new Set(channel?.memberIds), channelMessages: messages, threadMessages,
+    });
+    return filterMentionCandidates(candidates, mentionMatch);
+  }, [mentionMatch, participants, currentUserId, channel, messages, threadMessages]);
 
   const handlePickMention = (participant: Participant) => {
     void Haptics.selectionAsync();
@@ -80,6 +95,7 @@ export function BuzzComposer({
         },
       ]}
     >
+      {Boolean(typingName) && <Text style={{ color: colors.onSurfaceVariant }}>{typingName} 正在输入…</Text>}
       {/* @Mention Autocomplete Popover */}
       {mentionCandidates.length > 0 && (
         <View
@@ -113,7 +129,7 @@ export function BuzzComposer({
                   isAgent={p.role === 'agent'}
                 />
                 <Text style={[buzzTypography.label, { color: colors.onSurface }]}>
-                  @{p.name}
+                  {p.inChannel ? '' : '频道外 · '}@{p.name}
                 </Text>
               </Pressable>
             ))}
@@ -169,9 +185,15 @@ export function BuzzComposer({
             />
           </Pressable>
         )}
-        <TextInput
+        <TextInput testID="message-input"
           value={value}
-          onChangeText={onChangeText}
+          onChangeText={text => {
+            onChangeText(text);
+            if (channel && text && Date.now() - lastTyped.current > 1000) {
+              lastTyped.current = Date.now();
+              sendTyping(channel.id);
+            }
+          }}
           placeholder={placeholder}
           placeholderTextColor={colors.onSurfaceVariant}
           multiline
@@ -180,6 +202,7 @@ export function BuzzComposer({
           editable={!disabled}
         />
         <Pressable
+          testID="send-message"
           disabled={!canSend}
           onPress={() => {
             void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);

@@ -148,7 +148,7 @@ export default function AgentsScreen() {
               未发现 Botmux Agents
             </Text>
             <Text style={[buzzTypography.bodySmall, { color: colors.onSurfaceVariant }]}>
-              请确认服务端已连接本地 Botmux 守护进程
+              可通过 Gateway、Webhook 或 CLI Bridge 接入 Agent
             </Text>
           </View>
         )}

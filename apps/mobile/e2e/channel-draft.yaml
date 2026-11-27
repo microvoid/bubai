@@ -1,0 +1,23 @@
+appId: com.bubai.app.dev
+---
+- launchApp
+- extendedWaitUntil:
+    visible:
+      id: channel-row-general
+    timeout: 60000
+- tapOn:
+    id: channel-row-general
+- tapOn:
+    id: message-input
+- eraseText
+- inputText: "Native draft regression"
+- assertVisible: "Native draft regression"
+- stopApp
+- launchApp
+- tapOn:
+    id: channel-row-general
+- assertVisible: "Native draft regression"
+- tapOn:
+    id: send-message
+- assertVisible:
+    id: message-input

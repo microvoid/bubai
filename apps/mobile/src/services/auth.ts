@@ -250,3 +250,21 @@ export async function mobileSetActiveOrganization(
     body: { organizationId },
   });
 }
+
+export async function mobileDeviceDecision(server: string, token: string, rawCode: string, approve: boolean) {
+  const userCode = rawCode.trim().replace(/-/g, '').toUpperCase();
+  await authRequest(server, '/api/auth/device?user_code=' + encodeURIComponent(userCode), { token });
+  await authRequest(server, '/api/auth/device/' + (approve ? 'approve' : 'deny'), { token, body: { userCode } });
+}
+
+export async function mobileGetInvite(server: string, token: string, id: string) {
+  const { data } = await authRequest<{ organizationName: string; email: string }>(
+    server, '/api/auth/organization/get-invitation?id=' + encodeURIComponent(id), { token });
+  return data;
+}
+
+export async function mobileInviteDecision(server: string, token: string, invitationId: string, accept: boolean) {
+  await authRequest(server, '/api/auth/organization/' + (accept ? 'accept-invitation' : 'reject-invitation'), {
+    token, body: { invitationId },
+  });
+}

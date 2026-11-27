@@ -1,7 +1,7 @@
 import { buzzGrid, buzzRadii, buzzTypography } from '@buzz-botmux/design-tokens';
 import { Ionicons } from '@expo/vector-icons';
 import * as Haptics from 'expo-haptics';
-import { useRouter } from 'expo-router';
+import { useLocalSearchParams, useRouter } from 'expo-router';
 import React, { useState } from 'react';
 import {
   ActivityIndicator,
@@ -17,15 +17,18 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useBubai } from '@/store/BubaiProvider';
 import { useBuzzTheme } from '@/theme/ThemeProvider';
 
-type ConnectStep = 'server' | 'email' | 'otp' | 'password';
+type ConnectStep = 'server' | 'email' | 'otp' | 'password' | 'signup';
 
 export default function ConnectScreen() {
   const router = useRouter();
+  const { resume } = useLocalSearchParams<{ resume?: string }>();
+  const finish = () => { if (resume === '1' && router.canGoBack()) router.back(); else router.replace('/(tabs)'); };
   const insets = useSafeAreaInsets();
   const { colors } = useBuzzTheme();
   const {
     serverUrl,
-    authUser,
+    instance,
+    signUpWithPassword,
     connectToServer,
     sendEmailOtp,
     signInWithOtp,
@@ -36,6 +39,7 @@ export default function ConnectScreen() {
   const [inputUrl, setInputUrl] = useState(serverUrl || defaultFallbackUrl);
   const [step, setStep] = useState<ConnectStep>('server');
   const [email, setEmail] = useState('');
+  const [name, setName] = useState('');
   const [otp, setOtp] = useState('');
   const [password, setPassword] = useState('');
   const [busy, setBusy] = useState(false);
@@ -47,10 +51,10 @@ export default function ConnectScreen() {
     try {
       const info = await connectToServer(inputUrl);
       void Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
-      if (info.authRequired && !authUser) {
+      if (info.authRequired) {
         setStep('email');
       } else {
-        router.replace('/(tabs)');
+        finish();
       }
     } catch (err) {
       void Haptics.notificationAsync(Haptics.NotificationFeedbackType.Error);
@@ -79,7 +83,7 @@ export default function ConnectScreen() {
     try {
       await signInWithOtp(email, otp);
       void Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
-      router.replace('/(tabs)');
+      finish();
     } catch (err) {
       void Haptics.notificationAsync(Haptics.NotificationFeedbackType.Error);
       setError(err instanceof Error ? err.message : '验证码无效或已过期');
@@ -92,9 +96,17 @@ export default function ConnectScreen() {
     setBusy(true);
     setError(null);
     try {
-      await signInWithPassword(email, password);
+      if (step === 'signup') {
+        if (!await signUpWithPassword(email, password, name)) {
+          setStep('email');
+          setError('请查收验证邮件，验证后登录。');
+          return;
+        }
+      } else {
+        await signInWithPassword(email, password);
+      }
       void Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
-      router.replace('/(tabs)');
+      finish();
     } catch (err) {
       void Haptics.notificationAsync(Haptics.NotificationFeedbackType.Error);
       setError(err instanceof Error ? err.message : '邮箱或密码错误');
@@ -259,7 +271,7 @@ export default function ConnectScreen() {
                 </Text>
               )}
             </Pressable>
-            <Pressable
+            {instance?.emailAndPasswordEnabled && <Pressable
               onPress={() => {
                 setError(null);
                 setStep('password');
@@ -267,9 +279,12 @@ export default function ConnectScreen() {
               style={styles.linkBtn}
             >
               <Text style={[buzzTypography.bodySmall, { color: colors.onSurfaceVariant }]}>
-                使用邮箱密码登录（开发模式）
+                使用邮箱密码登录
               </Text>
-            </Pressable>
+            </Pressable>}
+            {instance?.emailAndPasswordEnabled && <Pressable onPress={() => setStep('signup')} style={styles.linkBtn}>
+              <Text style={{ color: colors.onSurface }}>注册账号</Text>
+            </Pressable>}
           </View>
         )}
 
@@ -322,7 +337,7 @@ export default function ConnectScreen() {
           </View>
         )}
 
-        {step === 'password' && (
+        {(step === 'password' || step === 'signup') && (
           <View style={styles.form}>
             <Text style={[buzzTypography.caption, { color: colors.onSurfaceVariant }]}>EMAIL</Text>
             <TextInput
@@ -347,6 +362,7 @@ export default function ConnectScreen() {
             <Text style={[buzzTypography.caption, { color: colors.onSurfaceVariant }]}>
               PASSWORD
             </Text>
+            {step === 'signup' && <TextInput placeholder="名字" value={name} onChangeText={setName} style={[styles.input, { color: colors.onSurface }]} />}
             <TextInput
               value={password}
               onChangeText={setPassword}
@@ -382,7 +398,7 @@ export default function ConnectScreen() {
               {busy ? (
                 <ActivityIndicator color={colors.onPrimary} />
               ) : (
-                <Text style={[buzzTypography.titleSmall, { color: colors.onPrimary }]}>登录</Text>
+                <Text style={[buzzTypography.titleSmall, { color: colors.onPrimary }]}>{step === 'signup' ? '注册' : '登录'}</Text>
               )}
             </Pressable>
             <Pressable

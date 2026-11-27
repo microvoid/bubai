@@ -1,3 +1,5 @@
+import { attachmentSource, openAttachment } from '../services/attachments';
+import { useBubai } from '../store/BubaiProvider';
 import type { ChatMessage, MessageAttachment, Participant } from '@buzz-botmux/chat-client';
 import { buzzGrid, buzzRadii, buzzTypography } from '@buzz-botmux/design-tokens';
 import { Ionicons } from '@expo/vector-icons';
@@ -5,6 +7,8 @@ import * as Haptics from 'expo-haptics';
 import React, { useEffect, useRef } from 'react';
 import {
   Animated,
+  Linking,
+  Alert,
   Image,
   Platform,
   Pressable,
@@ -14,6 +18,7 @@ import {
 } from 'react-native';
 import { useBuzzTheme } from '../theme/ThemeProvider';
 import { AgentProgressCard } from './AgentProgressCard';
+import Markdown from 'react-native-markdown-display';
 import { BuzzAvatar } from './BuzzAvatar';
 
 function formatTime(ts: number): string {
@@ -82,31 +87,13 @@ function MessageContent({
   textColor: string;
   codeBg: string;
 }) {
-  const segments = content.split(/(```[\s\S]*?```)/g);
-  return (
-    <View style={{ gap: 6 }}>
-      {segments.map((seg, idx) => {
-        if (!seg) return null;
-        if (seg.startsWith('```') && seg.endsWith('```')) {
-          const inner = seg.slice(3, -3).replace(/^[a-zA-Z0-9_-]+\n/, '');
-          return (
-            <View key={idx} style={[styles.codeBlock, { backgroundColor: codeBg }]}>
-              <Text style={[styles.codeText, { color: textColor }]} selectable>
-                {inner.trim()}
-              </Text>
-            </View>
-          );
-        }
-        const trimmed = seg.trim();
-        if (!trimmed) return null;
-        return (
-          <Text key={idx} style={[buzzTypography.body, { color: textColor }]} selectable>
-            {trimmed}
-          </Text>
-        );
-      })}
-    </View>
-  );
+  return <Markdown style={{
+    body: { color: textColor }, code_inline: { backgroundColor: codeBg, color: textColor },
+    fence: { backgroundColor: codeBg, color: textColor },
+  }} onLinkPress={url => {
+    if (/^https?:\/\//i.test(url)) void Linking.openURL(url).catch(error => Alert.alert('打开失败', String(error)));
+    return false;
+  }}>{content}</Markdown>;
 }
 
 export interface BuzzMessageBubbleProps {
@@ -142,6 +129,7 @@ export function BuzzMessageBubble({
   onOpenAgentProfile,
   onOpenTerminal,
 }: BuzzMessageBubbleProps) {
+  const { authToken } = useBubai();
   const { colors, accent } = useBuzzTheme();
   const isAgent = message.senderRole === 'agent';
   const isOwn = !isAgent && message.senderId === currentUserId;
@@ -156,8 +144,7 @@ export function BuzzMessageBubble({
   const imageAttachments = attachments.filter((a) => a.mimeType.startsWith('image/'));
   const fileAttachments = attachments.filter((a) => !a.mimeType.startsWith('image/'));
 
-  const resolveUrl = (url: string) =>
-    /^https?:\/\//i.test(url) ? url : `${serverBaseUrl}${url.startsWith('/') ? '' : '/'}${url}`;
+
 
   return (
     <View style={styles.wrapper}>
@@ -251,11 +238,7 @@ export function BuzzMessageBubble({
               },
             ]}
           >
-            {isAgent &&
-            message.card &&
-            (isRunning ||
-              (message.card.progress &&
-                (message.card.progress.toolCount > 0 || message.card.progress.steps.length > 0))) ? (
+            {isAgent && message.card ? (
               <AgentProgressCard card={message.card} textColor={bubbleFg} />
             ) : isRunning ? (
               <View style={styles.runningHeader}>
@@ -304,11 +287,11 @@ export function BuzzMessageBubble({
               {imageAttachments.map((att) => (
                 <Pressable
                   key={att.id}
-                  onPress={() => onOpenImage?.(att)}
+                  onPress={() => onOpenImage ? onOpenImage(att) : void openAttachment(serverBaseUrl, att, authToken).catch(error => Alert.alert('打开失败', String(error)))}
                   style={[styles.imageWrap, { borderColor: colors.outline }]}
                 >
                   <Image
-                    source={{ uri: resolveUrl(att.url) }}
+                    source={attachmentSource(serverBaseUrl, att.url, authToken)}
                     style={styles.thumbImage}
                     resizeMode="cover"
                   />
@@ -319,7 +302,8 @@ export function BuzzMessageBubble({
 
           {/* File Attachments */}
           {fileAttachments.map((att) => (
-            <View
+            <Pressable
+              onPress={() => void openAttachment(serverBaseUrl, att, authToken).catch(error => Alert.alert('打开失败', String(error)))}
               key={att.id}
               style={[
                 styles.fileChip,
@@ -333,7 +317,7 @@ export function BuzzMessageBubble({
               >
                 {att.name}
               </Text>
-            </View>
+            </Pressable>
           ))}
 
           {/* Reactions */}
@@ -377,6 +361,8 @@ export function BuzzMessageBubble({
               <Ionicons name="chatbubble-outline" size={12} color={colors.tertiary} />
               <Text style={[buzzTypography.micro, { color: colors.tertiary }]}>
                 {message.replyCount} {message.replyCount === 1 ? 'reply' : 'replies'}
+                {message.unreadReplyCount ? ` · ${message.unreadReplyCount} 未读` : ''}
+                {message.replyPreviews?.map(reply => `\n${reply.content || reply.card?.title || '附件'}`).join('')}
               </Text>
               <Ionicons name="chevron-forward" size={12} color={colors.tertiary} />
             </Pressable>

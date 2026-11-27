@@ -39,7 +39,7 @@ const config: ExpoConfig = {
     edgeToEdgeEnabled: true,
     softwareKeyboardLayoutMode: 'resize',
   },
-  plugins: ['expo-router', 'expo-secure-store', './plugins/withXcode26FmtFix'],
+  plugins: ['expo-router', 'expo-secure-store', 'expo-notifications', './plugins/withXcode26FmtFix'],
   experiments: {
     typedRoutes: true,
   },

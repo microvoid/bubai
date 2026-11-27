@@ -37,11 +37,18 @@ export function AgentProgressCard({ card, textColor }: AgentProgressCardProps) {
   const toolCount = progress?.toolCount ?? steps.length;
   const hasSteps = steps.length > 0 || toolCount > 0;
 
+  const [now, setNow] = useState(Date.now);
+  useEffect(() => {
+    if (!isRunning || !card.startedAt) return;
+    const timer = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(timer);
+  }, [card.startedAt, isRunning]);
+
   const [expanded, setExpanded] = useState(isRunning);
   const [userToggled, setUserToggled] = useState(false);
 
   useEffect(() => {
-    if (!userToggled) {
+    if (!isRunning || !userToggled) {
       setExpanded(isRunning);
     }
   }, [isRunning, userToggled]);
@@ -74,11 +81,12 @@ export function AgentProgressCard({ card, textColor }: AgentProgressCardProps) {
 
   return (
     <View style={[styles.root, isRunning && styles.rootRunning]}>
-      {isRunning && (
+      {(isRunning || isAbnormal) && (
         <Pressable onPress={toggle} style={styles.statusRow} hitSlop={6}>
           <View style={[styles.liveDot, { backgroundColor: accent.fill }]} />
           <Text style={[buzzTypography.body, styles.statusText, { color: textColor }]} numberOfLines={1}>
-            {headerLabel}
+            {headerLabel}{card.parallel ? ' · 并行' : ''}
+            {card.startedAt ? ` · ${Math.max(0, Math.floor(((card.finishedAt ?? now) - card.startedAt) / 1000))}s` : ''}
           </Text>
           {hasSteps && (
             <Ionicons
@@ -90,6 +98,7 @@ export function AgentProgressCard({ card, textColor }: AgentProgressCardProps) {
         </Pressable>
       )}
 
+      {isAbnormal && card.summary && <Text style={{ color: colors.error }}>{card.summary}</Text>}
       {hasSteps && (
         <View style={styles.toolBlock}>
           <Pressable onPress={toggle} style={styles.summaryRow} hitSlop={6}>

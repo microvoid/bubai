@@ -1,36 +1,24 @@
+import * as Notifications from 'expo-notifications';
+import * as SecureStore from 'expo-secure-store';
 import { Platform } from 'react-native';
+import { BubaiClient } from '@buzz-botmux/chat-client';
 
-export interface PushRegistrationState {
-  supported: boolean;
-  permissionStatus: 'undetermined' | 'granted' | 'denied' | 'unconfigured';
-  token: string | null;
-  detail: string;
+export async function registerDevice(serverUrl: string, token: string, storageKey: string) {
+  if (Platform.OS !== 'android' && Platform.OS !== 'ios') throw new Error('此平台不支持推送');
+  if (Platform.OS === 'android') await Notifications.setNotificationChannelAsync('messages', {
+    name: 'Messages', importance: Notifications.AndroidImportance.DEFAULT,
+  });
+  const permission = await Notifications.requestPermissionsAsync();
+  if (!permission.granted) throw new Error('请在系统设置中允许通知');
+  const device = await Notifications.getDevicePushTokenAsync();
+  const client = new BubaiClient({ baseUrl: serverUrl, token });
+  await client.registerPush(String(device.data), Platform.OS);
+  await SecureStore.setItemAsync(storageKey, String(device.data));
 }
 
-/**
- * Push notification registration scaffold reserved for Phase 2 (APNs / FCM).
- * Requires Apple Developer Push Capability (iOS) or google-services.json (Android)
- * plus a server-side `/api/push/register` endpoint when deployed to TestFlight/Play.
- */
-export async function getPushRegistrationState(): Promise<PushRegistrationState> {
-  return {
-    supported: Platform.OS === 'ios' || Platform.OS === 'android',
-    permissionStatus: 'unconfigured',
-    token: null,
-    detail:
-      Platform.OS === 'ios'
-        ? 'APNs 推送接口已预留，需在 Apple Developer 开启 Push Notifications 并配置服务端推送凭证后启用。'
-        : 'FCM 推送接口已预留，需配置 Firebase google-services.json 与服务端推送凭证后启用。',
-  };
-}
-
-export async function registerPushToken(_params: {
-  serverUrl: string;
-  userId: string;
-  token: string;
-}): Promise<{ ok: boolean; reason?: string }> {
-  return {
-    ok: false,
-    reason: 'Push gateway not configured on server yet (Phase 2)',
-  };
+export async function unregisterDevice(serverUrl: string, token: string, storageKey: string) {
+  const device = await SecureStore.getItemAsync(storageKey);
+  if (!device) return;
+  await new BubaiClient({ baseUrl: serverUrl, token }).unregisterPush(device);
+  await SecureStore.deleteItemAsync(storageKey);
 }

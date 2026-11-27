@@ -354,6 +354,7 @@ describe('Phase 3 E2E: Bot Convergence, Strict Bot API Key, CLI Device Auth, and
     const onlineAgents = activeAgents.filter((agent) => agent.status === 'online').length;
     const { stdout: summaryOut } = await execFileAsync('bun', [CLI_ENTRY, 'status'], statusOptions);
     assert.deepEqual(summaryOut.trim().split('\n'), [
+      'Local bridge: stopped',
       `Server: ${BASE_URL} (reachable)`,
       `Agents: ${onlineAgents} online, ${activeAgents.length - onlineAgents} offline`,
     ]);
@@ -396,6 +397,9 @@ describe('Phase 3 E2E: Bot Convergence, Strict Bot API Key, CLI Device Auth, and
 
     // (c) Authenticated BubaiClient bootstrap succeeds with Bearer token
     const client = new BubaiClient({ baseUrl: BASE_URL, token: otpSession.token });
+    assert.equal((await client.registerPush('native-e2e-device', 'ios')).ok, true);
+    assert.equal((await client.registerPush('native-e2e-device', 'ios')).ok, true);
+    assert.equal((await client.unregisterPush('native-e2e-device')).ok, true);
     const boot = await client.bootstrap(otpSession.user.id);
     assert.ok(boot.channels.some((c) => c.name === 'general'), 'Expected org #general channel in mobile bootstrap');
 

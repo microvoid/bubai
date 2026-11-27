@@ -1,8 +1,10 @@
+import { useDraft } from '@/store/useDraft';
+import { pickAttachments } from '@/services/pickAttachments';
 import type { ChatMessage, Participant } from '@buzz-botmux/chat-client';
 import { buzzGrid, buzzTypography } from '@buzz-botmux/design-tokens';
 import { Ionicons } from '@expo/vector-icons';
 import { useLocalSearchParams, useRouter } from 'expo-router';
-import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   ActivityIndicator,
   Alert,
@@ -22,22 +24,28 @@ import { useBubai } from '@/store/BubaiProvider';
 import { useBuzzTheme } from '@/theme/ThemeProvider';
 
 export default function ThreadScreen() {
-  const { channelId: rawCh, rootId: rawRoot } = useLocalSearchParams<{
+  const { channelId: rawCh, rootId: rawRoot, messageId } = useLocalSearchParams<{
     channelId: string;
     rootId: string;
+    messageId?: string;
   }>();
   const channelId = Array.isArray(rawCh) ? rawCh[0] : rawCh || '';
   const rootId = Array.isArray(rawRoot) ? rawRoot[0] : rawRoot || '';
 
+  const list = useRef<FlatList<ChatMessage>>(null);
+  const jumped = useRef<string | undefined>(undefined);
   const router = useRouter();
   const insets = useSafeAreaInsets();
   const { colors } = useBuzzTheme();
   const {
+    channels,
     client,
     serverUrl,
+    activeOrgId,
     currentUserId,
     participants,
     sendWsMessage,
+    wsState,
     subscribeWsEvents,
   } = useBubai();
 
@@ -49,7 +57,7 @@ export default function ThreadScreen() {
   const [root, setRoot] = useState<ChatMessage | null>(null);
   const [replies, setReplies] = useState<ChatMessage[]>([]);
   const [loading, setLoading] = useState(true);
-  const [draft, setDraft] = useState('');
+  const [draft, setDraft] = useDraft(serverUrl, activeOrgId, currentUserId, channelId, rootId);
   const [actionMessage, setActionMessage] = useState<ChatMessage | null>(null);
 
   const loadThread = useCallback(async () => {
@@ -59,20 +67,22 @@ export default function ThreadScreen() {
       const data = await client.getThread(channelId, rootId);
       setRoot(data.root);
       setReplies(data.replies ?? []);
+      await client.markThreadRead(channelId, rootId, currentUserId);
     } finally {
       setLoading(false);
     }
-  }, [channelId, client, rootId]);
+  }, [channelId, client, rootId, currentUserId]);
 
   useEffect(() => {
-    void loadThread();
-  }, [loadThread]);
+    if (wsState === 'open') void loadThread().catch(error => Alert.alert('加载失败', String(error)));
+  }, [loadThread, wsState]);
 
   useEffect(() => {
     return subscribeWsEvents((event) => {
       if (event.type === 'message.created') {
         const msg = event.payload;
         if (msg.channelId !== channelId || msg.threadId !== rootId) return;
+        void client?.markThreadRead(channelId, rootId, currentUserId).catch(() => {});
         setReplies((prev) => (prev.some((r) => r.id === msg.id) ? prev : [...prev, msg]));
       } else if (event.type === 'message.updated') {
         const msg = event.payload;
@@ -92,16 +102,37 @@ export default function ThreadScreen() {
         );
       }
     });
-  }, [channelId, rootId, subscribeWsEvents]);
+  }, [channelId, rootId, subscribeWsEvents, client, currentUserId]);
 
-  const handleSendReply = () => {
+  const [uploading, setUploading] = useState(false);
+  const [editing, setEditing] = useState<ChatMessage | null>(null);
+  const attach = async () => {
+    if (!client || uploading) return;
+    setUploading(true);
+    try {
+      const attachments = await pickAttachments(client);
+      if (!attachments.length) return;
+      await sendWsMessage({ channelId, threadId: rootId, content: draft, attachments });
+      setDraft(value => value === draft ? '' : value);
+    } catch (error) {
+      Alert.alert('附件发送失败', String(error));
+    } finally {
+      setUploading(false);
+    }
+  };
+  const handleSendReply = async () => {
     const trimmed = draft.trim();
     if (!trimmed) return;
-    const ok = sendWsMessage({ channelId, threadId: rootId, content: trimmed });
-    if (ok) {
-      setDraft('');
-    } else {
-      Alert.alert('未连接', 'WebSocket 正在重连，请稍后再试。');
+    try {
+      if (editing && client) {
+        await client.editMessage(editing.id, trimmed);
+        setEditing(null);
+      } else {
+        await sendWsMessage({ channelId, threadId: rootId, content: trimmed });
+      }
+      setDraft(current => current.trim() === trimmed ? '' : current);
+    } catch (error) {
+      Alert.alert('发送失败', error instanceof Error ? error.message : String(error));
     }
   };
 
@@ -151,6 +182,14 @@ export default function ThreadScreen() {
         ) : (
           <FlatList
             data={allItems}
+            ref={list}
+            onScrollToIndexFailed={info => list.current?.scrollToOffset({ offset: info.averageItemLength * info.index, animated: false })}
+            onContentSizeChange={() => {
+              const index = allItems.findIndex(item => item.id === messageId);
+              if (index >= 0 && messageId !== jumped.current) {
+                jumped.current = messageId; list.current?.scrollToIndex({index, animated: false});
+              }
+            }}
             keyExtractor={(item) => item.id}
             contentContainerStyle={{ paddingVertical: 12 }}
             renderItem={({ item, index }) => (
@@ -164,6 +203,7 @@ export default function ThreadScreen() {
                   stackNext={false}
                   showDayDivider={false}
                   inThread
+                  onOpenTerminal={sid => router.push(`/terminal/${encodeURIComponent(sid)}`)}
                   onLongPress={setActionMessage}
                   onToggleReaction={(mid, emoji) => void handleToggleReaction(mid, emoji)}
                 />
@@ -188,7 +228,13 @@ export default function ThreadScreen() {
           value={draft}
           onChangeText={setDraft}
           onSend={handleSendReply}
+          uploading={uploading}
+          onPickAttachment={editing ? undefined : attach}
+          editingLabel={editing ? '编辑消息' : null}
+          onCancelEdit={() => { setEditing(null); setDraft(''); }}
           placeholder="Reply in thread… (可 @Agent)"
+          currentUserId={currentUserId}
+          channel={channels.find(c => c.id === channelId)} messages={allItems} threadMessages={replies}
           participants={participants}
         />
       </KeyboardAvoidingView>
@@ -201,6 +247,11 @@ export default function ThreadScreen() {
             actionMessage.senderId === currentUserId,
         )}
         inThread
+        onEdit={msg => { setEditing(msg); setDraft(msg.content); }}
+        onDelete={msg => Alert.alert('删除消息？', undefined, [
+          { text: '取消', style: 'cancel' },
+          { text: '删除', style: 'destructive', onPress: () => void client?.deleteMessage(msg.id).catch(error => Alert.alert('删除失败', String(error))) },
+        ])}
         onClose={() => setActionMessage(null)}
         onReact={(mid, emoji) => void handleToggleReaction(mid, emoji)}
       />

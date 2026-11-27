@@ -1,3 +1,4 @@
+import { useQuery } from '@tanstack/react-query';
 import { buzzGrid, buzzRadii, buzzTypography } from '@buzz-botmux/design-tokens';
 import { Ionicons } from '@expo/vector-icons';
 import * as Haptics from 'expo-haptics';
@@ -19,14 +20,19 @@ import { useBuzzTheme } from '@/theme/ThemeProvider';
 export default function ActivityScreen() {
   const router = useRouter();
   const { colors } = useBuzzTheme();
-  const { asks, sessions, answerAsk, refreshBootstrap } = useBubai();
+  const { asks, sessions, answerAsk, refreshBootstrap, client, currentUserId, activeOrgId, serverUrl } = useBubai();
+  const [filter, setFilter] = useState<'all' | 'mention' | 'thread'>('all');
+  const activity = useQuery({
+    queryKey: ['activity', serverUrl, activeOrgId, currentUserId],
+    enabled: Boolean(client), queryFn: () => client!.getActivity(currentUserId),
+  });
   const [busyAskId, setBusyAskId] = useState<string | null>(null);
   const [refreshing, setRefreshing] = useState(false);
 
   const onRefresh = async () => {
     setRefreshing(true);
     try {
-      await refreshBootstrap();
+      await Promise.all([refreshBootstrap(), activity.refetch()]);
     } finally {
       setRefreshing(false);
     }
@@ -60,6 +66,22 @@ export default function ActivityScreen() {
           />
         }
       >
+        <View style={{ flexDirection: 'row', gap: 16 }}>
+          {(['all', 'mention', 'thread'] as const).map((kind, index) => (
+            <Pressable key={kind} onPress={() => setFilter(kind)} accessibilityState={{ selected: filter === kind }}>
+              <Text style={{ color: filter === kind ? colors.primary : colors.onSurface }}>{['All', '@Mentions', 'Threads'][index]}</Text>
+            </Pressable>
+          ))}
+        </View>
+        {activity.error && <Text style={{ color: colors.error }}>{activity.error.message}</Text>}
+        {activity.data?.items.filter(item => filter === 'all' || item.kind === filter).map(item => (
+          <Pressable key={item.id} style={styles.askItem} onPress={() => router.push(item.threadId
+            ? `/thread/${encodeURIComponent(item.channelId)}/${encodeURIComponent(item.threadId)}?messageId=${encodeURIComponent(item.messageId)}`
+            : `/channel/${encodeURIComponent(item.channelId)}?messageId=${encodeURIComponent(item.messageId)}`)}>
+            <Text style={{ color: colors.onSurface }}>{item.channelName} · {item.senderName} · {item.unreadCount}</Text>
+            <Text style={{ color: colors.onSurfaceVariant }}>{item.excerpt}</Text>
+          </Pressable>
+        ))}
         <BuzzSectionGroup title={`Pending Approvals (${asks.length})`}>
           {asks.length === 0 ? (
             <View style={styles.emptyRow}>

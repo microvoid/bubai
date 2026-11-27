@@ -1,0 +1,24 @@
+appId: com.bubai.app.dev
+---
+- launchApp
+- tapOn: "Activity, tab, .*"
+- assertVisible: "@Mentions"
+- tapOn: "@Mentions"
+- tapOn: "Threads"
+- tapOn: "Messages, tab, .*"
+- tapOn:
+    id: channel-row-general
+- tapOn:
+    id: message-input
+- eraseText
+- inputText: "@Local"
+- assertVisible: ".*@Local Fixture.*"
+- eraseText
+- hideKeyboard
+- tapOn: "频道设置与成员"
+- assertVisible: "保存频道信息"
+- assertVisible: ".*follow_source"
+- tapOn: "标星"
+- assertVisible: "取消标星"
+- tapOn: "取消标星"
+- assertVisible: "标星"

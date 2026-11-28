@@ -6,9 +6,16 @@ appId: com.bubai.app.dev
 - runFlow: ../open-workspace.yaml
 - waitForAnimationToEnd
 - takeScreenshot: 01-home
-- tapOn:
-    id: workspace-more
-- assertVisible: "切换社区"
+- retry:
+    maxRetries: 2
+    commands:
+      - runFlow:
+          when:
+            notVisible: 切换社区
+          commands:
+            - tapOn:
+                id: workspace-more
+      - assertVisible: 切换社区
 - assertVisible: "外观"
 - waitForAnimationToEnd
 - takeScreenshot: 04-more

@@ -1,0 +1,74 @@
+appId: com.bubai.app.dev
+---
+- stopApp
+- runFlow:
+    file: ../open-workspace.yaml
+    env:
+      OPEN_SERVER: "${FAULT_SERVER}"
+- runScript: create-interaction-room.js
+- runFlow:
+    file: ../open-app-link.yaml
+    env:
+      LINK: "bubai://channel/${output.discussion}"
+- assertVisible: ".*Interaction check.*"
+- runScript:
+    file: ../session-mode.js
+    env:
+      TARGET: "${FAULT_SERVER}"
+      MODE: offline
+- tapOn: 添加附件
+- runFlow:
+    when:
+      platform: Android
+    commands:
+      - tapOn: 文件
+      - runFlow:
+          when:
+            notVisible: ".*Bubai-QA-icon.png.*"
+          commands:
+            - tapOn: "Show roots|打开方式|显示根目录"
+            - tapOn: "Downloads|下载内容|下载"
+      - tapOn:
+          text: "Bubai-QA-icon.png"
+- runFlow:
+    when:
+      platform: iOS
+    commands:
+      - tapOn: 照片
+      - waitForAnimationToEnd
+      - tapOn:
+          text: ".*(Photo|照片).*"
+          optional: true
+      - tapOn:
+          point: "16%,23%"
+      - tapOn:
+          text: "Add|添加|Done|完成"
+- extendedWaitUntil:
+    visible: "等待网络 · 恢复后自动发送"
+    timeout: 20000
+- assertVisible: ".*Bubai-QA-icon.png.*"
+- takeScreenshot: offline-attachment-queued
+- stopApp
+- launchApp
+- extendedWaitUntil:
+    visible:
+      id: workspace-more
+    timeout: 20000
+- runFlow:
+    file: ../open-app-link.yaml
+    env:
+      LINK: "bubai://channel/${output.discussion}"
+- assertVisible: "等待网络 · 恢复后自动发送"
+- assertVisible: ".*Bubai-QA-icon.png.*"
+- takeScreenshot: offline-attachment-restored
+- runScript:
+    file: ../session-mode.js
+    env:
+      TARGET: "${FAULT_SERVER}"
+      MODE: normal
+- extendedWaitUntil:
+    visible: "已发送.*"
+    timeout: 30000
+- assertNotVisible: "等待网络 · 恢复后自动发送"
+- runScript: check-attachment-delivery.js
+- takeScreenshot: offline-attachment-delivered

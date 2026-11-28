@@ -1,0 +1,43 @@
+appId: com.bubai.app.dev
+---
+- stopApp
+- runFlow:
+    file: ../open-workspace.yaml
+    env:
+      OPEN_SERVER: "${FAULT_SERVER}"
+- runScript: create-interaction-room.js
+- runFlow:
+    file: ../open-app-link.yaml
+    env:
+      LINK: "bubai://channel/${output.discussion}"
+- tapOn:
+    id: message-input
+- evalScript: ${output.offline = 'Delayed receipt ' + Date.now()}
+- inputText: "${output.offline}"
+- runFlow:
+    when:
+      platform: Android
+    commands:
+      - hideKeyboard
+- runScript:
+    file: ../session-mode.js
+    env:
+      TARGET: "${FAULT_SERVER}"
+      MODE: hold-receipt
+- tapOn:
+    id: send-message
+- extendedWaitUntil:
+    visible: "等待服务器确认…"
+    timeout: 25000
+- assertNotVisible: "发送失败.*"
+- runScript: check-delivery.js
+- takeScreenshot: delayed-receipt-pending
+- runScript:
+    file: ../session-mode.js
+    env:
+      TARGET: "${FAULT_SERVER}"
+      MODE: normal
+- assertVisible: "已发送.*"
+- assertNotVisible: "等待服务器确认…"
+- runScript: check-delivery.js
+- takeScreenshot: delayed-receipt-accepted

@@ -7,7 +7,13 @@ from PIL import Image, ImageChops, ImageFilter, ImageStat
 # Normalized coordinates omit the live clock and fixture-dependent message times.
 REGIONS = {
     "04-more": {"community and appearance actions": (.02, .67, .85, .93)},
-    "01-home": {"community header": (.02, .071, .98, .14), "floating controls": (.14, .86, .86, .965)},
+    "01-home": {
+        "community header": (.02, .071, .98, .14),
+        "filter pills": (.035, .113, .93, .18),
+        "channel section": (.035, .18, .94, .222),
+        "channel rows and spacing": (.035, .224, .965, .56),
+        "floating controls": (.14, .86, .86, .965),
+    },
     "02-channel": {"message text": (.17, .73, .78, .815), "reply preview": (.17, .831, .72, .874), "channel header": (.01, .068, .99, .137), "composer": (.01, .905, .99, .964)},
     "03-thread": {"root message": (.17, .184, .78, .274), "reply bubble": (.17, .38, .79, .431), "thread header": (.01, .068, .99, .137), "composer": (.01, .905, .99, .964)},
 }
@@ -30,7 +36,7 @@ def compare(reference, capture):
                 failures.append(f"{screen} / {name}: {changed:.1%} changed, mean difference {mean:.2f}")
     if failures:
         raise SystemExit("\n".join(failures))
-    print("All navigation and composer regions match.")
+    print("All checked screen regions match.")
 
 
 if __name__ == "__main__":

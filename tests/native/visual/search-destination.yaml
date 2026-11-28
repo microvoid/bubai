@@ -1,0 +1,29 @@
+appId: com.bubai.app.dev
+---
+- stopApp
+- runFlow: ../open-workspace.yaml
+- runScript: create-interaction-room.js
+- runScript: seed-search-results.js
+- tapOn: 搜索消息
+- inputText: "${output.channelHit}"
+- tapOn:
+    id: "search-result-${output.channelResultId}"
+- assertVisible:
+    id: message-input
+- assertVisible: "${output.channelHit}"
+- waitForAnimationToEnd
+- takeScreenshot: search-channel-message
+- runFlow:
+    file: ../open-app-link.yaml
+    env:
+      LINK: "bubai://search"
+- tapOn:
+    id: message-search-input
+- eraseText
+- inputText: "${output.threadHit}"
+- tapOn:
+    id: "search-result-${output.threadResultId}"
+- assertVisible: 话题
+- assertVisible: "${output.threadHit}"
+- waitForAnimationToEnd
+- takeScreenshot: search-thread-reply

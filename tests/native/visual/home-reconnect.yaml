@@ -1,0 +1,32 @@
+appId: com.bubai.app.dev
+---
+- stopApp
+- runScript:
+    file: ../session-mode.js
+    env:
+      TARGET: "${FAULT_SERVER}"
+      MODE: normal
+- runFlow:
+    file: ../open-workspace.yaml
+    env:
+      OPEN_SERVER: "${FAULT_SERVER}"
+- runScript:
+    file: ../session-mode.js
+    env:
+      TARGET: "${FAULT_SERVER}"
+      MODE: socket-outage
+- assertVisible:
+    id: channel-row-general
+- extendedWaitUntil:
+    visible: 实时连接已断开，正在重连
+    timeout: 12000
+- takeScreenshot: home-reconnecting
+- runScript:
+    file: ../session-mode.js
+    env:
+      TARGET: "${FAULT_SERVER}"
+      MODE: normal
+- extendedWaitUntil:
+    notVisible: 实时连接已断开，正在重连
+    timeout: 30000
+- takeScreenshot: home-reconnected

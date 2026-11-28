@@ -3,7 +3,7 @@ import { BubaiClient } from '../../packages/chat-client/src';
 // A loopback-only transport for exercising an actual interruption while a screen is mounted.
 export function networkFixture(upstream: string, channelId: string, rootId: string) {
   const client = new BubaiClient({ baseUrl: upstream });
-  const sockets = new Set<Bun.ServerWebSocket<{ upstream: WebSocket; queued: string[] }>>();
+  const sockets = new Set<Bun.ServerWebSocket<{ upstream: WebSocket; queued: string[]; receipts: string[] }>>();
   let reconnectAt = 0;
   let mode = 'normal';
   let unexpectedCreates = 0;
@@ -16,7 +16,7 @@ export function networkFixture(upstream: string, channelId: string, rootId: stri
       if (url.pathname === '/test/session-mode' && request.method === 'POST') {
         const next = (await request.json()) as { mode: string };
         if (
-          !['normal', 'session-outage', 'list-outage', 'expired', 'observe', 'offline', 'hold-send'].includes(next.mode)
+          !['normal', 'session-outage', 'list-outage', 'expired', 'observe', 'offline', 'socket-outage', 'hold-send', 'hold-receipt'].includes(next.mode)
         ) {
           return new Response(null, { status: 400 });
         }
@@ -26,8 +26,12 @@ export function networkFixture(upstream: string, channelId: string, rootId: stri
               for (const frame of ws.data.queued.splice(0)) ws.data.upstream.send(frame);
           }
         }
+        if (mode === 'hold-receipt' && next.mode === 'normal') {
+          for (const ws of sockets)
+            for (const receipt of ws.data.receipts.splice(0)) ws.send(receipt);
+        }
         mode = next.mode;
-        if (mode === 'offline') for (const socket of sockets) socket.close();
+        if (mode === 'offline' || mode === 'socket-outage') for (const socket of sockets) socket.close();
         if (mode === 'observe') receivedBearer = false;
         return Response.json({ ok: true });
       }
@@ -66,9 +70,9 @@ export function networkFixture(upstream: string, channelId: string, rootId: stri
         return Response.json({ content });
       }
       if (url.pathname === '/ws' && request.headers.get('upgrade')?.toLowerCase() === 'websocket') {
-        if (Date.now() < reconnectAt) return new Response(null, { status: 503 });
+        if (mode === 'socket-outage' || Date.now() < reconnectAt) return new Response(null, { status: 503 });
         const remote = new WebSocket(upstream.replace(/^http/, 'ws') + '/ws' + url.search);
-        if (server.upgrade(request, { data: { upstream: remote, queued: [] as string[] } })) return;
+        if (server.upgrade(request, { data: { upstream: remote, queued: [], receipts: [] as string[] } })) return;
         remote.close();
         return new Response(null, { status: 400 });
       }
@@ -82,12 +86,16 @@ export function networkFixture(upstream: string, channelId: string, rootId: stri
       });
     },
     websocket: {
-      data: {} as { upstream: WebSocket; queued: string[] },
+      data: {} as { upstream: WebSocket; queued: string[]; receipts: string[] },
       open(ws) {
         sockets.add(ws);
         const remote = ws.data.upstream;
         remote.onmessage = (event) => {
-          if (ws.readyState === 1) ws.send(String(event.data));
+          if (ws.readyState !== WebSocket.OPEN) return;
+          const frame = String(event.data);
+          if (mode === 'hold-receipt' && JSON.parse(frame).type === 'message.created')
+            ws.data.receipts.push(frame);
+          else ws.send(frame);
         };
         remote.onopen = () => {
           for (const frame of ws.data.queued.splice(0)) remote.send(frame);

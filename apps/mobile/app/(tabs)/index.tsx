@@ -313,7 +313,7 @@ export default function MessagesScreen() {
       </ScrollView>
 
       {connectionNotice && (
-        <Pressable accessibilityRole="button" onPress={() => router.push('/connect')}
+        <Pressable accessibilityRole="button" accessibilityLabel={connectionNotice} onPress={() => router.push('/connect')}
           style={[styles.cachedStatus,{bottom:Math.max(12,insets.bottom)+72,backgroundColor:colors.surfaceContainerHigh}]}>
           <Ionicons name="cloud-offline-outline" size={16} color={colors.onSurfaceVariant}/>
           <Text accessibilityLiveRegion="polite" style={[buzzTypography.caption,{color:colors.onSurfaceVariant}]}>

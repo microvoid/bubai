@@ -70,7 +70,7 @@ async function signUpAndCreateOrg(email: string, name: string, orgName: string, 
 
 describe('Phase 3 E2E: Bot Convergence, Strict Bot API Key, CLI Device Auth, and Mobile Auth', () => {
   let tempDir = '';
-  const notifications: { to: string; data: { messageId: string } }[] = [];
+  const notifications: { to: string; data: { messageId: string; channelId: string; organizationId: string } }[] = [];
   let pushRelay: ReturnType<typeof Bun.serve>;
   let cliConfigDir = '';
   let serverProc: ChildProcess | null = null;
@@ -450,6 +450,9 @@ describe('Phase 3 E2E: Bot Convergence, Strict Bot API Key, CLI Device Auth, and
       await guestSocket.sendMessage({ channelId: dm.id, senderId: guest.user.id, messageId, content: 'Mobile notification' });
       for (let n = 0; n < 50 && !notifications.some(entry => entry.data.messageId === messageId); n++) await Bun.sleep(30);
       assert.deepEqual(notifications.filter(entry => entry.data.messageId === messageId).map(entry => entry.to), [device]);
+      const push = notifications.find(entry => entry.data.messageId === messageId)!;
+      assert.equal(push.data.channelId, dm.id);
+      assert.equal(push.data.organizationId, owner.org.id);
       await ownerClient.unregisterPush(device);
     } finally { guestSocket.close(); ownerSocket.close(); }
     const roster = () => mobile.mobileCommunityRoster(BASE_URL, owner.token, owner.org.id);

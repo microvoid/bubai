@@ -78,6 +78,12 @@ interface WsLike {
 }
 
 export class MessageDisconnectedError extends Error {}
+export class MessageUnconfirmedError extends MessageDisconnectedError {}
+export class UploadHttpError extends Error {
+  constructor(readonly status: number) {
+    super(`Upload failed (HTTP ${status})`);
+  }
+}
 
 export class BubaiClient {
   readonly baseUrl: string;
@@ -400,7 +406,7 @@ export class BubaiClient {
       redirect: 'error',
     });
     if (!res.ok) {
-      throw new Error(`Upload failed (HTTP ${res.status})`);
+      throw new UploadHttpError(res.status);
     }
     const data = (await res.json()) as { attachment?: MessageAttachment };
     if (!data.attachment) throw new Error('Upload response missing attachment');
@@ -424,7 +430,7 @@ export class BubaiClient {
     let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
     const pending = new Map<string, (error?: Error) => void>();
     const cancelPending = () => {
-      for (const finish of pending.values()) finish(new MessageDisconnectedError('连接中断，消息尚未确认'));
+      for (const finish of pending.values()) finish(new MessageUnconfirmedError('连接中断，消息尚未确认'));
     };
     let attempt = 0;
     let heartbeat: ReturnType<typeof setInterval> | undefined;
@@ -508,12 +514,12 @@ export class BubaiClient {
             if (error) reject(error);
             else resolve();
           };
-          const timer = setTimeout(() => finish(new Error('未收到发送回执，请重试')), 15_000);
+          const timer = setTimeout(() => finish(new MessageUnconfirmedError('尚未收到发送回执')), 15_000);
           pending.set(payload.messageId, finish);
           try {
             socket.send(JSON.stringify({ type: 'message.send', payload }));
           } catch (error) {
-            finish(error instanceof Error ? error : new Error(String(error)));
+            finish(new MessageDisconnectedError(error instanceof Error ? error.message : String(error)));
           }
         });
       },

@@ -2008,7 +2008,7 @@ async function notifyMobileMembers(channel: typeof channels.$inferSelect, messag
   for (let offset = 0; offset < devices.length; offset += 100) {
     const batch = devices.slice(offset, offset + 100).map(({token}) => ({
       to: token, title: 'Bubai', body: '你有一条新消息', channelId: 'messages', sound: 'default',
-      data: { channelId: channel.id, threadId: message.threadId, messageId: message.id },
+      data: { organizationId: channel.organizationId, channelId: channel.id, threadId: message.threadId, messageId: message.id },
     }));
     const response = await fetch(endpoint, { method: 'POST', headers, body: JSON.stringify(batch), signal: AbortSignal.timeout(10000) });
     if (!response.ok) throw new Error('Push relay returned HTTP ' + response.status);

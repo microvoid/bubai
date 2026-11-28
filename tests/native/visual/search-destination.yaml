@@ -4,7 +4,14 @@ appId: com.bubai.app.dev
 - runFlow: ../open-workspace.yaml
 - runScript: create-interaction-room.js
 - runScript: seed-search-results.js
-- tapOn: 搜索消息
+- retry:
+    maxRetries: 2
+    commands:
+      - tapOn: 搜索消息
+      - assertVisible:
+          id: message-search-input
+- tapOn:
+    id: message-search-input
 - inputText: "${output.channelHit}"
 - tapOn:
     id: "search-result-${output.channelResultId}"

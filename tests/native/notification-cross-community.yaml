@@ -1,0 +1,62 @@
+# Use a signed-in native fixture account and notification-fixture.ts --cross-community.
+appId: com.bubai.app.dev
+---
+- stopApp
+- launchApp
+- extendedWaitUntil:
+    visible:
+      id: community-menu
+    timeout: 20000
+- tapOn:
+    id: community-menu
+- tapOn:
+    id: "${ORG_A}"
+- assertVisible: ".*Home Community.*"
+- assertNotVisible:
+    id: channel-row-design-updates
+- takeScreenshot: 01-source-community
+- runScript:
+    file: send-notification.js
+    env:
+      KIND: channel
+- tapOn:
+    point: 50%,10%
+- extendedWaitUntil:
+    visible: ".*Design handoff for review.*"
+    timeout: 20000
+- takeScreenshot: 02-target-channel
+- stopApp
+- launchApp
+- extendedWaitUntil:
+    visible:
+      id: channel-row-design-updates
+    timeout: 20000
+- assertVisible: ".*Design Community.*"
+- takeScreenshot: 03-target-community
+- tapOn:
+    id: community-menu
+- tapOn:
+    id: "${ORG_A}"
+- assertVisible: ".*Home Community.*"
+- assertNotVisible:
+    id: channel-row-design-updates
+- stopApp
+- runScript:
+    file: send-notification.js
+    env:
+      KIND: thread
+- tapOn:
+    point: 50%,10%
+- extendedWaitUntil:
+    visible: ".*Cross-community reply landed here.*"
+    timeout: 20000
+- assertVisible: "话题"
+- takeScreenshot: 04-cold-start-target-reply
+- runScript:
+    file: send-notification.js
+    env:
+      KIND: missing
+- tapOn:
+    point: 50%,10%
+- assertVisible: "无法打开通知"
+- takeScreenshot: 05-inaccessible-community

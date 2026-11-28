@@ -27,6 +27,7 @@ const config: ExpoConfig = {
     supportsTablet: true,
     bundleIdentifier: `com.bubai.app${suffix}`,
     infoPlist: {
+      ITSAppUsesNonExemptEncryption: false,
       NSAppTransportSecurity: {
         NSAllowsArbitraryLoads: !isProd,
         NSAllowsLocalNetworking: true,

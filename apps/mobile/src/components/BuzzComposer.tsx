@@ -180,7 +180,7 @@ export function BuzzComposer({
               onPickAttachment();
             }}
             style={styles.attachBtn}
-            accessibilityLabel="Add image or attachment"
+            accessibilityLabel="添加附件"
           >
             <Ionicons
               name={uploading ? 'hourglass-outline' : 'add-circle-outline'}
@@ -218,7 +218,7 @@ export function BuzzComposer({
               backgroundColor: canSend ? accent.fill : colors.surfaceContainerHigh,
             },
           ]}
-          accessibilityLabel="Send message"
+          accessibilityLabel="发送消息"
         >
           <Ionicons
             name={editingLabel ? 'checkmark' : 'arrow-up'}
@@ -277,6 +277,7 @@ const styles = StyleSheet.create({
     minHeight: 46,
   },
   input: {
+    fontFamily: 'Inter',
     flex: 1,
     maxHeight: 120,
     paddingTop: 6,

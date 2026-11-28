@@ -3,9 +3,13 @@ appId: com.bubai.app.dev
 - runFlow: ../../../tests/native/open-workspace.yaml
 - runFlow:
     when:
-      visible: Live
+      visible:
+        id: workspace-more
     commands:
-      - tapOn: Live
+      - tapOn:
+          id: workspace-more
+      - tapOn:
+          id: change-connection
 - runFlow:
     when:
       visible:
@@ -22,11 +26,13 @@ appId: com.bubai.app.dev
         id: channel-row-general
     commands:
       - tapOn:
+          id: workspace-more
+      - tapOn:
           id: settings-tab
       - scrollUntilVisible:
-          element: ".*Sign Out.*"
+          element: ".*退出登录.*"
           direction: DOWN
-      - tapOn: ".*Sign Out.*"
+      - tapOn: ".*退出登录.*"
 - assertVisible: "发送验证码"
 - assertVisible: "注册账号"
 - tapOn: "使用邮箱密码登录"
@@ -48,7 +54,10 @@ appId: com.bubai.app.dev
 - launchApp
 - assertVisible:
     id: channel-row-general
-- tapOn: "Live"
+- tapOn:
+    id: workspace-more
+- tapOn:
+    id: change-connection
 - tapOn:
     id: server-url
 - eraseText

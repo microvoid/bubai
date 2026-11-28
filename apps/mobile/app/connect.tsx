@@ -159,7 +159,7 @@ export default function ConnectScreen() {
             <Ionicons name="sparkles" size={28} color={colors.onPrimary} />
           </View>
           <Text style={[buzzTypography.largeTitle, { color: colors.onSurface }]}>
-            {step === 'server' ? 'Connect to Bubai' : 'Sign in to Bubai'}
+            {step === 'server' ? '连接 Bubai' : '登录 Bubai'}
           </Text>
           <Text
             style={[
@@ -171,14 +171,14 @@ export default function ConnectScreen() {
               ? '输入你的 Bubai 服务端地址（与 Web 端相同，支持局域网、Tailscale 或公网域名）。'
               : step === 'otp'
                 ? `已发送 6 位验证码至 ${email}`
-                : '登录你的账号以同步 Community 与消息。'}
+                : '登录你的账号以同步社区与消息。'}
           </Text>
         </View>
 
         {step === 'server' && (
           <View style={styles.form}>
             <Text style={[buzzTypography.caption, { color: colors.onSurfaceVariant }]}>
-              SERVER URL
+              服务器地址
             </Text>
             <TextInput
               testID="server-url"
@@ -222,7 +222,7 @@ export default function ConnectScreen() {
                 <ActivityIndicator color={colors.onPrimary} />
               ) : (
                 <Text style={[buzzTypography.titleSmall, { color: colors.onPrimary }]}>
-                  Connect
+                  连接
                 </Text>
               )}
             </Pressable>
@@ -231,7 +231,7 @@ export default function ConnectScreen() {
 
         {step === 'email' && (
           <View style={styles.form}>
-            <Text style={[buzzTypography.caption, { color: colors.onSurfaceVariant }]}>EMAIL</Text>
+            <Text style={[buzzTypography.caption, { color: colors.onSurfaceVariant }]}>邮箱</Text>
             <TextInput
               testID="auth-email"
               value={email}
@@ -343,7 +343,7 @@ export default function ConnectScreen() {
 
         {(step === 'password' || step === 'signup') && (
           <View style={styles.form}>
-            <Text style={[buzzTypography.caption, { color: colors.onSurfaceVariant }]}>EMAIL</Text>
+            <Text style={[buzzTypography.caption, { color: colors.onSurfaceVariant }]}>邮箱</Text>
             <TextInput
               testID="auth-email"
               value={email}
@@ -365,7 +365,7 @@ export default function ConnectScreen() {
               editable={!busy}
             />
             <Text style={[buzzTypography.caption, { color: colors.onSurfaceVariant }]}>
-              PASSWORD
+              密码
             </Text>
             {step === 'signup' && <TextInput placeholder="名字" value={name} onChangeText={setName} style={[styles.input, { color: colors.onSurface }]} />}
             <TextInput

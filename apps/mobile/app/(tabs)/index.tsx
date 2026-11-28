@@ -1,3 +1,4 @@
+import { WorkspaceDock, WorkspaceHeader } from '@/components/WorkspaceControls';
 import { unreadCount as rowUnread, visibleUnread } from '@/store/unread';
 import type { Participant } from '@buzz-botmux/chat-client';
 import { buzzGrid, buzzRadii, buzzTypography } from '@buzz-botmux/design-tokens';
@@ -138,43 +139,7 @@ export default function MessagesScreen() {
 
   return (
     <SafeAreaView style={[styles.root, { backgroundColor: colors.surface }]} edges={['top']}>
-      {/* Buzz-style Large Header */}
-      <View style={styles.topBar}>
-        <Text style={[buzzTypography.largeTitle, { color: colors.onSurface }]}>Messages</Text>
-        <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
-          <BuzzConnectionPill
-            connected={wsState === 'open'}
-            label={
-              wsState === 'open'
-                ? 'Live'
-                : wsState === 'reconnecting'
-                  ? 'Reconnecting'
-                  : 'Offline'
-            }
-            onPress={() => router.push('/connect')}
-          />
-          <Pressable
-            onPress={() => {
-              void Haptics.selectionAsync();
-              router.push('/search');
-            }}
-            style={[styles.newBtn, { backgroundColor: colors.surfaceContainerLow }]}
-            accessibilityLabel="Search messages"
-          >
-            <Ionicons name="search" size={18} color={colors.onSurface} />
-          </Pressable>
-          <Pressable
-            onPress={() => {
-              void Haptics.selectionAsync();
-              setCreateOpen(true);
-            }}
-            style={[styles.newBtn, { backgroundColor: colors.surfaceContainerLow }]}
-            accessibilityLabel="New channel or DM"
-          >
-            <Ionicons name="add" size={20} color={colors.onSurface} />
-          </Pressable>
-        </View>
-      </View>
+      <WorkspaceHeader />
 
       {/* Filter Pills */}
       <ScrollView
@@ -183,19 +148,19 @@ export default function MessagesScreen() {
         contentContainerStyle={styles.filterBar}
         style={styles.filterWrap}
       >
-        <BuzzFilterPill label="All" selected={filter === 'all'} onPress={() => setFilter('all')} />
+        <BuzzFilterPill label="全部" selected={filter === 'all'} onPress={() => setFilter('all')} />
         <BuzzFilterPill
-          label="Unread"
+          label="未读"
           count={unreadCount}
           selected={filter === 'unread'}
           onPress={() => setFilter('unread')}
         />
         <BuzzFilterPill
-          label="Channels"
+          label="频道"
           selected={filter === 'channels'}
           onPress={() => setFilter('channels')}
         />
-        <BuzzFilterPill label="DMs" selected={filter === 'dms'} onPress={() => setFilter('dms')} />
+        <BuzzFilterPill label="私聊" selected={filter === 'dms'} onPress={() => setFilter('dms')} />
       </ScrollView>
 
       <ScrollView
@@ -228,7 +193,7 @@ export default function MessagesScreen() {
           </TouchableOpacity>
         )}
 
-        {[{ id: 'starred', name: 'Starred' }, ...sidebarGroups, { id: '', name: 'Channels' }].map(group => {
+        {[{ id: 'starred', name: '星标' }, ...sidebarGroups, { id: '', name: '频道' }].map(group => {
           const rows = regularChannels.filter(ch => (ch.starred ? 'starred' : ch.groupId || '') === group.id);
           return rows.length > 0 && <BuzzSectionGroup key={group.id} title={group.name}>
             {rows.map((ch, idx) => (
@@ -279,7 +244,7 @@ export default function MessagesScreen() {
         })}
 
         {dmChannels.length > 0 && (
-          <BuzzSectionGroup title="Direct Messages">
+          <BuzzSectionGroup title="私聊">
             {dmChannels.map((dm, idx) => {
               const targetAgent = participants.find(
                 (p) => p.role === 'agent' && dm.dmKey?.includes(`a:${p.id}`),
@@ -316,7 +281,7 @@ export default function MessagesScreen() {
                       style={[buzzTypography.caption, { color: colors.onSurfaceVariant }]}
                       numberOfLines={1}
                     >
-                      {targetAgent ? `Agent · ${targetAgent.cliId || 'cli'}` : 'Direct message'}
+                      {targetAgent ? `Agent · ${targetAgent.cliId || 'cli'}` : '私聊'}
                     </Text>
                   </View>
                   {dm.muted && <Ionicons accessibilityLabel="已静音" name="volume-mute-outline" size={15} color={colors.onSurfaceVariant} />}
@@ -340,6 +305,8 @@ export default function MessagesScreen() {
         )}
       </ScrollView>
 
+      <WorkspaceDock onCreate={()=>setCreateOpen(true)} />
+
       {/* New Channel / Start Agent DM Modal */}
       <Modal
         visible={createOpen}
@@ -349,7 +316,7 @@ export default function MessagesScreen() {
       >
         <SafeAreaView style={[styles.root, { backgroundColor: colors.surface }]}>
           <View style={styles.topBar}>
-            <Text style={[buzzTypography.title, { color: colors.onSurface }]}>New conversation</Text>
+            <Text style={[buzzTypography.title, { color: colors.onSurface }]}>新建会话</Text>
             <Pressable onPress={() => setCreateOpen(false)}>
               <Ionicons name="close" size={22} color={colors.onSurface} />
             </Pressable>
@@ -358,12 +325,12 @@ export default function MessagesScreen() {
             contentContainerStyle={styles.listContent}
             keyboardShouldPersistTaps="handled"
           >
-            <BuzzSectionGroup title="Create Channel">
+            <BuzzSectionGroup title="创建频道">
               <View style={{ padding: 14, gap: 10 }}>
                 <TextInput
                   value={newChannelName}
                   onChangeText={setNewChannelName}
-                  placeholder="Channel name (e.g. mobile-dev)"
+                  placeholder="频道名称"
                   placeholderTextColor={colors.onSurfaceVariant}
                   style={[
                     styles.modalInput,
@@ -374,7 +341,7 @@ export default function MessagesScreen() {
                 <TextInput
                   value={newChannelTopic}
                   onChangeText={setNewChannelTopic}
-                  placeholder="Topic (optional)"
+                  placeholder="主题（选填）"
                   placeholderTextColor={colors.onSurfaceVariant}
                   style={[
                     styles.modalInput,
@@ -394,13 +361,13 @@ export default function MessagesScreen() {
                   ]}
                 >
                   <Text style={[buzzTypography.titleSmall, { color: colors.onPrimary }]}>
-                    {creating ? 'Creating…' : 'Create channel'}
+                    {creating ? '正在创建…' : '创建频道'}
                   </Text>
                 </Pressable>
               </View>
             </BuzzSectionGroup>
 
-            <BuzzSectionGroup title="Direct Message">
+            <BuzzSectionGroup title="发起私聊">
               {participants
                 .filter((p) => p.id !== currentUserId && !p.archived)
                 .map((agent, idx) => (
@@ -484,7 +451,7 @@ const styles = StyleSheet.create({
   },
   listContent: {
     paddingHorizontal: buzzGrid.gutter,
-    paddingBottom: buzzGrid.md,
+    paddingBottom: 110,
     gap: buzzGrid.inventorySectionTopInset,
   },
   errorBanner: {

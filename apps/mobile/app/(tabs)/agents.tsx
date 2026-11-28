@@ -51,9 +51,9 @@ export default function AgentsScreen() {
   };
 
   return (
-    <SafeAreaView style={[styles.root, { backgroundColor: colors.surface }]} edges={['top']}>
+    <SafeAreaView style={[styles.root, { backgroundColor: colors.surface }]} edges={['bottom']}>
       <View style={styles.topBar}>
-        <Text style={[buzzTypography.largeTitle, { color: colors.onSurface }]}>Agents</Text>
+        <Text style={[buzzTypography.largeTitle, { color: colors.onSurface }]}>智能体</Text>
         <BuzzBadge
           label={`${activeAgents.filter((a) => a.status === 'online').length}/${activeAgents.length} Online`}
           tone="success"
@@ -116,7 +116,7 @@ export default function AgentsScreen() {
 
                 <View style={styles.cardFooter}>
                   <BuzzBadge label={agent.cliId || 'cli'} />
-                  {agent.archived && <BuzzBadge label="Archived" tone="warning" />}
+                  {agent.archived && <BuzzBadge label="已归档" tone="warning" />}
                 </View>
               </Pressable>
             );

@@ -14,7 +14,7 @@ appId: com.bubai.app.dev
 - extendedWaitUntil:
     visible: ".*${output.missedMessage}.*"
     timeout: 20000
-- tapOn: "(?s).*repl(y|ies).*Preview from a colleague.*"
+- tapOn: "(?s).*条回复.*Preview from a colleague.*"
 - assertVisible: ".*Preview from a colleague.*"
 - runScript:
     file: ../../../tests/native/interrupt.js

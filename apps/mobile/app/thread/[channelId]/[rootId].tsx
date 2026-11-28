@@ -1,3 +1,4 @@
+import { useTimeline,type LocalMessage } from '@/store/localTimeline';
 import { useMessageActions, useMessageScroll } from '@/store/useMessageActions';
 import type { ChatMessage, Participant } from '@buzz-botmux/chat-client';
 import { buzzGrid, buzzTypography } from '@buzz-botmux/design-tokens';
@@ -39,7 +40,7 @@ export default function ThreadScreen() {
     client,
     serverUrl,
     authToken,
-    currentUserId,
+    currentUserId, activeOrgId,
     participants,
     markThreadRead, wsState,
     subscribeWsEvents,
@@ -50,11 +51,14 @@ export default function ThreadScreen() {
     [participants],
   );
 
-  const [root, setRoot] = useState<ChatMessage | null>(null);
-  const [replies, setReplies] = useState<ChatMessage[]>([]);
+  const {rows:allItems,update,reconcile,snapshot}=useTimeline(serverUrl,currentUserId,activeOrgId,channelId,rootId);
+  const root=allItems.find(m=>m.id===rootId);
+  const replies=useMemo(()=>allItems.filter(m=>m.id!==rootId),[allItems,rootId]);
+  const setRoot=useCallback((fn:(prev:LocalMessage)=>LocalMessage)=>update(prev=>prev.map(m=>m.id===rootId?fn(m):m)),[update,rootId]);
+  const setReplies=useCallback((fn:(prev:LocalMessage[])=>LocalMessage[])=>update(prev=>[...prev.filter(m=>m.id===rootId),...fn(prev.filter(m=>m.id!==rootId))]),[update,rootId]);
   const [loading, setLoading] = useState(true);
-  const {draft, setDraft, editing, startEdit, cancelEdit, uploading, send: handleSendReply, attach, react: handleToggleReaction} =
-    useMessageActions(channelId, rootId, (id, changes) => {
+  const {draft, setDraft, editing, startEdit, cancelEdit, uploading, retry, send: handleSendReply, attach, react: handleToggleReaction} =
+    useMessageActions(channelId, rootId, update, snapshot, (id, changes) => {
       if (id === rootId) setRoot(prev => prev ? {...prev, ...changes} : prev);
       setReplies(prev => prev.map(m => m.id === id ? {...m, ...changes} : m));
     });
@@ -67,19 +71,18 @@ export default function ThreadScreen() {
     try {
       const data = await client.getThread(channelId, rootId);
       loaded.current = true;
-      setRoot(data.root);
-      setReplies(data.replies ?? []);
+      reconcile([data.root,...(data.replies??[])]);
       markThreadRead(channelId, rootId);
     } finally {
       setLoading(false);
     }
-  }, [channelId, client, rootId, markThreadRead]);
+  }, [channelId, client, rootId, markThreadRead, reconcile]);
 
   useEffect(() => {
     if (!loaded.current || wsState === 'open') void loadThread().catch(error => {
-      if (error?.status !== 401 || !authToken) Alert.alert('加载失败', String(error));
+      if (!snapshot().length && (error?.status !== 401 || !authToken)) Alert.alert('加载失败', String(error));
     });
-  }, [loadThread, wsState, authToken]);
+  }, [loadThread, wsState, authToken, snapshot]);
 
   useEffect(() => {
     return subscribeWsEvents((event) => {
@@ -87,7 +90,7 @@ export default function ThreadScreen() {
         const msg = event.payload;
         if (msg.channelId !== channelId || msg.threadId !== rootId) return;
         markThreadRead(channelId, rootId);
-        setReplies((prev) => (prev.some((r) => r.id === msg.id) ? prev : [...prev, msg]));
+        setReplies((prev) => (prev.some((r) => r.id === msg.id) ? prev.map(r=>r.id===msg.id?msg:r) : [...prev, msg]));
       } else if (event.type === 'message.updated') {
         const msg = event.payload;
         if (msg.id === rootId) setRoot((prev) => (prev ? { ...prev, ...msg } : msg));
@@ -111,9 +114,9 @@ export default function ThreadScreen() {
         );
       }
     });
-  }, [channelId, rootId, subscribeWsEvents, markThreadRead, router]);
+  }, [channelId, rootId, subscribeWsEvents, markThreadRead, router, setRoot, setReplies]);
 
-  const allItems = useMemo(() => (root ? [root, ...replies] : replies), [replies, root]);
+
   const scroll = useMessageScroll(allItems, messageId);
 
   return (
@@ -128,7 +131,7 @@ export default function ThreadScreen() {
           <Ionicons name="chevron-back" size={24} color={colors.onSurface} />
         </Pressable>
         <Text style={[buzzTypography.titleSmall, { color: colors.onSurface, flex: 1 }]}>
-          Thread · {replies.length} {replies.length === 1 ? 'reply' : 'replies'}
+          话题
         </Text>
       </View>
 
@@ -136,7 +139,7 @@ export default function ThreadScreen() {
         style={{ flex: 1 }}
         behavior={Platform.OS === 'ios' ? 'padding' : undefined}
       >
-        {loading ? (
+        {loading && !allItems.length ? (
           <View style={styles.center}>
             <ActivityIndicator color={colors.onSurfaceVariant} />
           </View>
@@ -153,6 +156,7 @@ export default function ThreadScreen() {
               <View>
                 <BuzzMessageBubble
                   message={item}
+                  onRetry={retry}
                   sender={participantMap.get(item.senderId)}
                   currentUserId={currentUserId}
                   serverBaseUrl={serverUrl || ''}
@@ -172,7 +176,7 @@ export default function ThreadScreen() {
                     ]}
                   >
                     <Text style={[buzzTypography.micro, { color: colors.onSurfaceVariant }]}>
-                      {replies.length} REPLIES
+                      {replies.length} 条回复
                     </Text>
                   </View>
                 )}
@@ -189,7 +193,7 @@ export default function ThreadScreen() {
           onPickAttachment={editing ? undefined : attach}
           editingLabel={editing ? '编辑消息' : null}
           onCancelEdit={cancelEdit}
-          placeholder="Reply in thread… (可 @Agent)"
+          placeholder="回复话题…"
           currentUserId={currentUserId}
           channel={channels.find(c => c.id === channelId)} messages={allItems} threadMessages={replies}
           participants={participants}

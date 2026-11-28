@@ -36,26 +36,26 @@ export default function SettingsScreen() {
   const [communityName, setCommunityName] = useState('');
 
   return (
-    <SafeAreaView style={[styles.root, { backgroundColor: colors.surface }]} edges={['top']}>
+    <SafeAreaView style={[styles.root, { backgroundColor: colors.surface }]} edges={['bottom']}>
       <View style={styles.topBar}>
-        <Text style={[buzzTypography.largeTitle, { color: colors.onSurface }]}>Settings</Text>
+        <Text style={[buzzTypography.largeTitle, { color: colors.onSurface }]}>设置</Text>
       </View>
 
       <ScrollView contentContainerStyle={styles.content}>
-        <BuzzSectionGroup title="Connection">
+        <BuzzSectionGroup title="连接">
           <Pressable
             onPress={() => router.push('/connect')}
             style={({ pressed }) => [styles.row, { opacity: pressed ? 0.75 : 1 }]}
           >
             <View style={{ flex: 1, gap: 2 }}>
               <Text style={[buzzTypography.titleSmall, { color: colors.onSurface }]}>
-                Bubai Server
+                Bubai 服务器
               </Text>
               <Text
                 style={[buzzTypography.caption, { color: colors.onSurfaceVariant }]}
                 numberOfLines={1}
               >
-                {serverUrl || 'Not configured'}
+                {serverUrl || '尚未配置'}
               </Text>
             </View>
             <Ionicons name="chevron-forward" size={18} color={colors.onSurfaceVariant} />
@@ -79,7 +79,7 @@ export default function SettingsScreen() {
           </View>
         </BuzzSectionGroup>
 
-        <BuzzSectionGroup title="Appearance">
+        <BuzzSectionGroup title="外观">
           <View style={styles.segmentWrap}>
             {MODE_OPTIONS.map((opt) => {
               const selected = preference === opt.id;
@@ -143,7 +143,7 @@ export default function SettingsScreen() {
         </BuzzSectionGroup>
 
         {authUser && (
-          <BuzzSectionGroup title="Account">
+          <BuzzSectionGroup title="账号">
             <View style={styles.row}>
               <BuzzAvatar
                 name={authUser.name}
@@ -181,14 +181,14 @@ export default function SettingsScreen() {
             >
               <Ionicons name="log-out-outline" size={20} color={colors.error} />
               <Text style={[buzzTypography.titleSmall, { color: colors.error, flex: 1 }]}>
-                Sign Out
+                退出登录
               </Text>
             </Pressable>
           </BuzzSectionGroup>
         )}
 
         {authUser && (
-          <BuzzSectionGroup title="Community">
+          <BuzzSectionGroup title="社区">
             <BuzzInput placeholder="新社区名称" value={communityName} onChangeText={setCommunityName} style={{ color: colors.onSurface }} />
             <BuzzButton title="创建社区" disabled={!communityName.trim()} onPress={async () => {
               if (!authToken || !serverUrl) return;
@@ -234,7 +234,7 @@ export default function SettingsScreen() {
           </BuzzSectionGroup>
         )}
 
-        <BuzzSectionGroup title="Notifications">
+        <BuzzSectionGroup title="通知">
           <Pressable
             onPress={async () => {
               void Haptics.selectionAsync();
@@ -246,7 +246,7 @@ export default function SettingsScreen() {
             <Ionicons name="notifications-outline" size={20} color={colors.onSurfaceVariant} />
             <View style={{ flex: 1 }}>
               <Text style={[buzzTypography.titleSmall, { color: colors.onSurface }]}>
-                Push Notifications
+                推送通知
               </Text>
               <Text style={[buzzTypography.caption, { color: colors.onSurfaceVariant }]}>
                 启用此设备的消息通知

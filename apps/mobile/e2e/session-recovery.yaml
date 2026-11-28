@@ -6,7 +6,10 @@ appId: com.bubai.app.dev
       TARGET: "${AUTH_FAULT_SERVER}"
       MODE: normal
 - runFlow: ../../../tests/native/open-workspace.yaml
-- tapOn: Live
+- tapOn:
+    id: workspace-more
+- tapOn:
+    id: change-connection
 - tapOn:
     id: server-url
 - eraseText
@@ -69,7 +72,10 @@ appId: com.bubai.app.dev
     env:
       TARGET: "${AUTH_FAULT_SERVER}"
       MODE: normal
-- tapOn: Live
+- tapOn:
+    id: workspace-more
+- tapOn:
+    id: change-connection
 - tapOn:
     id: server-url
 - eraseText

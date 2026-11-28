@@ -164,8 +164,8 @@ export default function AgentDetailScreen() {
     };
     if (nextArchived) {
       Alert.alert('Archive this agent?', '归档后会从常规列表折叠，会保留已有会话，随时可恢复。', [
-        { text: 'Cancel', style: 'cancel' },
-        { text: 'Archive', style: 'destructive', onPress: () => void run() },
+        { text: '取消', style: 'cancel' },
+        { text: '归档', style: 'destructive', onPress: () => void run() },
       ]);
     } else {
       void run();
@@ -269,7 +269,7 @@ export default function AgentDetailScreen() {
           <Ionicons name="chevron-back" size={24} color={colors.onSurface} />
         </Pressable>
         <Text style={[buzzTypography.titleSmall, { color: colors.onSurface, flex: 1 }]}>
-          Agent profile
+          智能体资料
         </Text>
         {agent && (
           <Pressable onPress={openEdit} style={styles.iconBtn} hitSlop={6}>
@@ -313,11 +313,11 @@ export default function AgentDetailScreen() {
             <Text style={[buzzTypography.title, { color: colors.onSurface }]}>{agent.name}</Text>
             <View style={styles.badgeRow}>
               <BuzzBadge
-                label={agent.status === 'online' ? 'Online' : 'Offline'}
+                label={agent.status === 'online' ? '在线' : '离线'}
                 tone={agent.status === 'online' ? 'success' : 'neutral'}
               />
               <BuzzBadge label={agent.cliId} />
-              {agent.archived && <BuzzBadge label="Archived" tone="warning" />}
+              {agent.archived && <BuzzBadge label="已归档" tone="warning" />}
             </View>
             {!!agent.description && (
               <Text
@@ -338,7 +338,7 @@ export default function AgentDetailScreen() {
                 style={[styles.tile, { backgroundColor: accent.fill }]}
               >
                 <Ionicons name="chatbubble-outline" size={20} color={accent.foreground} />
-                <Text style={[buzzTypography.caption, { color: accent.foreground }]}>Message</Text>
+                <Text style={[buzzTypography.caption, { color: accent.foreground }]}>发消息</Text>
               </Pressable>
 
               <Pressable
@@ -360,7 +360,7 @@ export default function AgentDetailScreen() {
                 ]}
               >
                 <Ionicons name="terminal-outline" size={20} color={colors.onSurface} />
-                <Text style={[buzzTypography.caption, { color: colors.onSurface }]}>Terminal</Text>
+                <Text style={[buzzTypography.caption, { color: colors.onSurface }]}>终端</Text>
               </Pressable>
 
               <Pressable
@@ -377,7 +377,7 @@ export default function AgentDetailScreen() {
                 ]}
               >
                 <Ionicons name="refresh-outline" size={20} color={colors.onSurface} />
-                <Text style={[buzzTypography.caption, { color: colors.onSurface }]}>Restart</Text>
+                <Text style={[buzzTypography.caption, { color: colors.onSurface }]}>重启</Text>
               </Pressable>
 
               <Pressable
@@ -405,7 +405,7 @@ export default function AgentDetailScreen() {
                   color={colors.onSurface}
                 />
                 <Text style={[buzzTypography.caption, { color: colors.onSurface }]}>
-                  {primaryState === 'closed' ? 'Resume' : 'Stop'}
+                  {primaryState === 'closed' ? '继续' : '停止'}
                 </Text>
               </Pressable>
             </View>
@@ -415,7 +415,7 @@ export default function AgentDetailScreen() {
           <View style={[styles.tabBar, { backgroundColor: colors.surfaceContainerLow }]}>
             {(
               [
-                { id: 'info', label: 'Info' },
+                { id: 'info', label: '信息' },
                 { id: 'channels', label: `Channels ${agent.channels.length}` },
                 { id: 'runtime', label: `Runtime ${sortedSessions.length}` },
               ] as const
@@ -450,7 +450,7 @@ export default function AgentDetailScreen() {
           {tab === 'info' && (
             <>
               {agent.recentMessages.length > 0 && (
-                <BuzzSectionGroup title="Latest Activity">
+                <BuzzSectionGroup title="最近动态">
                   {agent.recentMessages.slice(0, 3).map((msg, idx) => (
                     <TouchableOpacity
                       key={msg.id}
@@ -480,7 +480,7 @@ export default function AgentDetailScreen() {
                 </BuzzSectionGroup>
               )}
 
-              <BuzzSectionGroup title="Info">
+              <BuzzSectionGroup title="信息">
                 <TouchableOpacity
                   onPress={() =>
                     agent.systemPrompt.trim() ? setInstructionsOpen(true) : openEdit()
@@ -490,7 +490,7 @@ export default function AgentDetailScreen() {
                   <Ionicons name="document-text-outline" size={18} color={colors.onSurfaceVariant} />
                   <View style={{ flex: 1, gap: 2 }}>
                     <Text style={[buzzTypography.titleSmall, { color: colors.onSurface }]}>
-                      Agent instructions
+                      智能体指令
                     </Text>
                     <Text
                       style={[buzzTypography.caption, { color: colors.onSurfaceVariant }]}
@@ -511,7 +511,7 @@ export default function AgentDetailScreen() {
                   <Ionicons name="hardware-chip-outline" size={18} color={colors.onSurfaceVariant} />
                   <View style={{ flex: 1 }}>
                     <Text style={[buzzTypography.titleSmall, { color: colors.onSurface }]}>
-                      Runtime / CLI
+                      运行环境 / CLI
                     </Text>
                     <Text style={[buzzTypography.caption, { color: colors.onSurfaceVariant }]}>
                       {agent.cliId}
@@ -528,7 +528,7 @@ export default function AgentDetailScreen() {
                   <Ionicons name="folder-outline" size={18} color={colors.onSurfaceVariant} />
                   <View style={{ flex: 1 }}>
                     <Text style={[buzzTypography.titleSmall, { color: colors.onSurface }]}>
-                      Working directory
+                      工作目录
                     </Text>
                     <Text
                       style={[buzzTypography.caption, { color: colors.onSurfaceVariant }]}
@@ -540,11 +540,11 @@ export default function AgentDetailScreen() {
                 </View>
               </BuzzSectionGroup>
 
-              <BuzzSectionGroup title="Management">
+              <BuzzSectionGroup title="管理">
                 <TouchableOpacity onPress={openEdit} style={styles.row}>
                   <Ionicons name="pencil-outline" size={18} color={colors.onSurfaceVariant} />
                   <Text style={[buzzTypography.titleSmall, { color: colors.onSurface, flex: 1 }]}>
-                    Edit agent profile
+                    编辑智能体资料
                   </Text>
                   <Ionicons name="chevron-forward" size={16} color={colors.onSurfaceVariant} />
                 </TouchableOpacity>
@@ -568,7 +568,7 @@ export default function AgentDetailScreen() {
                       { color: agent.archived ? colors.onSurface : colors.error, flex: 1 },
                     ]}
                   >
-                    {agent.archived ? 'Unarchive agent' : 'Archive agent'}
+                    {agent.archived ? '取消归档' : '归档智能体'}
                   </Text>
                 </TouchableOpacity>
               </BuzzSectionGroup>
@@ -585,7 +585,7 @@ export default function AgentDetailScreen() {
                 >
                   <Ionicons name="add-circle-outline" size={20} color={colors.tertiary} />
                   <Text style={[buzzTypography.titleSmall, { color: colors.tertiary, flex: 1 }]}>
-                    Add to channel
+                    添加到频道
                   </Text>
                 </TouchableOpacity>
               )}
@@ -683,7 +683,7 @@ export default function AgentDetailScreen() {
                           style={[styles.smallBtn, { backgroundColor: colors.primary }]}
                         >
                           <Text style={[buzzTypography.micro, { color: colors.onPrimary }]}>
-                            Terminal
+                            终端
                           </Text>
                         </Pressable>
                         <Pressable
@@ -691,7 +691,7 @@ export default function AgentDetailScreen() {
                           style={[styles.smallBtn, { backgroundColor: colors.surfaceContainerHigh }]}
                         >
                           <Text style={[buzzTypography.micro, { color: colors.onSurface }]}>
-                            History
+                            历史记录
                           </Text>
                         </Pressable>
                         <Pressable
@@ -699,7 +699,7 @@ export default function AgentDetailScreen() {
                           style={[styles.smallBtn, { backgroundColor: colors.surfaceContainerHigh }]}
                         >
                           <Text style={[buzzTypography.micro, { color: colors.onSurface }]}>
-                            Restart
+                            重启
                           </Text>
                         </Pressable>
                         <Pressable
@@ -709,7 +709,7 @@ export default function AgentDetailScreen() {
                           style={[styles.smallBtn, { backgroundColor: colors.surfaceContainerHigh }]}
                         >
                           <Text style={[buzzTypography.micro, { color: colors.onSurface }]}>
-                            {st === 'closed' ? 'Resume' : 'Close'}
+                            {st === 'closed' ? '继续' : '关闭'}
                           </Text>
                         </Pressable>
                       </View>
@@ -727,21 +727,21 @@ export default function AgentDetailScreen() {
         <View style={[styles.root, { backgroundColor: colors.surface, paddingTop: Platform.OS === 'android' ? insets.top : 8, paddingBottom: Math.max(insets.bottom, 12) }]}>
           <View style={[styles.header, { borderBottomColor: colors.outline }]}>
             <Pressable onPress={() => setEditOpen(false)} style={styles.iconBtn}>
-              <Text style={[buzzTypography.label, { color: colors.onSurfaceVariant }]}>Cancel</Text>
+              <Text style={[buzzTypography.label, { color: colors.onSurfaceVariant }]}>取消</Text>
             </Pressable>
             <Text style={[buzzTypography.titleSmall, { color: colors.onSurface, flex: 1, textAlign: 'center' }]}>
-              Edit agent
+              编辑智能体
             </Text>
             <Pressable disabled={saving} onPress={() => void handleSaveEdit()} style={styles.iconBtn}>
               <Text style={[buzzTypography.label, { color: colors.tertiary }]}>
-                {saving ? 'Saving…' : 'Save'}
+                {saving ? '保存中…' : '保存'}
               </Text>
             </Pressable>
           </View>
           <ScrollView contentContainerStyle={styles.scrollContent}>
             <View style={{ gap: 6 }}>
               <Text style={[buzzTypography.caption, { color: colors.onSurfaceVariant }]}>
-                DISPLAY NAME
+                显示名称
               </Text>
               <TextInput
                 value={editName}
@@ -761,7 +761,7 @@ export default function AgentDetailScreen() {
             </View>
             <View style={{ gap: 6 }}>
               <Text style={[buzzTypography.caption, { color: colors.onSurfaceVariant }]}>
-                AVATAR URL
+                头像链接
               </Text>
               <TextInput
                 value={editAvatar}
@@ -772,7 +772,7 @@ export default function AgentDetailScreen() {
             </View>
             <View style={{ gap: 6 }}>
               <Text style={[buzzTypography.caption, { color: colors.onSurfaceVariant }]}>
-                SYSTEM PROMPT / INSTRUCTIONS
+                系统提示与指令
               </Text>
               <TextInput
                 value={editPrompt}
@@ -791,7 +791,7 @@ export default function AgentDetailScreen() {
         <View style={[styles.root, { backgroundColor: colors.surface, paddingTop: Platform.OS === 'android' ? insets.top : 8, paddingBottom: Math.max(insets.bottom, 12) }]}>
           <View style={[styles.header, { borderBottomColor: colors.outline }]}>
             <Text style={[buzzTypography.titleSmall, { color: colors.onSurface, flex: 1 }]}>
-              Agent instructions
+              智能体指令
             </Text>
             <Pressable onPress={() => setInstructionsOpen(false)} style={styles.iconBtn}>
               <Ionicons name="close" size={22} color={colors.onSurface} />
@@ -832,7 +832,7 @@ export default function AgentDetailScreen() {
                 }}
                 selectable
               >
-                {historyModal?.content || 'No output'}
+                {historyModal?.content || '暂无输出'}
               </Text>
             )}
           </ScrollView>
@@ -844,7 +844,7 @@ export default function AgentDetailScreen() {
         <View style={[styles.root, { backgroundColor: colors.surface, paddingTop: Platform.OS === 'android' ? insets.top : 8, paddingBottom: Math.max(insets.bottom, 12) }]}>
           <View style={[styles.header, { borderBottomColor: colors.outline }]}>
             <Text style={[buzzTypography.titleSmall, { color: colors.onSurface, flex: 1 }]}>
-              Add to channel
+              添加到频道
             </Text>
             <Pressable onPress={() => setAddChannelOpen(false)} style={styles.iconBtn}>
               <Ionicons name="close" size={22} color={colors.onSurface} />

@@ -1,6 +1,6 @@
 .expo/
-ios/
-android/
+/ios/
+/android/
 dist/
 *.jks
 *.p8

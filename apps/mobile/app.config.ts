@@ -43,7 +43,7 @@ const config: ExpoConfig = {
     edgeToEdgeEnabled: true,
     softwareKeyboardLayoutMode: 'resize',
   },
-  plugins: ['expo-router', 'expo-secure-store', 'expo-notifications', './plugins/withXcode26FmtFix'],
+  plugins: ['expo-router', 'expo-secure-store', 'expo-notifications', ['expo-audio', { microphonePermission: '允许 Bubai 录制你发送给智能体的语音。' }], './plugins/withXcode26FmtFix'],
   experiments: {
     typedRoutes: true,
   },

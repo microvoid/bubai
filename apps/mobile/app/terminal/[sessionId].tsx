@@ -309,7 +309,7 @@ export default function TerminalScreen() {
                     style={[styles.openBrowserBtn, { backgroundColor: colors.primary }]}
                   >
                     <Text style={[buzzTypography.label, { color: colors.onPrimary }]}>
-                      Open Terminal in Browser
+                      在浏览器中打开终端
                     </Text>
                   </Pressable>
                 )}

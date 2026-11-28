@@ -29,7 +29,7 @@ const BuzzThemeContext = createContext<BuzzThemeContextValue | null>(null);
 export function BuzzThemeProvider({ children }: { children: React.ReactNode }) {
   const systemScheme = useColorScheme();
   const [preference, setPreferenceState] = useState<ThemePreference>('system');
-  const [accentId, setAccentIdState] = useState<string>(buzzAccentChoices[1].id);
+  const [accentId, setAccentIdState] = useState<string>(buzzAccentChoices[0].id);
 
   useEffect(() => {
     void Promise.all([

@@ -47,10 +47,10 @@ export default function ActivityScreen() {
   };
 
   return (
-    <SafeAreaView style={[styles.root, { backgroundColor: colors.surface }]} edges={['top']}>
+    <SafeAreaView style={[styles.root, { backgroundColor: colors.surface }]} edges={['bottom']}>
       <View style={styles.topBar}>
-        <Text style={[buzzTypography.largeTitle, { color: colors.onSurface }]}>Activity</Text>
-        {asks.length > 0 && <BuzzBadge label={`${asks.length} Pending`} tone="danger" />}
+        <Text style={[buzzTypography.largeTitle, { color: colors.onSurface }]}>动态</Text>
+        {asks.length > 0 && <BuzzBadge label={`${asks.length} 项待审批`} tone="danger" />}
       </View>
 
       <ScrollView
@@ -66,7 +66,7 @@ export default function ActivityScreen() {
         <View style={{ flexDirection: 'row', gap: 16 }}>
           {(['all', 'mention', 'thread'] as const).map((kind, index) => (
             <BuzzFilterPill key={kind} selected={filter === kind} onPress={() => setFilter(kind)}
-              label={['All', '@Mentions', 'Threads'][index]} />
+              label={['全部', '提到我', '话题'][index]} />
           ))}
         </View>
         {activity.error && <Text style={{ color: colors.error }}>{activity.error.message}</Text>}
@@ -78,7 +78,7 @@ export default function ActivityScreen() {
             <Text style={{ color: colors.onSurfaceVariant }}>{item.excerpt}</Text>
           </Pressable>
         ))}
-        <BuzzSectionGroup title={`Pending Approvals (${asks.length})`}>
+        <BuzzSectionGroup title={`待审批（${asks.length}）`}>
           {asks.length === 0 ? (
             <View style={styles.emptyRow}>
               <Ionicons name="checkmark-circle-outline" size={20} color={colors.success} />

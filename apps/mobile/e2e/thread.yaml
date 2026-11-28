@@ -4,7 +4,7 @@ appId: com.bubai.app.dev
 - tapOn:
     id: channel-row-native-discussion
 - assertVisible: ".*Native review.*"
-- tapOn: "(?s).*repl(y|ies).*Preview from a colleague.*"
+- tapOn: "(?s).*条回复.*Preview from a colleague.*"
 - assertVisible: ".*Preview from a colleague.*"
 - tapOn:
     id: message-input
@@ -38,7 +38,7 @@ appId: com.bubai.app.dev
     id: message-action-delete
 - tapOn: "删除"
 - assertNotVisible: "${output.edit}.*"
-- tapOn: "Add image or attachment"
+- tapOn: "添加附件"
 - assertVisible: "文件"
 - assertVisible: "照片"
 - tapOn: "取消"

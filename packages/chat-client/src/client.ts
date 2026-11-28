@@ -77,6 +77,8 @@ interface WsLike {
   close(): void;
 }
 
+export class MessageDisconnectedError extends Error {}
+
 export class BubaiClient {
   readonly baseUrl: string;
   private readonly token?: string;
@@ -420,9 +422,9 @@ export class BubaiClient {
     let closed = false;
     let socket: WsLike | null = null;
     let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
-    const pending = new Map<string, (error?: string) => void>();
+    const pending = new Map<string, (error?: Error) => void>();
     const cancelPending = () => {
-      for (const finish of pending.values()) finish('连接中断，消息尚未确认');
+      for (const finish of pending.values()) finish(new MessageDisconnectedError('连接中断，消息尚未确认'));
     };
     let attempt = 0;
     let heartbeat: ReturnType<typeof setInterval> | undefined;
@@ -469,7 +471,7 @@ export class BubaiClient {
           const parsed = JSON.parse(String(evt.data)) as ServerWsEvent;
           if (parsed && typeof parsed.type === 'string') {
             if (parsed.type === 'message.created') pending.get(parsed.payload.id)?.();
-            if (parsed.type === 'message.send_failed') pending.get(parsed.payload.messageId)?.(parsed.payload.message);
+            if (parsed.type === 'message.send_failed') pending.get(parsed.payload.messageId)?.(new Error(parsed.payload.message));
             if (parsed.type === 'pong') waitingForPong = false;
             params.onEvent(parsed);
           }
@@ -498,20 +500,20 @@ export class BubaiClient {
     return {
       sendMessage(payload) {
         return new Promise<void>((resolve, reject) => {
-          if (!socket || socket.readyState !== 1) return reject(new Error('尚未连接'));
+          if (!socket || socket.readyState !== 1) return reject(new MessageDisconnectedError('尚未连接'));
           if (pending.has(payload.messageId)) return reject(new Error('正在等待发送回执'));
-          const finish = (error?: string) => {
+          const finish = (error?: Error) => {
             clearTimeout(timer);
             pending.delete(payload.messageId);
-            if (error) reject(new Error(error));
+            if (error) reject(error);
             else resolve();
           };
-          const timer = setTimeout(() => finish('未收到发送回执，请重试'), 15_000);
+          const timer = setTimeout(() => finish(new Error('未收到发送回执，请重试')), 15_000);
           pending.set(payload.messageId, finish);
           try {
             socket.send(JSON.stringify({ type: 'message.send', payload }));
           } catch (error) {
-            finish(String(error));
+            finish(error instanceof Error ? error : new Error(String(error)));
           }
         });
       },

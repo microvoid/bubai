@@ -1,3 +1,6 @@
+import type { LocalMessage } from '../store/localTimeline';
+import { VoiceMessage } from './VoiceMessage';
+import { SwipeReply } from './SwipeReply';
 import { attachmentSource, openAttachment } from '../services/attachments';
 import { useBubai } from '../store/BubaiProvider';
 import type { ChatMessage, MessageAttachment, Participant } from '@buzz-botmux/chat-client';
@@ -32,8 +35,8 @@ export function formatDayLabel(ts: number): string {
   const today = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
   const msgDay = new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime();
   const diffDays = Math.round((today - msgDay) / 86_400_000);
-  if (diffDays === 0) return 'Today';
-  if (diffDays === 1) return 'Yesterday';
+  if (diffDays === 0) return '今天';
+  if (diffDays === 1) return '昨天';
   return `${d.getMonth() + 1}/${d.getDate()}`;
 }
 
@@ -47,7 +50,14 @@ function MessageContent({
   codeBg: string;
 }) {
   return <Markdown style={{
-    body: { color: textColor }, code_inline: { backgroundColor: codeBg, color: textColor },
+    body: { color: textColor, fontFamily:'Inter', fontSize:17, lineHeight:23, letterSpacing:-0.45 },
+    paragraph: {marginTop:0,marginBottom:4},
+    heading1: {fontSize:22,lineHeight:28,fontWeight:'600'},
+    heading2: {fontSize:20,lineHeight:26,fontWeight:'600'},
+    heading3: {fontSize:18,lineHeight:24,fontWeight:'600'},
+    heading4: {fontSize:17,lineHeight:23,fontWeight:'600'},
+    heading5: {fontSize:17,lineHeight:23,fontWeight:'500'},
+    heading6: {fontSize:17,lineHeight:23,fontWeight:'500'}, code_inline: { backgroundColor: codeBg, color: textColor },
     fence: { backgroundColor: codeBg, color: textColor },
   }} onLinkPress={url => {
     if (/^https?:\/\//i.test(url)) void Linking.openURL(url).catch(error => Alert.alert('打开失败', String(error)));
@@ -56,7 +66,8 @@ function MessageContent({
 }
 
 export interface BuzzMessageBubbleProps {
-  message: ChatMessage;
+  message: LocalMessage;
+  onRetry?: (message:LocalMessage)=>void;
   sender?: Participant;
   currentUserId: string;
   serverBaseUrl: string;
@@ -74,7 +85,7 @@ export interface BuzzMessageBubbleProps {
 
 export function BuzzMessageBubble({
   message,
-  sender,
+  sender, onRetry,
   currentUserId,
   serverBaseUrl,
   stackPrevious,
@@ -101,11 +112,13 @@ export function BuzzMessageBubble({
 
   const attachments = message.attachments ?? [];
   const imageAttachments = attachments.filter((a) => a.mimeType.startsWith('image/'));
-  const fileAttachments = attachments.filter((a) => !a.mimeType.startsWith('image/'));
+  const audioAttachments = attachments.filter(a => a.mimeType.startsWith('audio/'));
+  const fileAttachments = attachments.filter(a => !a.mimeType.startsWith('image/') && !a.mimeType.startsWith('audio/'));
 
 
 
   return (
+    <SwipeReply onReply={onOpenThread && !message.delivery ? ()=>onOpenThread(message) : undefined}>
     <View style={styles.wrapper}>
       {showDayDivider && (
         <View style={styles.dayDivider}>
@@ -135,7 +148,7 @@ export function BuzzMessageBubble({
                 <BuzzAvatar
                   name={senderName}
                   uri={sender?.avatarUrl}
-                  size={32}
+                  size={36}
                   isAgent={isAgent}
                   status={isAgent ? sender?.status : undefined}
                 />
@@ -156,7 +169,7 @@ export function BuzzMessageBubble({
                 {isAgent && (
                   <Ionicons name="hardware-chip-outline" size={12} color={colors.onSurfaceVariant} />
                 )}
-                <Text style={[buzzTypography.caption, { color: colors.onSurfaceVariant }]}>
+                <Text style={[{fontSize:15,lineHeight:17,fontWeight:"600"}, { color: colors.onSurfaceVariant }]}>
                   {senderName}
                 </Text>
                 {isAgent && sender?.cliId && (
@@ -174,7 +187,7 @@ export function BuzzMessageBubble({
           {message.pinned && (
             <View style={styles.pinnedRow}>
               <Ionicons name="pin" size={11} color={colors.warning} />
-              <Text style={[buzzTypography.micro, { color: colors.warning }]}>Pinned</Text>
+              <Text style={[buzzTypography.micro, { color: colors.warning }]}>已置顶</Text>
             </View>
           )}
 
@@ -182,7 +195,7 @@ export function BuzzMessageBubble({
           <Pressable
             onLongPress={() => {
               void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
-              onLongPress(message);
+              if (!message.delivery) onLongPress(message);
             }}
             delayLongPress={260}
             style={({ pressed }) => [
@@ -201,10 +214,11 @@ export function BuzzMessageBubble({
               <AgentProgressCard card={message.card} textColor={bubbleFg} />
             ) : null}
 
-            {!(isAgent && isRunning && message.card?.progress && message.card.progress.steps.length > 0) && (
+            {!!message.content && !(isAgent && isRunning && message.card?.progress && message.card.progress.steps.length > 0) && (
               <MessageContent content={message.content} textColor={bubbleFg} codeBg={codeBg} />
             )}
 
+            {audioAttachments.map(attachment => <VoiceMessage key={attachment.id} url={attachment.url} server={serverBaseUrl} token={authToken} color={bubbleFg}/>)}
             {/* Botmux Terminal shortcut on agent turn messages */}
             {message.botmuxSessionId && onOpenTerminal && (
               <Pressable
@@ -225,14 +239,18 @@ export function BuzzMessageBubble({
               </Pressable>
             )}
 
-            {isOwn && !stackNext && (
-              <Text style={[styles.ownTime, { color: bubbleFg }]}>
-                {formatTime(message.createdAt)}
-                {message.updatedAt && message.updatedAt > message.createdAt + 1000 ? ' · edited' : ''}
-              </Text>
-            )}
           </Pressable>
-
+          {isOwn && !stackNext && !message.delivery && (
+            <Text accessibilityLabel={`已发送，${formatTime(message.createdAt)}`} style={[styles.ownTime,{color:colors.onSurfaceVariant}]}>
+              {formatTime(message.createdAt)}{message.updatedAt && message.updatedAt > message.createdAt + 1000 ? ' · 已编辑' : ''} ✓
+            </Text>
+          )}
+          {message.delivery && <Pressable accessibilityRole="button" disabled={message.delivery!=='failed'}
+            onPress={()=>onRetry?.(message)}>
+            <Text style={{color:message.delivery==='failed'?colors.error:colors.onSurfaceVariant,fontSize:13}}>
+              {message.delivery==='failed'?'发送失败 · 点击重试':message.delivery==='queued'?'等待网络 · 恢复后自动发送':'正在发送…'}
+            </Text>
+          </Pressable>}
           {/* Image Attachments */}
           {imageAttachments.length > 0 && (
             <View style={styles.imageGrid}>
@@ -308,11 +326,11 @@ export function BuzzMessageBubble({
           {!inThread && (message.replyCount ?? 0) > 0 && onOpenThread && (
             <Pressable
               onPress={() => onOpenThread(message)}
-              style={[styles.threadPill, { backgroundColor: colors.surfaceContainerLow }]}
+              style={[styles.threadPill, { borderLeftColor: colors.outline, borderLeftWidth: 2 }]}
             >
               <Ionicons name="chatbubble-outline" size={12} color={colors.tertiary} />
-              <Text style={[buzzTypography.micro, { color: colors.tertiary }]}>
-                {message.replyCount} {message.replyCount === 1 ? 'reply' : 'replies'}
+              <Text style={[buzzTypography.micro, { color: colors.onSurfaceVariant }]}>
+                {message.replyCount} 条回复
                 {message.unreadReplyCount ? ` · ${message.unreadReplyCount} 未读` : ''}
                 {message.replyPreviews?.map(reply => `\n${reply.content || reply.card?.title || '附件'}`).join('')}
               </Text>
@@ -322,6 +340,7 @@ export function BuzzMessageBubble({
         </View>
       </View>
     </View>
+    </SwipeReply>
   );
 }
 
@@ -341,7 +360,7 @@ const styles = StyleSheet.create({
   row: {
     flexDirection: 'row',
     alignItems: 'flex-end',
-    gap: 8,
+    gap: 12,
   },
   rowOwn: {
     justifyContent: 'flex-end',
@@ -350,12 +369,12 @@ const styles = StyleSheet.create({
     justifyContent: 'flex-start',
   },
   avatarSlot: {
-    width: 32,
+    width: 36,
     alignItems: 'center',
     justifyContent: 'flex-end',
   },
   column: {
-    maxWidth: '78%',
+    maxWidth: '67%',
     gap: 4,
   },
   columnOwn: {
@@ -380,7 +399,7 @@ const styles = StyleSheet.create({
   },
   bubble: {
     paddingHorizontal: 14,
-    paddingVertical: 9,
+    paddingVertical: 10,
     gap: 6,
   },
   terminalChip: {
@@ -390,11 +409,12 @@ const styles = StyleSheet.create({
     alignSelf: 'flex-start',
     paddingHorizontal: 9,
     paddingVertical: 5,
-    borderRadius: buzzRadii.pill,
-    marginTop: 2,
+    marginLeft: 10,
+    marginTop: 4,
   },
   ownTime: {
-    fontSize: 10,
+    fontSize: 13,
+    lineHeight: 17,
     opacity: 0.65,
     alignSelf: 'flex-end',
   },
@@ -447,7 +467,7 @@ const styles = StyleSheet.create({
     alignSelf: 'flex-start',
     paddingHorizontal: 10,
     paddingVertical: 5,
-    borderRadius: buzzRadii.pill,
-    marginTop: 2,
+    marginLeft: 10,
+    marginTop: 4,
   },
 });

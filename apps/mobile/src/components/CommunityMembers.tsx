@@ -12,10 +12,10 @@ import {
 import { useBubai } from '../store/BubaiProvider';
 import { useBuzzTheme } from '../theme/ThemeProvider';
 
-export function CommunityMembers() {
+export function CommunityMembers({initiallyExpanded=false}: {initiallyExpanded?:boolean}={}) {
   const { serverUrl, authToken, currentUserId, activeOrgId } = useBubai();
   const { colors } = useBuzzTheme();
-  const [expanded, setExpanded] = useState(false);
+  const [expanded, setExpanded] = useState(initiallyExpanded);
   const [email, setEmail] = useState('');
   const [busy, setBusy] = useState(false);
   const roster = useQuery({

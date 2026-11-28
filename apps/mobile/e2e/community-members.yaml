@@ -1,7 +1,10 @@
 appId: com.bubai.app.dev
 ---
 - runFlow: ../../../tests/native/open-workspace.yaml
-- tapOn: Live
+- tapOn:
+    id: workspace-more
+- tapOn:
+    id: change-connection
 - tapOn:
     id: server-url
 - eraseText
@@ -13,10 +16,12 @@ appId: com.bubai.app.dev
         id: channel-row-general
     commands:
       - tapOn:
+          id: workspace-more
+      - tapOn:
           id: settings-tab
       - scrollUntilVisible:
-          element: ".*Sign Out.*"
-      - tapOn: ".*Sign Out.*"
+          element: ".*退出登录.*"
+      - tapOn: ".*退出登录.*"
 - runFlow:
     file: ../../../tests/native/roster-login.yaml
     env:
@@ -39,9 +44,9 @@ appId: com.bubai.app.dev
     element: "撤销邀请 · roster-guest@example.test"
 - runScript: ../../../tests/native/roster-invite.js
 - scrollUntilVisible:
-    element: ".*Sign Out.*"
+    element: ".*退出登录.*"
     direction: UP
-- tapOn: ".*Sign Out.*"
+- tapOn: ".*退出登录.*"
 - runFlow:
     file: ../../../tests/native/roster-login.yaml
     env:
@@ -55,10 +60,12 @@ appId: com.bubai.app.dev
 - assertVisible:
     id: channel-row-general
 - tapOn:
+    id: workspace-more
+- tapOn:
     id: settings-tab
 - scrollUntilVisible:
-    element: ".*Sign Out.*"
-- tapOn: ".*Sign Out.*"
+    element: ".*退出登录.*"
+- tapOn: ".*退出登录.*"
 - runFlow:
     file: ../../../tests/native/roster-login.yaml
     env:

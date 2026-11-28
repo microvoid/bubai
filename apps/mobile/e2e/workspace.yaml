@@ -3,11 +3,11 @@ appId: com.bubai.app.dev
 - runFlow: ../../../tests/native/open-workspace.yaml
 - tapOn:
     id: activity-tab
-- assertVisible: "@Mentions"
-- tapOn: "@Mentions"
-- tapOn: "Threads"
+- assertVisible: "提到我"
+- tapOn: "提到我"
+- tapOn: "话题"
 - tapOn:
-    id: messages-tab
+    id: workspace-back
 - tapOn:
     id: channel-row-general
 - tapOn:

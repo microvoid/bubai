@@ -1,3 +1,4 @@
+import { useTimeline } from '@/store/localTimeline';
 import { coalescedRefresh } from '@/store/coalescedRefresh';
 import { BuzzButton, BuzzInput } from '@/components/BuzzComponents';
 import { attachmentSource } from '@/services/attachments';
@@ -57,7 +58,7 @@ export default function ChannelScreen() {
   const { colors } = useBuzzTheme();
   const {
     client,
-    serverUrl, authToken,
+    serverUrl, authToken, activeOrgId,
     currentUserId,
     channels,
     participants,
@@ -83,15 +84,15 @@ export default function ChannelScreen() {
     return participants.find(p => p.id !== currentUserId && keys.includes((p.role === 'agent' ? 'a:' : 'u:') + p.id));
   }, [channel, currentUserId, participants]);
 
-  const [messages, setMessages] = useState<ChatMessage[]>([]);
+  const {rows:messages,update:setMessages,reconcile,snapshot}=useTimeline(serverUrl,currentUserId,activeOrgId,channelId,null);
   const [loading, setLoading] = useState(true);
   const [hasMore, setHasMore] = useState(false);
   const [nextCursor, setNextCursor] = useState<number | null>(null);
   const [nextCursorId, setNextCursorId] = useState<string>();
   const [loadingOlder, setLoadingOlder] = useState(false);
 
-  const {draft, setDraft, editing: editingMessage, startEdit, cancelEdit, uploading, send: handleSend, attach: handlePickAttachment, react: handleToggleReaction} =
-    useMessageActions(channelId, null, (id, changes) => setMessages(prev => prev.map(m => m.id === id ? {...m, ...changes} : m)));
+  const {draft, setDraft, editing: editingMessage, startEdit, cancelEdit, uploading, retry, send: handleSend, attach: handlePickAttachment, react: handleToggleReaction} =
+    useMessageActions(channelId, null, setMessages, snapshot, (id, changes) => setMessages(prev => prev.map(m => m.id === id ? {...m, ...changes} : m)));
   const [actionMessage, setActionMessage] = useState<ChatMessage | null>(null);
   const [previewAttachment, setPreviewAttachment] = useState<MessageAttachment | null>(null);
 
@@ -122,7 +123,7 @@ export default function ChannelScreen() {
       }
       if (!focused.current || version !== loadVersion.current) return;
       loaded.current = true;
-      setMessages(history);
+      reconcile(history);
       setHasMore(Boolean(page.hasMore));
       setNextCursorId(page.nextCursorId);
       setNextCursor(page.nextCursor ?? null);
@@ -132,15 +133,15 @@ export default function ChannelScreen() {
     } finally {
       if (version === loadVersion.current) setLoading(false);
     }
-  }, [channelId, clearChannelUnread, client, currentUserId, messageId]);
+  }, [channelId, clearChannelUnread, client, currentUserId, messageId, reconcile]);
 
   useFocusEffect(useCallback(() => {
     focused.current = true;
     if (!loaded.current || wsState === 'open') void loadInitial().catch(error => {
-      if (error?.status !== 401 || !authToken) Alert.alert('加载失败', String(error));
+      if (!snapshot().length && (error?.status !== 401 || !authToken)) Alert.alert('加载失败', String(error));
     });
     return () => { focused.current = false; };
-  }, [loadInitial, wsState, authToken]));
+  }, [loadInitial, wsState, authToken, snapshot]));
 
   // Live WS updates for this channel
   useEffect(() => {
@@ -157,7 +158,7 @@ export default function ChannelScreen() {
         const msg = event.payload;
         if (msg.channelId !== channelId) return;
         if (msg.threadId) return;
-        setMessages((prev) => (prev.some((m) => m.id === msg.id) ? prev : [...prev, msg]));
+        setMessages((prev) => (prev.some((m) => m.id === msg.id) ? prev.map(m=>m.id===msg.id?msg:m) : [...prev, msg]));
         if (focused.current) clearChannelUnread(channelId);
       } else if (event.type === 'channel.members.updated' && event.payload.channelId === channelId) {
         setMembers(event.payload.members);
@@ -353,7 +354,7 @@ export default function ChannelScreen() {
         behavior={Platform.OS === 'ios' ? 'padding' : undefined}
         keyboardVerticalOffset={0}
       >
-        {loading ? (
+        {loading && !messages.length ? (
           <View style={styles.center}>
             <ActivityIndicator color={colors.onSurfaceVariant} />
           </View>
@@ -406,6 +407,7 @@ export default function ChannelScreen() {
               return (
                 <BuzzMessageBubble
                   message={item}
+                  onRetry={retry}
                   sender={participantMap.get(item.senderId)}
                   currentUserId={currentUserId}
                   serverBaseUrl={serverUrl || ''}
@@ -440,11 +442,7 @@ export default function ChannelScreen() {
           onSend={() => void handleSend()}
           onPickAttachment={() => void handlePickAttachment()}
           uploading={uploading}
-          placeholder={
-            channel?.kind === 'dm'
-              ? `Message ${dmPeer?.name || title}…`
-              : `Message #${channel?.name || 'channel'}… (输入 @ 召唤 Agent)`
-          }
+          placeholder="发消息…"
           currentUserId={currentUserId}
           channel={channel} messages={messages}
           participants={participants}
@@ -476,7 +474,7 @@ export default function ChannelScreen() {
         <View style={[styles.root, { backgroundColor: colors.surface, paddingTop: Platform.OS === 'android' ? insets.top : 8 }]}>
           <View style={[styles.header, { borderBottomColor: colors.outline }]}>
             <Text style={[buzzTypography.title, { color: colors.onSurface, flex: 1 }]}>
-              Pinned Messages ({pins.length})
+              置顶消息 ({pins.length})
             </Text>
             <Pressable onPress={() => setPinsOpen(false)} style={styles.iconBtn}>
               <Ionicons name="close" size={22} color={colors.onSurface} />

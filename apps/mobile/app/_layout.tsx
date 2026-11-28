@@ -1,3 +1,4 @@
+import { useFonts } from 'expo-font';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import * as Notifications from 'expo-notifications';
 import { notificationRoute } from '@/services/notificationRoute';
@@ -84,6 +85,7 @@ function RootNavigator() {
 }
 
 export default function RootLayout() {
+  const [fontsReady,fontError]=useFonts({Inter:require("../assets/fonts/InterVariable.ttf")});
   const [queryClient] = useState(
     () =>
       new QueryClient({
@@ -95,6 +97,7 @@ export default function RootLayout() {
       }),
   );
 
+  if (!fontsReady && !fontError) return null;
   return (
     <SafeAreaProvider>
       <QueryClientProvider client={queryClient}>

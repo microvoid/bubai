@@ -58,3 +58,13 @@ maestro --device "$SIMULATOR_ID" test -e OPEN_SERVER="$OPEN_SERVER" \
 ```
 
 This delivers notifications through the simulator operating system using `simctl push`. Production delivery also requires provider credentials.
+
+For cross-community taps, export the strict fixture's `AUTH_SERVER`, `TEST_EMAIL` and `TEST_PASSWORD` in addition to the simulator and fixture IDs above. The relay seeds two communities and a reply visible only in the target community.
+
+```sh
+bun tests/native/notification-fixture.ts --cross-community
+# In another shell, use ORG_A and NOTIFICATION_SERVER printed by this relay.
+maestro --device "$SIMULATOR_ID" test -e OPEN_SERVER="$OPEN_SERVER" -e AUTH_SERVER="$AUTH_SERVER" \
+  -e TEST_EMAIL="$TEST_EMAIL" -e TEST_PASSWORD="$TEST_PASSWORD" \
+  -e ORG_A="$ORG_A" -e NOTIFICATION_SERVER="$NOTIFICATION_SERVER" tests/native/notification-cross-community.yaml
+```

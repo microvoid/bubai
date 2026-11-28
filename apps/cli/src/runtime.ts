@@ -1,3 +1,4 @@
+import { TurnLimiter } from '@bubx/agent/process';
 import { startBotmuxBridge, type BotmuxBridgeOptions } from './bridge-botmux';
 import { startDirectBridge } from './bridge-direct';
 import { configuredAgents, type RuntimeMode } from './direct-config';
@@ -8,20 +9,21 @@ export async function startRuntime(
   concurrency?: number,
   selectedAgents?: string[],
 ) {
+  const localOptions = { ...options, limiter: new TurnLimiter(concurrency ?? 3) };
   const instances: Awaited<ReturnType<typeof startBotmuxBridge>>[] = [];
   let directIds: string[] = [];
   let piIds: string[] = [];
   try {
     if (mode === 'pi' || options.includePi) {
       const { startPiBridge } = await import('./bridge-pi');
-      const pi = await startPiBridge(options, concurrency, options.turnTimeoutMs);
+      const pi = await startPiBridge(localOptions, concurrency, options.turnTimeoutMs);
       piIds = pi.agentIds;
       instances.push(pi);
     }
     if (mode === 'botmux' || mode === 'hybrid') instances.push(await startBotmuxBridge(options));
     if (mode === 'direct' || mode === 'hybrid') {
       const direct = await startDirectBridge(
-        options,
+        localOptions,
         configuredAgents(selectedAgents),
         concurrency,
         options.turnTimeoutMs,

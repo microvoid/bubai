@@ -1,10 +1,12 @@
+import { findExecutable } from '@bubx/agent/process';
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 import { randomUUID } from 'node:crypto';
 import { createInterface } from 'node:readline/promises';
 import {
-  loadCliConfig, resolvePiModel,
+  loadCliConfig,
+  resolvePiModel,
   saveCliConfig,
   type CliId,
   type DirectCliAgentConfig,
@@ -15,25 +17,13 @@ type Flags = Record<string, string | boolean>;
 const supported: CliId[] = ['claude', 'codex'];
 export type RuntimeMode = 'botmux' | 'direct' | 'hybrid' | 'pi';
 
-function installed(cli: CliId) {
-  return (process.env.PATH || '').split(path.delimiter).some((dir) => {
-    try {
-      const file = path.join(dir, cli + (process.platform === 'win32' ? '.exe' : ''));
-      fs.accessSync(file, fs.constants.X_OK);
-      return fs.statSync(file).isFile();
-    } catch {
-      return false;
-    }
-  });
-}
-
 export function configuredAgents(selection?: string[]) {
   const agents = loadCliConfig().localAgents ?? [];
   return agents
     .filter((agent) => !selection || selection.includes(agent.externalId))
     .map((agent) => {
       const permissionMode = agent.permissionMode ?? 'workspace-write';
-      if (!supported.includes(agent.cliId) || !installed(agent.cliId))
+      if (!supported.includes(agent.cliId) || !findExecutable(agent.cliId))
         throw new Error(`Install ${agent.cliId} or remove local agent ${agent.externalId}`);
       if (!['read-only', 'workspace-write', 'full-access'].includes(permissionMode))
         throw new Error(`Invalid permission mode for ${agent.name}`);
@@ -56,7 +46,7 @@ export function configureAgents(flags: Flags) {
   const selected: DirectCliAgentConfig[] = [];
   for (const item of new Set(String(flags.cli ?? '').split(','))) {
     const cliId = supported.find((id) => id === item.trim());
-    if (!cliId || !installed(cliId))
+    if (!cliId || !findExecutable(cliId))
       throw new Error(`Expected an installed claude or codex CLI, got "${item}"`);
     const existing = agents.find(
       (a) => a.cliId === cliId && a.workingDir === workingDir && (!flags.name || a.name === flags.name),
@@ -76,18 +66,27 @@ export function configureAgents(flags: Flags) {
   return selected;
 }
 
-export async function selectRuntime(flags: Flags, endpoint: string): Promise<{ mode: RuntimeMode; selectedAgents?: string[] }> {
+export async function selectRuntime(
+  flags: Flags,
+  endpoint: string,
+): Promise<{ mode: RuntimeMode; selectedAgents?: string[] }> {
   const mode = flags.mode ?? 'auto';
-  if (mode === 'pi') { resolvePiModel(); return { mode }; }
+  if (mode === 'pi') {
+    resolvePiModel();
+    return { mode };
+  }
   if (!['auto', 'direct', 'botmux'].includes(String(mode)))
     throw new Error('Expected --mode auto|direct|botmux|pi');
   if (mode === 'botmux' || (mode === 'auto' && flags.bots)) return { mode: 'botmux' };
   if (flags.cli) {
-    return { mode: 'direct', selectedAgents: configureAgents(flags).map(agent => agent.externalId) };
+    return { mode: 'direct', selectedAgents: configureAgents(flags).map((agent) => agent.externalId) };
   }
-  const configured = loadCliConfig().localAgents?.length;
+  const config = loadCliConfig();
+  const configured = config.localAgents?.length;
+  const hasPi = Boolean(config.piAgents?.length);
+  let reachable = false;
   if (mode === 'auto') {
-    const reachable = await fetch(endpoint.replace(/\/+$/, '') + '/api/bots', {
+    reachable = await fetch(endpoint.replace(/\/+$/, '') + '/api/bots', {
       signal: AbortSignal.timeout(2000),
     })
       .then(async (res) => {
@@ -98,12 +97,22 @@ export async function selectRuntime(flags: Flags, endpoint: string): Promise<{ m
         return res.ok && Array.isArray((await res.json()).bots);
       })
       .catch(() => false);
-    if (reachable) return { mode: configured ? 'hybrid' : 'botmux' };
+    if (
+      reachable &&
+      (configured || !hasPi || !process.stdin.isTTY || !supported.some((id) => findExecutable(id)))
+    )
+      return { mode: configured ? 'hybrid' : 'botmux' };
   }
   if (!configured) {
-    const available = supported.filter(installed);
-    if (mode === 'auto' && loadCliConfig().piAgents?.length) { resolvePiModel(); return {mode:'pi'}; }
-    if (!available.length && mode === 'auto') { resolvePiModel(); return { mode: 'pi' }; }
+    const available = supported.filter((id) => findExecutable(id));
+    if (mode === 'auto' && !process.stdin.isTTY && hasPi) {
+      resolvePiModel();
+      return { mode: 'pi' };
+    }
+    if (!available.length && mode === 'auto') {
+      resolvePiModel();
+      return { mode: 'pi' };
+    }
     if (!available.length)
       throw new Error(
         'No local runtime available. Start Botmux or install and sign in to Claude Code or Codex.',
@@ -112,6 +121,13 @@ export async function selectRuntime(flags: Flags, endpoint: string): Promise<{ m
       throw new Error(`Choose a local CLI: bub start --cli ${available.join(',')} --cwd <directory>`);
     const tty = createInterface({ input: process.stdin, output: process.stdout });
     try {
+      if (mode === 'auto' && hasPi) {
+        const answer = await tty.question('Also configure local CLI(s) ' + available.join(', ') + '? [y/N] ');
+        if (!/^y(es)?$/i.test(answer.trim())) {
+          resolvePiModel();
+          return { mode: reachable ? 'botmux' : 'pi' };
+        }
+      }
       const cli = (await tty.question(`Local CLI(s) [${available.join(',')}]: `)) || available.join(',');
       const cwd = (await tty.question(`Working directory [${process.cwd()}]: `)) || process.cwd();
       const name = await tty.question('Bot name [automatic]: ');
@@ -123,5 +139,5 @@ export async function selectRuntime(flags: Flags, endpoint: string): Promise<{ m
       tty.close();
     }
   }
-  return { mode: 'direct' };
+  return { mode: reachable ? 'hybrid' : 'direct' };
 }

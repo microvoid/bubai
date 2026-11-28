@@ -1,3 +1,4 @@
+import type { TurnLimiter } from '@bubx/agent/process';
 import type { TurnFiles } from './bridge-attachments';
 import type { BotGatewayAgentDescriptor, BotTurnRequestedEvent, BubaiClient } from '@buzz-botmux/chat-client';
 import type { AgentProgressSnapshot } from '@buzz-botmux/botmux-client';
@@ -12,6 +13,7 @@ export function turnAbortSignal(signal: AbortSignal, deadline?: number): AbortSi
 
 export type LocalAgentDescriptor = BotGatewayAgentDescriptor;
 export type GatewayOptions = {
+  limiter?: TurnLimiter;
   serverUrl: string;
   token?: string;
   botToken?: string;
@@ -23,6 +25,7 @@ export type GatewayOptions = {
 };
 
 export interface TurnContext {
+  signal?: AbortSignal;
   initial: PendingTurn;
   sdk?: BubaiClient;
   files?: TurnFiles;

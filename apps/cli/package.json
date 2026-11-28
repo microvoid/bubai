@@ -23,18 +23,16 @@
   },
   "scripts": {
     "dev": "bun run src/index.ts",
-    "build": "esbuild src/index.ts --bundle --platform=node --format=esm --target=node22 --outfile=dist/main.js --banner:js=\"import { createRequire as __bubRequire } from 'node:module'; const require = __bubRequire(import.meta.url);\" --alias:@opentelemetry/api=./node_modules/@opentelemetry/api",
+    "build": "esbuild src/index.ts --bundle --platform=node --format=esm --target=node22 --outfile=dist/main.js --banner:js=\"import { createRequire as __bubRequire } from 'node:module'; const require = __bubRequire(import.meta.url);\"",
     "prepack": "npm run build",
     "typecheck": "tsc --noEmit"
   },
   "devDependencies": {
     "@buzz-botmux/botmux-client": "workspace:*",
     "@buzz-botmux/chat-client": "workspace:*",
-    "@mariozechner/pi-agent-core": "0.73.1",
-    "@mariozechner/pi-ai": "0.73.1",
-    "@opentelemetry/api": "1.9.0",
     "@types/bun": "^1.2.15",
     "esbuild": "0.28.2",
-    "typescript": "^5.8.2"
+    "typescript": "^5.8.2",
+    "@bubx/agent": "workspace:*"
   }
 }

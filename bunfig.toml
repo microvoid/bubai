@@ -1,0 +1,3 @@
+[test]
+# Skip reference checkouts and generated native projects during Bun test discovery.
+pathIgnorePatterns = ["**/references/**", "**/apps/mobile/ios/**", "**/apps/mobile/android/**"]

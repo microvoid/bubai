@@ -1,10 +1,8 @@
 import { expect, test } from 'bun:test';
-import { mkdtempSync, rmSync, writeFileSync, existsSync } from 'node:fs';
+import { mkdtempSync, rmSync, writeFileSync, existsSync, realpathSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import type { BotTurnRequestedEvent } from '@buzz-botmux/chat-client';
-import { createPiProvider } from './bridge-pi';
-import { resolvePiModel } from './config';
 
 function turn(botId: string, messageId: string): BotTurnRequestedEvent {
   return {
@@ -27,94 +25,18 @@ function reply(text: string) {
   });
 }
 
-test('Pi serializes conversation history, settles errors and aborts pending model requests', async () => {
-  const seen: number[] = [];
-  const model = Bun.serve({
-    port: 0,
-    hostname: '127.0.0.1',
-    async fetch(req) {
-      const body = (await req.json()) as { messages: unknown[] };
-      seen.push(body.messages.length);
-      return reply('hello');
-    },
-  });
-  const config = { provider: 'openai', model: 'fixture', baseUrl: model.url.href, apiKey: 'dummy' };
-  const profile = [{ externalId: 'bot', name: 'Test', profile: 'default' }];
-  const provider = createPiProvider('scope', profile, config, 2, 3000);
-  const invoke = (p: typeof provider, id: string) => {
-    const event = turn('bot', id);
-    return p.executeTurn({ event, initial: p.prepareTurn(event), progress: async () => {} });
-  };
-  try {
-    const results = await Promise.all([invoke(provider, 'first'), invoke(provider, 'second')]);
-    expect(results.map((r) => r.content)).toEqual(['hello', 'hello']);
-    expect(seen[1]).toBe(seen[0]! + 2);
-    const broken = createPiProvider('scope', profile, config, 1, 1000, {
-      streamFn() {
-        throw new Error('fixture failure');
-      },
+test.each(['auto', 'wrap', 'foreground', 'timeout'])(
+  'packaged Pi runtime handles an empty PATH (%s)',
+  async (mode) => {
+    const wrap = mode === 'wrap';
+    const dir = realpathSync(mkdtempSync(path.join(tmpdir(), 'bub-pi-e2e-')));
+    const entry = path.join(dir, 'bub.mjs');
+    const build = Bun.spawn(['npm', 'run', 'build', '--', '--outfile=' + entry], {
+      cwd: path.resolve(import.meta.dir, '..'),
+      stdout: 'ignore',
+      stderr: 'inherit',
     });
-    expect((await invoke(broken, 'error')).status).toBe('failed');
-    model.reload({ fetch: () => new Promise<Response>(() => {}) });
-    const slow = createPiProvider('scope', profile, config, 1, 80);
-    expect((await invoke(slow, 'timeout')).status).toBe('timeout');
-    const pending = invoke(provider, 'cancel');
-    provider.stop();
-    expect((await pending).status).toBe('failed');
-  } finally {
-    model.stop(true);
-    provider.stop();
-  }
-});
-
-test('Pi streams tool start and finish through the bridge progress callback', async () => {
-  const { registerFauxProvider, fauxAssistantMessage, fauxToolCall, streamSimple } =
-    await import('@mariozechner/pi-ai');
-  const faux = registerFauxProvider();
-  faux.setResponses([
-    fauxAssistantMessage(fauxToolCall('fixture', {}), { stopReason: 'toolUse' }),
-    fauxAssistantMessage('finished'),
-  ]);
-  const provider = createPiProvider(
-    'scope',
-    [{ externalId: 'bot', name: 'Test', profile: 'default' }],
-    { provider: 'openai', model: 'gpt-4o-mini', apiKey: 'test' },
-    1,
-    3000,
-    { streamFn: (_model, context, options) => streamSimple(faux.getModel(), context, options) },
-  );
-  try {
-    const event = turn('bot', 'tool test');
-    const states: string[] = [];
-    const result = await provider.executeTurn({
-      initial: provider.prepareTurn(event),
-      event,
-      progress: async (snapshot) => {
-        states.push(snapshot.steps[0]!.status);
-      },
-    });
-    expect(states).toEqual(['running', 'failed']);
-    expect(result.content).toBe('finished');
-  } finally {
-    provider.stop();
-    faux.unregister();
-  }
-});
-
-test('model credentials stay scoped to the endpoint', () => {
-  const config = { piModel: { model: 'test', provider: 'openai', apiKey: 'private' } };
-  expect(() => resolvePiModel(config, { BUBAI_LLM_BASE_URL: 'http://other' })).toThrow('BUBAI_LLM_API_KEY');
-});
-
-test.each([false, true])(
-  'packaged bub start auto handles an empty PATH (wrap=%s)',
-  async (wrap) => {
-    const dir = mkdtempSync(path.join(tmpdir(), 'bub-pi-e2e-'));
-  const entry = path.join(dir, 'bub.mjs');
-  const build = Bun.spawn(['npm','run','build','--','--outfile=' + entry], {
-    cwd:path.resolve(import.meta.dir, '..'),stdout:'ignore',stderr:'inherit',
-  });
-  expect(await build.exited).toBe(0);
+    expect(await build.exited).toBe(0);
     const done = Promise.withResolvers<{ status: string; content: string }>();
     const node = Bun.which('node')!;
     const binary = path.join(dir, 'fixture-cli');
@@ -125,7 +47,7 @@ test.each([false, true])(
       '#!' +
         node +
         '\n' +
-        `const fs=require('fs');if(process.env.BUBAI_LLM_API_KEY)process.exit(2);
+        `const fs=require('fs');if(!process.env.NO_PROXY.includes('proxy-fixture.test') || process.env.BUBAI_LLM_API_KEY || process.env.BUBAI_TOKEN || process.env.XDG_CONFIG_HOME !== process.cwd() + '/config')process.exit(2);
     const text=fs.readFileSync(JSON.parse(process.env.BUBAI_INPUT_FILES)[0],'utf8');
     fs.writeFileSync(process.env.BUBAI_OUTPUT_DIR+'/art.txt',text+process.argv[2]);`,
       { mode: 0o700 },
@@ -137,6 +59,7 @@ test.each([false, true])(
       ['ask_user', { question: 'Continue?', options: ['yes', 'no'] }],
     ] as const;
     let modelCalls = 0;
+    const toolStates = new Set<string>();
     let artifact = '';
     let noticeThread: string | undefined;
     let sendAnswer: (id: string) => void;
@@ -148,6 +71,10 @@ test.each([false, true])(
         const url = new URL(req.url);
         if (url.pathname === '/ws/bot' && srv.upgrade(req)) return;
         if (url.pathname.endsWith('/chat/completions')) {
+          if (mode === 'timeout') {
+            await Bun.sleep(600);
+            return reply('late response');
+          }
           if (!wrap) return reply('default bot online');
           const modelRequest = await req.text();
           if (!modelRequest.includes('Fixture media generator instructions'))
@@ -185,7 +112,11 @@ test.each([false, true])(
           noticeThread = (await req.json()).threadId;
           return Response.json({});
         }
-        if (url.pathname.endsWith('/progress')) return Response.json({ ok: true });
+        if (url.pathname.endsWith('/progress')) {
+          const { progress } = await req.json();
+          for (const step of progress.steps) toolStates.add(step.status);
+          return Response.json({ ok: true });
+        }
         if (url.pathname === '/api/uploads' && req.method === 'POST') {
           const file = (await req.formData()).get('file') as File;
           artifact = await file.text();
@@ -245,6 +176,9 @@ test.each([false, true])(
     const env = {
       ...process.env,
       PATH: dir,
+      NO_PROXY: '127.0.0.1,localhost,proxy-fixture.test',
+      BUBAI_TOKEN: 'not-for-tools',
+      XDG_CONFIG_HOME: path.join(dir, 'config'),
       BUBAI_CONFIG_DIR: dir,
       BUBAI_LLM_API_KEY: 'fixture',
       BUBAI_LLM_BASE_URL: server.url.href,
@@ -255,6 +189,7 @@ test.each([false, true])(
       const output = path.join(dir, args[0] + '.stdout');
       const errors = path.join(dir, args[0] + '.stderr');
       const p = Bun.spawn([node, entry, ...args], {
+        cwd: dir,
         env,
         stdout: Bun.file(output),
         stderr: Bun.file(errors),
@@ -265,31 +200,46 @@ test.each([false, true])(
       if (code) throw new Error(stdout + stderr);
       return stdout;
     };
+    let foreground: ReturnType<typeof Bun.spawn> | undefined;
     try {
       if (wrap) await invoke('agent', 'wrap', '--bin', binary, '--skill', skill, '--name', 'Fixture');
-      expect(
-        await invoke(
-          'start',
-          '--mode',
-          'auto',
-          '--bot-token',
-          'bot_fixture',
-          '--server',
-          server.url.href,
-          '--botmux',
-          server.url.href,
-        ),
-      ).toContain('Bridge online');
+      const connection = [
+        '--bot-token',
+        'bot_fixture',
+        '--server',
+        server.url.href,
+        '--botmux',
+        server.url.href,
+      ];
+      if (mode === 'foreground' || mode === 'timeout') {
+        if (mode === 'timeout') connection.push('--turn-timeout-ms', '250');
+        foreground = Bun.spawn([node, entry, 'bridge', 'pi', ...connection], {
+          cwd: dir,
+          env,
+          stdout: 'ignore',
+          stderr: 'inherit',
+        });
+      } else {
+        expect(await invoke('start', '--mode', 'auto', ...connection)).toContain('Bridge online');
+      }
       const completion = await done.promise;
+      if (mode === 'timeout') {
+        expect(completion.status).toBe('timeout');
+        return;
+      }
       expect(completion).toMatchObject({ status: 'completed', content: 'default bot online' });
       if (wrap) {
         expect(completion).toMatchObject({ attachments: [{ name: 'art.txt' }] });
+        expect([...toolStates]).toEqual(expect.arrayContaining(['running', 'done']));
         expect(artifact).toBe('reference; echo untouched');
         expect(noticeThread).toBe('thread');
         expect(existsSync(outputDir)).toBe(false);
       }
     } finally {
-      await invoke('stop');
+      if (foreground) {
+        foreground.kill('SIGTERM');
+        await foreground.exited;
+      } else await invoke('stop');
       server.stop(true);
       rmSync(dir, { recursive: true, force: true });
     }
@@ -298,7 +248,8 @@ test.each([false, true])(
 );
 
 test('tools deny other executables and escaped artifacts, and cancel an unanswered ask', async () => {
-  const { piTools, askRegistry } = await import('./pi-tools');
+  const { piTools } = await import('@bubx/agent');
+  const { askRegistry, turnHost } = await import('./pi-host');
   const { mkdirSync, symlinkSync } = await import('node:fs');
   const root = mkdtempSync(path.join(tmpdir(), 'pi-tool-deny-'));
   const output = path.join(root, 'output');
@@ -316,10 +267,10 @@ test('tools deny other executables and escaped artifacts, and cancel an unanswer
   } as unknown as import('./bridge-provider').TurnContext;
   const tools = piTools(
     { id: 'test', name: 'test', allowedBins: [], systemPrompt: '', skillPaths: [], defaultTimeoutMs: 100 },
-    ctx,
+    ctx.files!,
     root,
     controller.signal,
-    asks,
+    turnHost(ctx, asks),
   );
   const call = (name: string, args: unknown) => tools.find((t) => t.name === name)!.execute('call', args);
   try {

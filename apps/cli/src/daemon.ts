@@ -1,3 +1,4 @@
+import { waitForProcessGroups } from '@bubx/agent/process';
 import { spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import fs from 'node:fs';
@@ -62,7 +63,7 @@ export async function runDaemon(options: BotmuxBridgeOptions, mode: RuntimeMode,
   });
   function shutdown() {
     bridge?.stop();
-    server.close(() => process.exit(0));
+    server.close(() => { void waitForProcessGroups().then(() => process.exit(0)); });
   }
   const socket = socketPath();
   await new Promise<void>((resolve, reject) => {

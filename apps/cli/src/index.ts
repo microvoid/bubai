@@ -1,8 +1,9 @@
 #!/usr/bin/env node
+import { waitForProcessGroups } from '@bubx/agent/process';
 import { configurePiAgent, detectedProfiles } from './pi-profiles';
 import { BubaiClient } from '@buzz-botmux/chat-client';
 import { version } from '../package.json';
-import { loadCliConfig, saveCliConfig } from './config';
+import { loadCliConfig, saveCliConfig, resolvePiModel } from './config';
 import { daemonRequest, runDaemon, startDaemon } from './daemon';
 import { configureAgents, selectRuntime, type RuntimeMode } from './direct-config';
 import { startRuntime } from './runtime';
@@ -66,6 +67,7 @@ Usage:
   bub community use <name|slug|id> [--server <url>] [--token <token>] [--json]
   bub config set [--server <url>] [--token <token>] [--llm-provider <provider> --llm-model <model> --llm-base-url <url> --llm-api-key <key>]
   bub start [--mode auto|botmux|direct|pi] [--cli claude,codex] [--cwd <dir>] [--permission read-only|workspace-write|full-access] [--concurrency <n>]
+  bub bridge pi
   bub bridge direct [--cli claude,codex] [--cwd <dir>]
   bub agent add --profile default|dreamina|libtv
   bub agent wrap --bin <executable> --skill <SKILL.md> --name <name> [--cwd <directory>] [--timeout-ms <ms>]
@@ -280,6 +282,7 @@ async function main() {
       const endpoint = getStringFlag(flags, 'botmux') || process.env.BOTMUX_ENDPOINT || 'http://127.0.0.1:7891';
       const { mode, selectedAgents } = await selectRuntime(flags, endpoint);
       const includePi = (!flags.mode || flags.mode === 'auto') && configured.length && mode !== 'pi';
+      if (includePi || flags['include-pi']) resolvePiModel();
       return [...process.argv.slice(3), '--runtime', mode, ...(includePi ? ['--include-pi'] : []), ...(selectedAgents ? ['--selected-agents', selectedAgents.join(',')] : [])];
     });
     return;
@@ -445,7 +448,7 @@ async function main() {
     return;
   }
 
-  if ((cmd === 'bridge' && ['botmux', 'direct'].includes(sub)) || cmd === '_bridge-daemon') {
+  if ((cmd === 'bridge' && ['botmux', 'direct', 'pi'].includes(sub)) || cmd === '_bridge-daemon') {
     const botmuxEndpoint =
       getStringFlag(flags, 'botmux') || process.env.BOTMUX_ENDPOINT || 'http://127.0.0.1:7891';
     const botmuxToken = getStringFlag(flags, 'botmux-token') || process.env.BOTMUX_TOKEN;
@@ -486,7 +489,7 @@ async function main() {
 
     const shutdown = () => {
       bridge.stop();
-      process.exit(0);
+      void waitForProcessGroups().then(() => process.exit(0));
     };
     process.on('SIGINT', shutdown);
     process.on('SIGTERM', shutdown);

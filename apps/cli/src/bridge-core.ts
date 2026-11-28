@@ -27,7 +27,7 @@ export async function startRuntimeBridge(
   const agents = await provider.discoverAgents();
   if (!agents.length) throw new Error('No local agents configured');
   const activeTurns = new Set<string>();
-  const pendingLocal = new Map<string, Promise<unknown>>();
+
   const controller = new AbortController();
   const { signal } = controller;
   const wait = (ms: number) => delay(ms, undefined, { signal });
@@ -105,7 +105,7 @@ export async function startRuntimeBridge(
       if (turn.stage !== 'deliver') {
         let lastProgress: AgentProgressSnapshot | undefined;
         const execute = (files?: TurnFiles) => provider.executeTurn({
-          files, sdk,
+          files, sdk, signal: turnSignal,
           initial: turn,
           event: loaded.event,
           async progress(snapshot) {
@@ -130,14 +130,11 @@ export async function startRuntimeBridge(
         const key = turn.bindingKey;
         const local = event && (turn.stage === 'direct' || turn.stage === 'pi');
         // Preserve arrival order even when an earlier turn has a slow attachment download.
-        const pending = local ? (pendingLocal.get(key) ?? Promise.resolve()).then(runLocal) : execute();
-        const completionPromise = pending.catch((err: Error) => ({
+        const pending = local ? options.limiter!.run(key, turnSignal, runLocal) : execute();
+        const completion = await pending.catch((err: Error) => ({
           status: turnSignal.reason?.name === 'TimeoutError' ? 'timeout' as const : 'failed' as const,
           content: err.message,
         }));
-        if (local) pendingLocal.set(key, completionPromise);
-        const completion = await completionPromise;
-        if (pendingLocal.get(key) === completionPromise) pendingLocal.delete(key);
         signal.throwIfAborted();
         turn = { ...turn, stage: 'deliver', completion };
         journal.save(turn);

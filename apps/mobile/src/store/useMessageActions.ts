@@ -1,8 +1,8 @@
 import type { ChatMessage } from '@buzz-botmux/chat-client';
 import type { LocalMessage } from './localTimeline';
-import { useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { Alert, type FlatList } from 'react-native';
-import { pickAttachments } from '../services/pickAttachments';
+import { pickAttachments, removeStaged } from '../services/pickAttachments';
 import { useBubai } from './BubaiProvider';
 import { useDraft } from './useDraft';
 
@@ -15,14 +15,19 @@ export function useMessageActions(
 ) {
   const { client, serverUrl, activeOrgId, currentUserId, sendWsMessage } =
     useBubai();
-  const [draft, setDraft] = useDraft(
+  const [draft, setDraft, draftKey] = useDraft(
     serverUrl,
     activeOrgId,
     currentUserId,
     channelId,
     ...(threadId ? [threadId] : []),
   );
-  const [editing, setEditing] = useState<ChatMessage | null>(null);
+  const [edit, setEdit] = useState<{
+    message: ChatMessage;
+    text: string;
+    draftKey: string;
+  } | null>(null);
+  const activeEdit = edit?.draftKey === draftKey ? edit : null;
   const [uploading, setUploading] = useState(false);
   const picking = useRef(false);
   const inFlight = useRef(new Set<string>());
@@ -30,6 +35,7 @@ export function useMessageActions(
     content: string,
     attachments?: ChatMessage['attachments'],
     retryId?: string,
+    stagedAttachments?: LocalMessage['stagedAttachments'],
   ) {
     const id = retryId ?? globalThis.expo.uuidv4();
     if (inFlight.current.has(id)) throw new Error('消息正在发送');
@@ -40,6 +46,7 @@ export function useMessageActions(
       threadId: threadId ?? undefined,
       content,
       attachments,
+      stagedAttachments,
       senderRole: 'human',
       senderId: currentUserId,
       createdAt: Date.now(),
@@ -57,18 +64,20 @@ export function useMessageActions(
         threadId: threadId ?? undefined,
         content,
         attachments,
+        stagedAttachments,
       });
       update((rows) =>
         rows.map((r) =>
-          r.id === id && r.delivery
-            ? { ...r, delivery: state === 'queued' ? 'queued' : undefined }
+          r.id === id && r.delivery === 'sending'
+            ? { ...r, delivery: state === 'sent' ? undefined : state }
             : r,
         ),
       );
     } catch (error) {
-      if (error instanceof Error && error.message === '已取消发送')
+      if (error instanceof Error && error.message === '已取消发送' && !retryId) {
         update((rows) => rows.filter((r) => r.id !== id));
-      else
+        await removeStaged(stagedAttachments);
+      } else
         update((rows) =>
           rows.map((r) =>
             r.id === id && r.delivery ? { ...r, delivery: 'failed' } : r,
@@ -82,7 +91,7 @@ export function useMessageActions(
   const sending = useRef(false);
   async function retry(message: LocalMessage) {
     try {
-      await deliver(message.content, message.attachments, message.id);
+      await deliver(message.content, message.attachments, message.id, message.stagedAttachments);
       setDraft((current) => (current === message.content ? '' : current));
     } catch (error) {
       Alert.alert(
@@ -92,27 +101,28 @@ export function useMessageActions(
     }
   }
   async function send() {
-    const content = draft.trim();
+    const content = (activeEdit?.text ?? draft).trim();
     if (!content || !client || sending.current) return;
     sending.current = true;
     try {
-      if (editing) {
-        const { message } = await client.editMessage(editing.id, content);
+      if (activeEdit) {
+        const { message } = await client.editMessage(activeEdit.message.id, content);
         patch(message.id, message);
-        setEditing(null);
+        setEdit(current => current === activeEdit ? null : current);
       } else {
         const failed = snapshot().find(
           (row) =>
             row.delivery === 'failed' &&
             !row.attachments?.length &&
+            !row.stagedAttachments?.length &&
             row.content === content,
         );
         await deliver(content, undefined, failed?.id);
+        setDraft((current) => (current.trim() === content ? '' : current));
       }
-      setDraft((current) => (current.trim() === content ? '' : current));
     } catch (error) {
       Alert.alert(
-        editing ? '编辑失败' : '发送失败',
+        activeEdit ? '编辑失败' : '发送失败',
         error instanceof Error ? error.message : String(error),
       );
     } finally {
@@ -124,9 +134,9 @@ export function useMessageActions(
     picking.current = true;
     setUploading(true);
     try {
-      const attachments = await pickAttachments(client);
+      const attachments = await pickAttachments();
       if (!attachments.length) return;
-      await deliver(draft.trim(), attachments);
+      await deliver(draft.trim(), undefined, undefined, attachments);
       setDraft((current) => (current === draft ? '' : current));
     } catch (error) {
       Alert.alert(
@@ -151,17 +161,18 @@ export function useMessageActions(
     }
   }
   function startEdit(message: ChatMessage) {
-    setEditing(message);
-    setDraft(message.content);
+    setEdit({ message, text: message.content, draftKey });
   }
   function cancelEdit() {
-    setEditing(null);
-    setDraft('');
+    setEdit(null);
   }
   return {
-    draft,
-    setDraft,
-    editing,
+    draft: activeEdit?.text ?? draft,
+    setDraft: (text: string) => {
+      if (activeEdit) setEdit({ ...activeEdit, text });
+      else setDraft(text);
+    },
+    editing: activeEdit?.message ?? null,
     startEdit,
     cancelEdit,
     uploading,
@@ -174,21 +185,37 @@ export function useMessageActions(
 
 export function useMessageScroll(items: ChatMessage[], messageId?: string) {
   const ref = useRef<FlatList<ChatMessage>>(null);
+  const targetIndex = messageId ? items.findIndex(item => item.id === messageId) : -1;
   const jumped = useRef<string | null>(null);
+  const retry = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
+  const attempts = useRef(0);
+  const jump = useCallback(() => {
+    if (!messageId || !ref.current || targetIndex < 0 || jumped.current === messageId) return;
+    jumped.current = messageId;
+    ref.current.scrollToIndex({ index: targetIndex, animated: false, viewPosition: 0.5 });
+  }, [messageId, targetIndex]);
+
+  useEffect(() => {
+    jumped.current = null;
+    attempts.current = 0;
+  }, [messageId]);
+  useEffect(() => {
+    jump();
+    return () => clearTimeout(retry.current);
+  }, [jump]);
+
   return {
     ref,
+    onContentSizeChange: jump,
     onScrollToIndexFailed(info: { averageItemLength: number; index: number }) {
-      ref.current?.scrollToOffset({
-        offset: info.averageItemLength * info.index,
-        animated: false,
-      });
-    },
-    onContentSizeChange() {
-      if (!messageId || !ref.current || jumped.current === messageId) return;
-      const index = items.findIndex((item) => item.id === messageId);
-      if (index < 0) return;
-      jumped.current = messageId;
-      ref.current.scrollToIndex({ index, animated: false });
+      // Virtualized lists need to lay out distant, variable-height bubbles before
+      // they can position the target precisely. First move near its estimated offset.
+      ref.current?.scrollToOffset({ offset: info.averageItemLength * info.index, animated: false });
+      if (attempts.current >= 5) return;
+      attempts.current++;
+      jumped.current = null;
+      clearTimeout(retry.current);
+      retry.current = setTimeout(jump, 100);
     },
   };
 }

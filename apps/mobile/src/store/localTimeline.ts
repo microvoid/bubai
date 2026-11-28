@@ -18,24 +18,21 @@ export function saveSnapshot(key: string, value: unknown) {
   Storage.setItemSync(key, JSON.stringify(value));
 }
 
-type Settlement = (id: string, failed: boolean) => void;
+type Settlement = (id: string, changes: Partial<LocalMessage>) => void;
 const mounted = new Map<string, Set<Settlement>>();
-export function settleQueued(key: string, id: string, failed: boolean) {
+
+function patchDelivery(rows: LocalMessage[], id: string, changes: Partial<LocalMessage>) {
+  return rows.map(row => row.id === id && row.delivery ? { ...row, ...changes } : row);
+}
+
+export function settleQueued(key: string, id: string, changes: Partial<LocalMessage>) {
   const listeners = mounted.get(key);
   if (listeners?.size) {
-    for (const settle of listeners) settle(id, failed);
+    for (const settle of listeners) settle(id, changes);
     return;
   }
   const rows = cached<LocalMessage[]>(key);
-  if (rows)
-    saveSnapshot(
-      key,
-      rows.map((row) =>
-        row.id === id && row.delivery
-          ? { ...row, delivery: failed ? 'failed' : undefined }
-          : row,
-      ),
-    );
+  if (rows) saveSnapshot(key, patchDelivery(rows, id, changes));
 }
 export function useTimeline(
   server: string | null,
@@ -46,11 +43,13 @@ export function useTimeline(
 ) {
   const key = JSON.stringify(['timeline', server, user, org, channel, root]);
   const store = useMemo(() => {
-    let rows = (cached<LocalMessage[]>(key) ?? []).map((row) =>
-      row.delivery === 'sending'
-        ? { ...row, delivery: 'failed' as const }
-        : row,
-    );
+    const outboxKey = JSON.stringify(['outbox', server, user, org]);
+    const outbox = cached<Array<{ messageId: string; delivery?: LocalMessage['delivery'] }>>(outboxKey) ?? [];
+    let rows = (cached<LocalMessage[]>(key) ?? []).map(row => {
+      if (row.delivery !== 'sending') return row;
+      const entry = outbox.find(item => item.messageId === row.id);
+      return { ...row, delivery: entry ? (entry.delivery ?? 'queued') : 'failed' } as LocalMessage;
+    });
     const listeners = new Set<() => void>();
     let flushTimer: ReturnType<typeof setTimeout> | undefined;
     function persist() {
@@ -82,14 +81,7 @@ export function useTimeline(
       snapshot: () => rows,
       subscribe: (fn: () => void) => {
         listeners.add(fn);
-        const settle: Settlement = (id, failed) =>
-          update((previous) =>
-            previous.map((row) =>
-              row.id === id && row.delivery
-                ? { ...row, delivery: failed ? 'failed' : undefined }
-                : row,
-            ),
-          );
+        const settle: Settlement = (id, changes) => update(previous => patchDelivery(previous, id, changes));
         const callbacks = mounted.get(key) ?? new Set<Settlement>();
         callbacks.add(settle);
         mounted.set(key, callbacks);
@@ -104,7 +96,7 @@ export function useTimeline(
       reconcile: (canonical: ChatMessage[], atRequest: LocalMessage[]) =>
         update(current => reconcileTimeline(canonical, atRequest, current)),
     };
-  }, [key, root]);
+  }, [key, root, server, user, org]);
   const rows = useSyncExternalStore(store.subscribe, store.snapshot);
   return { rows, ...store };
 }

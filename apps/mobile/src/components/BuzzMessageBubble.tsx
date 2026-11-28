@@ -252,9 +252,15 @@ export function BuzzMessageBubble({
           {message.delivery && <Pressable accessibilityRole="button" disabled={message.delivery!=='failed'}
             onPress={()=>onRetry?.(message)}>
             <Text style={{color:message.delivery==='failed'?colors.error:colors.onSurfaceVariant,fontSize:13}}>
-              {message.delivery==='failed'?'发送失败 · 点击重试':message.delivery==='queued'?'等待网络 · 恢复后自动发送':'正在发送…'}
+              {message.delivery==='failed'?'发送失败 · 点击重试':message.delivery==='queued'?'等待网络 · 恢复后自动发送':message.delivery==='confirming'?'等待服务器确认…':'正在发送…'}
             </Text>
           </Pressable>}
+          {message.delivery && message.stagedAttachments?.map(file => (
+            <View key={file.id} style={[styles.fileChip, { borderColor: colors.outline }]}>
+              <Ionicons name="attach" size={14} color={colors.onSurfaceVariant} />
+              <Text style={[buzzTypography.caption, { color: colors.onSurface }]} numberOfLines={1}>{file.name}</Text>
+            </View>
+          ))}
           {/* Image Attachments */}
           {imageAttachments.length > 0 && (
             <View style={styles.imageGrid}>

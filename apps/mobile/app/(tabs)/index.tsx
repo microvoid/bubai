@@ -84,6 +84,13 @@ export default function MessagesScreen() {
     [visibleChannels],
   );
 
+  let connectionNotice: string | null = null;
+  if (error && channels.length > 0) {
+    connectionNotice = wsState === 'open' ? '同步暂时不可用' : '离线 · 显示已缓存的内容';
+  } else if (!error && wsState === 'reconnecting') {
+    connectionNotice = '实时连接已断开，正在重连';
+  }
+
   const onRefresh = async () => {
     setRefreshing(true);
     try {
@@ -305,12 +312,12 @@ export default function MessagesScreen() {
         )}
       </ScrollView>
 
-      {error && channels.length > 0 && (
+      {connectionNotice && (
         <Pressable accessibilityRole="button" onPress={() => router.push('/connect')}
           style={[styles.cachedStatus,{bottom:Math.max(12,insets.bottom)+72,backgroundColor:colors.surfaceContainerHigh}]}>
           <Ionicons name="cloud-offline-outline" size={16} color={colors.onSurfaceVariant}/>
-          <Text style={[buzzTypography.caption,{color:colors.onSurfaceVariant}]}>
-            {wsState === 'open' ? '同步暂时不可用' : '离线 · 显示已缓存的内容'}
+          <Text accessibilityLiveRegion="polite" style={[buzzTypography.caption,{color:colors.onSurfaceVariant}]}>
+            {connectionNotice}
           </Text>
         </Pressable>
       )}

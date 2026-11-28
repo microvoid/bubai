@@ -157,7 +157,7 @@ export function BuzzComposer({
           >
             {editingLabel}
           </Text>
-          <Pressable onPress={onCancelEdit} hitSlop={8}>
+          <Pressable accessibilityRole="button" accessibilityLabel="取消编辑" onPress={onCancelEdit} hitSlop={8}>
             <Ionicons name="close-circle" size={18} color={colors.onSurfaceVariant} />
           </Pressable>
         </View>

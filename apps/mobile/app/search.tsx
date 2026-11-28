@@ -80,6 +80,7 @@ export default function SearchScreen() {
         >
           <Ionicons name="search" size={16} color={colors.onSurfaceVariant} />
           <TextInput
+            testID="message-search-input"
             value={query}
             onChangeText={setQuery}
             autoFocus
@@ -118,7 +119,10 @@ export default function SearchScreen() {
             const sender = participantMap.get(item.senderId);
             return (
               <TouchableOpacity
-                onPress={() => router.push(`/channel/${encodeURIComponent(item.channelId)}`)}
+                testID={`search-result-${item.id}`}
+                onPress={() => router.push(item.threadId
+                  ? { pathname: '/thread/[channelId]/[rootId]', params: { channelId: item.channelId, rootId: item.threadId, messageId: item.id } }
+                  : { pathname: '/channel/[id]', params: { id: item.channelId, messageId: item.id } })}
                 style={[
                   styles.card,
                   { backgroundColor: colors.surfaceContainerLow, borderColor: colors.outline },

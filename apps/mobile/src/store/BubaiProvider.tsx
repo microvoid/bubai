@@ -1,11 +1,12 @@
-import { addToOutbox, removeFromOutbox, type OutgoingMessage } from './outbox';
+import { enqueue, readOutbox, removeFromOutbox, updateEntry, type OutgoingMessage } from './outbox';
+import { drainOutbox, type SendResult } from './drainOutbox';
+import { uploadStaged, removeStaged } from '../services/pickAttachments';
 import { cached, saveSnapshot, settleQueued } from './localTimeline';
 import { coalescedRefresh } from './coalescedRefresh';
 import { checkSessionResponse, onSessionExpired } from '@/services/sessionExpiry';
 import { registerDevice, unregisterDevice } from '@/services/pushNotifications';
 import {
   BubaiClient,
-  MessageDisconnectedError,
   normalizeServerUrl,
   findMentionedNonMemberAgents,
   type BootstrapPayload,
@@ -91,7 +92,7 @@ interface BubaiContextValue {
   refreshBootstrap: () => Promise<void>;
   answerAsk: (ask: BotmuxPendingAsk, optionKey: string) => Promise<void>;
   sendTyping: (channelId: string) => void;
-  sendWsMessage: (payload: OutgoingMessage) => Promise<'sent' | 'queued'>;
+  sendWsMessage: (payload: OutgoingMessage) => Promise<SendResult>;
   subscribeWsEvents: (listener: (event: ServerWsEvent) => void) => () => void;
   markThreadRead: (channelId: string, rootId: string) => void;
   clearChannelUnread: (channelId: string) => void;
@@ -264,11 +265,32 @@ export function BubaiProvider({ children }: { children: React.ReactNode }) {
     return () => { clearTimeout(timer); refreshWorkspaceSoon.current = () => {}; };
   }, [queryClient, bootstrapQueryKey, serverUrl, activeOrgId, currentUserId]);
 
+  const outboxKey = JSON.stringify(['outbox', serverUrl, currentUserId, activeOrgId]);
+  const activeOutbox = useRef<{key: string; worker: ReturnType<typeof drainOutbox>} | null>(null);
+
   // WebSocket live subscription + AppState foreground resume
   useEffect(() => {
     if (!client || !canQueryWorkspace) return;
 
     const handleEvent = (event: ServerWsEvent) => {
+      if (event.type === 'message.created' && event.payload.senderRole === 'human' && event.payload.senderId === currentUserId) {
+        const message = event.payload;
+        const item = readOutbox(outboxKey).find(entry => entry.messageId === message.id && entry.channelId === message.channelId);
+        if (item) {
+          const key = JSON.stringify(['timeline', serverUrl, currentUserId, activeOrgId, item.channelId, item.threadId ?? null]);
+          settleQueued(key, item.messageId, { ...message, stagedAttachments: undefined, delivery: undefined });
+          removeFromOutbox(outboxKey, item.messageId);
+          activeOutbox.current?.worker.received(item.messageId);
+          void removeStaged(item.stagedAttachments).catch(() => {});
+        }
+      } else if (event.type === 'message.send_failed') {
+        const item = readOutbox(outboxKey).find(entry => entry.messageId === event.payload.messageId);
+        if (item) {
+          updateEntry(outboxKey, item.messageId, { delivery: 'failed' });
+          const key = JSON.stringify(['timeline', serverUrl, currentUserId, activeOrgId, item.channelId, item.threadId ?? null]);
+          settleQueued(key, item.messageId, { delivery: 'failed' });
+        }
+      }
       if (event.type === 'message.created' || event.type === 'channel.members.updated') {
         refreshWorkspaceSoon.current();
       }
@@ -345,7 +367,7 @@ export function BubaiProvider({ children }: { children: React.ReactNode }) {
       handle.close();
       wsHandleRef.current = null;
     };
-  }, [bootstrapQueryKey, canQueryWorkspace, client, currentUserId, queryClient, authToken, authUser, hydrateSessionAndOrgs, serverUrl, activeOrgId]);
+  }, [bootstrapQueryKey, canQueryWorkspace, client, currentUserId, queryClient, authToken, authUser, hydrateSessionAndOrgs, serverUrl, activeOrgId, outboxKey]);
 
   const connectToServer = useCallback(async (rawUrl: string): Promise<InstanceInfo & { signedIn: boolean }> => {
     const normalized = normalizeServerUrl(rawUrl);
@@ -434,16 +456,30 @@ export function BubaiProvider({ children }: { children: React.ReactNode }) {
     if (serverUrl && authToken) await hydrateSessionAndOrgs(serverUrl, authToken);
     await queryClient.invalidateQueries({ queryKey: ['bootstrap'] });
   }, [serverUrl, authToken, queryClient, hydrateSessionAndOrgs]);
+  const pendingOrgChange = useRef(Promise.resolve());
   const switchOrganization = useCallback(
-    async (orgId: string) => {
-      if (!serverUrl || !authToken) return;
-      await mobileSetActiveOrganization(serverUrl, authToken, orgId);
-      const identity=SecureStore.getItem(tokenKey(serverUrl)+'.identity');
-      if(identity) SecureStore.setItem(tokenKey(serverUrl)+'.identity',JSON.stringify({...JSON.parse(identity),orgId}));
-      setActiveOrgId(orgId);
-      await queryClient.invalidateQueries({ queryKey: ['bootstrap'] });
+    (orgId: string) => {
+      const switchWorkspace = async () => {
+        const sessionIsCurrent = () => selectedUrl.current === serverUrl &&
+          activeCredentials.current.authToken === authToken;
+        if (!serverUrl || !authToken || !sessionIsCurrent()) throw new Error('请先登录');
+
+        await mobileSetActiveOrganization(serverUrl, authToken, orgId);
+        if (!sessionIsCurrent()) throw new Error('登录状态已更新');
+        // An older cold-start session lookup must not restore the previous workspace.
+        ++authRevision.current;
+        const identityKey = tokenKey(serverUrl) + '.identity';
+        const identity = SecureStore.getItem(identityKey);
+        if (identity) SecureStore.setItem(identityKey, JSON.stringify({ ...JSON.parse(identity), orgId }));
+        setActiveOrgId(orgId);
+        await queryClient.invalidateQueries({ queryKey: ['bootstrap', serverUrl, currentUserId, orgId] });
+      };
+      // A menu selection and notification tap can race on the same server-side session.
+      const change = pendingOrgChange.current.then(switchWorkspace);
+      pendingOrgChange.current = change.catch(() => {});
+      return change;
     },
-    [authToken, queryClient, serverUrl],
+    [authToken, currentUserId, queryClient, serverUrl],
   );
 
   const enableNotifications = useCallback(async () => {
@@ -486,41 +522,24 @@ export function BubaiProvider({ children }: { children: React.ReactNode }) {
   const sendTyping = useCallback((channelId: string) => {
     wsHandleRef.current?.send({ type: 'typing.start', payload: { channelId, userId: currentUserId } });
   }, [currentUserId]);
-  const outboxKey = JSON.stringify(['outbox', serverUrl, currentUserId, activeOrgId]);
-  const wakeOutbox = useRef<(() => void) | null>(null);
   useEffect(() => {
     const socket = wsHandleRef.current;
-    if (!socket || wsState !== 'open' || !canQueryWorkspace) return;
-    let active = true;
-    let flushing = false;
-    async function flush() {
-      if (flushing || !socket) return;
-      flushing = true;
-      try {
-        while (active) {
-          const item = cached<OutgoingMessage[]>(outboxKey)?.[0];
-          if (!item) return;
-          let failed = false;
-          try {
-            await socket.sendMessage({ ...item, senderId: currentUserId });
-          } catch (error) {
-            if (!active || error instanceof MessageDisconnectedError) return;
-            failed = true;
-          }
-          if (!active) return;
-          const key = JSON.stringify(['timeline', serverUrl, currentUserId, activeOrgId, item.channelId, item.threadId ?? null]);
-          settleQueued(key, item.messageId, failed);
-          removeFromOutbox(outboxKey, item.messageId);
-        }
-      } finally { flushing = false; }
-    }
-    wakeOutbox.current = flush;
-    void flush();
-    return () => { active = false; wakeOutbox.current = null; };
-  }, [outboxKey, currentUserId, wsState, canQueryWorkspace, serverUrl, activeOrgId, client]);
-  const sendWsMessage = useCallback<BubaiContextValue['sendWsMessage']>(async payload => {
-    const handle = wsHandleRef.current;
+    if (!socket || wsState !== 'open' || !canQueryWorkspace || !client) return;
+    const worker = drainOutbox({
+      entries: () => readOutbox(outboxKey),
+      checkpoint: (id, patch) => updateEntry(outboxKey, id, patch),
+      upload: file => uploadStaged(client, file),
+      transmit: payload => socket.sendMessage({ ...payload, senderId: currentUserId }),
+      settle: (item, delivery) => {
+        const key = JSON.stringify(['timeline', serverUrl, currentUserId, activeOrgId, item.channelId, item.threadId ?? null]);
+        settleQueued(key, item.messageId, { delivery });
+      },
+    });
+    activeOutbox.current = { key: outboxKey, worker };
+    return () => { worker.close(); activeOutbox.current = null; };
+  }, [outboxKey, currentUserId, wsState, canQueryWorkspace, serverUrl, activeOrgId, client, authUser, hydrateSessionAndOrgs]);
 
+  const sendWsMessage = useCallback<BubaiContextValue['sendWsMessage']>(async payload => {
     const workspace = queryClient.getQueryData<BootstrapPayload>(bootstrapQueryKey);
     const channel = workspace?.channels.find(ch => ch.id === payload.channelId);
     if (channel?.kind !== 'dm' && channel?.memberIds && workspace && client) {
@@ -536,16 +555,9 @@ export function BubaiProvider({ children }: { children: React.ReactNode }) {
         if (invite === 'invite') await Promise.all(outsiders.map(agent => client.upsertChannelMember(channel.id, { agentId: agent.id })));
       }
     }
-    try {
-      if (!handle) throw new MessageDisconnectedError('尚未连接');
-      await handle.sendMessage({ ...payload, senderId: currentUserId });
-      return 'sent';
-    } catch (error) {
-      if (!(error instanceof MessageDisconnectedError)) throw error;
-      addToOutbox(outboxKey, payload);
-      wakeOutbox.current?.();
-      return 'queued';
-    }
+    enqueue(outboxKey, payload);
+    const active = activeOutbox.current;
+    return active?.key === outboxKey ? active.worker.attempt(payload.messageId) : 'queued';
   }, [currentUserId, client, bootstrapQueryKey, queryClient, outboxKey]);
 
   const subscribeWsEvents = useCallback((listener: (event: ServerWsEvent) => void) => {

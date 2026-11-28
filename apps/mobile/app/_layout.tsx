@@ -2,10 +2,11 @@ import { GestureHandlerRootView } from 'react-native-gesture-handler';
 import { useFonts } from 'expo-font';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import * as Notifications from 'expo-notifications';
-import { notificationRoute } from '@/services/notificationRoute';
+import { notificationDestination } from '@/services/notificationRoute';
 import { Stack, useRouter, useNavigationContainerRef } from 'expo-router';
 import { StatusBar } from 'expo-status-bar';
 import React, { useEffect, useRef, useState } from 'react';
+import { Alert } from 'react-native';
 import { SafeAreaProvider } from 'react-native-safe-area-context';
 import { BubaiProvider, useBubai } from '@/store/BubaiProvider';
 import { BuzzThemeProvider, useBuzzTheme } from '@/theme/ThemeProvider';
@@ -16,7 +17,7 @@ Notifications.setNotificationHandler({handleNotification: async () => ({
 
 function RootNavigator() {
   const { mode, colors } = useBuzzTheme();
-  const { hydrated, instance, authRequired, authToken } = useBubai();
+  const { hydrated, instance, authRequired, authToken, activeOrgId, switchOrganization } = useBubai();
   const router = useRouter();
   const navigation = useNavigationContainerRef();
   const [ready, setReady] = useState(navigation.isReady());
@@ -28,6 +29,10 @@ function RootNavigator() {
   }, [navigation, hydrated]);
   const [response, setResponse] = useState<Notifications.NotificationResponse | null>(null);
   const handled = useRef<string | null>(null);
+  const switching = useRef(false);
+  const [switchAttempt, setSwitchAttempt] = useState(0);
+  const latest = useRef(response);
+  latest.current = response;
   useEffect(() => {
     let active = true;
     let received = false;
@@ -41,14 +46,42 @@ function RootNavigator() {
     return () => { active = false; listener.remove(); };
   }, []);
   useEffect(() => {
-    if (!response || !ready || !hydrated || !instance || (authRequired && !authToken)) return;
+    if (!response || !ready || !hydrated || !instance || (authRequired && !authToken) || switching.current) return;
     const request = response.notification.request;
     if (handled.current === request.identifier) return;
-    handled.current = request.identifier;
-    const target = notificationRoute(request.content.data);
-    if (target && response.actionIdentifier === Notifications.DEFAULT_ACTION_IDENTIFIER) router.push(target);
-    void Notifications.clearLastNotificationResponseAsync().catch(() => {});
-  }, [response, ready, hydrated, instance, authRequired, authToken, router]);
+
+    const finish = () => {
+      handled.current = request.identifier;
+      void Notifications.clearLastNotificationResponseAsync().catch(() => {});
+    };
+    const destination = notificationDestination(request.content.data);
+    if (!destination || response.actionIdentifier !== Notifications.DEFAULT_ACTION_IDENTIFIER) {
+      finish();
+      return;
+    }
+    if (destination.organizationId && destination.organizationId !== activeOrgId) {
+      if (!authToken) {
+        finish();
+        Alert.alert('无法打开通知', '请先登录通知所属的社区。');
+        return;
+      }
+      switching.current = true;
+      void switchOrganization(destination.organizationId).then(() => {
+        // The old screen belongs to a different workspace. Back should return to the new home.
+        if (latest.current === response && router.canDismiss()) router.dismissAll();
+      }).catch(() => {
+        if (latest.current !== response) return;
+        finish();
+        Alert.alert('无法打开通知', '无法切换到这条通知所属的社区，请检查网络和社区访问权限。');
+      }).finally(() => {
+        switching.current = false;
+        setSwitchAttempt(attempt => attempt + 1);
+      });
+      return;
+    }
+    finish();
+    router.push(destination.route);
+  }, [response, ready, hydrated, instance, authRequired, authToken, activeOrgId, switchOrganization, switchAttempt, router]);
   if (!hydrated) return null;
   return (
     <>

@@ -17,5 +17,5 @@ export function useDraft(...scope: (string | null)[]) {
     },
     [state, key],
   );
-  return [state.value, update] as const;
+  return [state.value, update, key] as const;
 }

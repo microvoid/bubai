@@ -1,6 +1,10 @@
 import type { ChatMessage } from '@buzz-botmux/chat-client';
 
-export type LocalMessage = ChatMessage & { delivery?: 'sending' | 'queued' | 'failed' };
+export type StagedAttachment = { id: string; name: string; mimeType: string };
+export type LocalMessage = ChatMessage & {
+  delivery?: 'sending' | 'queued' | 'confirming' | 'failed';
+  stagedAttachments?: StagedAttachment[];
+};
 
 // A history request and its WebSocket run concurrently. Only replace rows that
 // were unchanged while the request was in flight.

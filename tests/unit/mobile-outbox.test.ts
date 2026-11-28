@@ -1,5 +1,5 @@
 import { expect, test } from 'bun:test';
-import { MessageDisconnectedError, MessageUnconfirmedError, UploadHttpError, type MessageAttachment } from '@buzz-botmux/chat-client';
+import { MessageDisconnectedError, MessageUnconfirmedError, UploadHttpError, type MessageAttachment } from '../../packages/chat-client/src';
 import { deliveryAfterError, drainOutbox } from '../../apps/mobile/src/store/drainOutbox';
 import type { OutboxEntry, OutgoingMessage } from '../../apps/mobile/src/store/outbox';
 

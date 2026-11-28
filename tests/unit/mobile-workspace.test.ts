@@ -1,7 +1,7 @@
 import { createRequire } from 'node:module';
 import { expect, test } from 'bun:test';
 import type { Channel } from '../../packages/chat-client/src';
-import { notificationRoute } from '../../apps/mobile/src/services/notificationRoute';
+import { notificationDestination } from '../../apps/mobile/src/services/notificationRoute';
 import {
   checkSessionResponse,
   onSessionExpired,
@@ -9,21 +9,20 @@ import {
 import { coalescedRefresh } from '../../apps/mobile/src/store/coalescedRefresh';
 import { unreadCount, visibleUnread } from '../../apps/mobile/src/store/unread';
 
-test('notification taps target the supplied channel, reply and message only', () => {
-  expect(notificationRoute({ channelId: 'c', threadId: 'r', messageId: 'm' })).toEqual({
-    pathname: '/thread/[channelId]/[rootId]',
-    params: { channelId: 'c', rootId: 'r', messageId: 'm' },
+test('notification taps preserve the destination community, channel, reply and message', () => {
+  expect(notificationDestination({ organizationId: 'o', channelId: 'c', threadId: 'r', messageId: 'm' })).toEqual({
+    organizationId: 'o',
+    route: { pathname: '/thread/[channelId]/[rootId]', params: { channelId: 'c', rootId: 'r', messageId: 'm' } },
   });
-  expect(notificationRoute({ channelId: 'c', threadId: null })).toEqual({
-    pathname: '/channel/[id]',
-    params: { id: 'c' },
+  expect(notificationDestination({ channelId: 'c', threadId: null })).toEqual({
+    organizationId: null,
+    route: { pathname: '/channel/[id]', params: { id: 'c' } },
   });
-  expect(notificationRoute(null)).toBeNull();
-  expect(notificationRoute({ channelId: 'c', messageId: '../invalid' })).toEqual({
-    pathname: '/channel/[id]', params: { id: 'c' },
-  });
-  expect(notificationRoute({ url: 'https://example.com' })).toBeNull();
-  expect(notificationRoute({ channelId: 'c', threadId: '../other' })).toBeNull();
+  expect(notificationDestination({ channelId: 'c', messageId: '../invalid' })?.route.params).toEqual({ id: 'c' });
+  expect(notificationDestination(null)).toBeNull();
+  expect(notificationDestination({ url: 'https://example.com' })).toBeNull();
+  expect(notificationDestination({ channelId: 'c', threadId: '../other' })).toBeNull();
+  expect(notificationDestination({ channelId: 'c', organizationId: '../other' })).toBeNull();
 });
 
 test('DMs and channels count unread replies and manual unread, and mute removes them from Unread', () => {

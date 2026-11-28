@@ -24,9 +24,13 @@ appId: com.bubai.app.dev
     file: ../open-app-link.yaml
     env:
       LINK: "bubai://search"
+- runFlow:
+    when:
+      visible: 清除搜索内容
+    commands:
+      - tapOn: 清除搜索内容
 - tapOn:
     id: message-search-input
-- eraseText
 - inputText: "${output.threadHit}"
 - tapOn:
     id: "search-result-${output.threadResultId}"

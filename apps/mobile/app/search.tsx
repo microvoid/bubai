@@ -90,7 +90,7 @@ export default function SearchScreen() {
             returnKeyType="search"
           />
           {query.length > 0 && (
-            <Pressable onPress={() => setQuery('')} hitSlop={8}>
+            <Pressable accessibilityRole="button" accessibilityLabel="清除搜索内容" onPress={() => setQuery('')} hitSlop={8}>
               <Ionicons name="close-circle" size={16} color={colors.onSurfaceVariant} />
             </Pressable>
           )}

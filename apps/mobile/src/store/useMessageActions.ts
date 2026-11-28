@@ -1,7 +1,7 @@
 import type { ChatMessage } from '@buzz-botmux/chat-client';
 import type { LocalMessage } from './localTimeline';
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { Alert, type FlatList } from 'react-native';
+import { Alert, type FlatList, type ViewToken } from 'react-native';
 import { pickAttachments, removeStaged } from '../services/pickAttachments';
 import { useBubai } from './BubaiProvider';
 import { useDraft } from './useDraft';
@@ -186,36 +186,31 @@ export function useMessageActions(
 export function useMessageScroll(items: ChatMessage[], messageId?: string) {
   const ref = useRef<FlatList<ChatMessage>>(null);
   const targetIndex = messageId ? items.findIndex(item => item.id === messageId) : -1;
-  const jumped = useRef<string | null>(null);
-  const retry = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
-  const attempts = useRef(0);
-  const jump = useCallback(() => {
-    if (!messageId || !ref.current || targetIndex < 0 || jumped.current === messageId) return;
-    jumped.current = messageId;
-    ref.current.scrollToIndex({ index: targetIndex, animated: false, viewPosition: 0.5 });
-  }, [messageId, targetIndex]);
+  const visible = useRef<Set<string>>(new Set());
+  const onViewableItemsChanged = useCallback(({ viewableItems }: { viewableItems: ViewToken<ChatMessage>[] }) => {
+    visible.current = new Set(viewableItems.map(token => token.item.id));
+  }, []);
 
   useEffect(() => {
-    jumped.current = null;
-    attempts.current = 0;
-  }, [messageId]);
-  useEffect(() => {
-    jump();
-    return () => clearTimeout(retry.current);
-  }, [jump]);
+    if (!messageId || targetIndex < 0) return;
+    let timer: ReturnType<typeof setTimeout>;
+    let attempts = 0;
+    function locate() {
+      if (visible.current.has(messageId!) || attempts++ >= 30) return;
+      ref.current?.scrollToIndex({ index: targetIndex, animated: false, viewPosition: 0.5 });
+      // A variable-height list can accept a scroll while its final native content
+      // size is still growing. Verify that the target entered the viewport.
+      timer = setTimeout(locate, 250);
+    }
+    timer = setTimeout(locate, 100);
+    return () => clearTimeout(timer);
+  }, [messageId, targetIndex]);
 
   return {
     ref,
-    onContentSizeChange: jump,
+    onViewableItemsChanged,
     onScrollToIndexFailed(info: { averageItemLength: number; index: number }) {
-      // Virtualized lists need to lay out distant, variable-height bubbles before
-      // they can position the target precisely. First move near its estimated offset.
       ref.current?.scrollToOffset({ offset: info.averageItemLength * info.index, animated: false });
-      if (attempts.current >= 5) return;
-      attempts.current++;
-      jumped.current = null;
-      clearTimeout(retry.current);
-      retry.current = setTimeout(jump, 100);
     },
   };
 }

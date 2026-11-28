@@ -195,7 +195,7 @@ export default function MessagesScreen() {
 
         {[{ id: 'starred', name: '星标' }, ...sidebarGroups, { id: '', name: '频道' }].map(group => {
           const rows = regularChannels.filter(ch => (ch.starred ? 'starred' : ch.groupId || '') === group.id);
-          return rows.length > 0 && <BuzzSectionGroup key={group.id} title={group.name}>
+          return rows.length > 0 && <BuzzSectionGroup collapsible key={group.id} title={group.name}>
             {rows.map((ch, idx) => (
               <TouchableOpacity
                 key={ch.id} testID={`channel-row-${ch.name}`}
@@ -216,10 +216,10 @@ export default function MessagesScreen() {
                 <View style={styles.rowBody}>
                   <Text
                     style={[
-                      buzzTypography.titleSmall,
+                      buzzTypography.channelTitle,
                       {
-                        color: colors.onSurface,
-                        fontWeight: ch.unreadCount > 0 ? '700' : '600',
+                        color: ch.muted ? colors.onSurfaceVariant : colors.onSurface,
+                        fontWeight: ch.unreadCount || ch.threadUnreadCount || ch.markedUnread ? '700' : '500',
                       },
                     ]}
                     numberOfLines={1}
@@ -244,7 +244,7 @@ export default function MessagesScreen() {
         })}
 
         {dmChannels.length > 0 && (
-          <BuzzSectionGroup title="私聊">
+          <BuzzSectionGroup collapsible title="私聊">
             {dmChannels.map((dm, idx) => {
               const targetAgent = participants.find(
                 (p) => p.role === 'agent' && dm.dmKey?.includes(`a:${p.id}`),
@@ -272,7 +272,7 @@ export default function MessagesScreen() {
                   />
                   <View style={styles.rowBody}>
                     <Text
-                      style={[buzzTypography.titleSmall, { color: colors.onSurface }]}
+                      style={[buzzTypography.channelTitle, { color: dm.muted ? colors.onSurfaceVariant : colors.onSurface, fontWeight: dm.unreadCount || dm.threadUnreadCount || dm.markedUnread ? '700' : '500' }]}
                       numberOfLines={1}
                     >
                       {label}

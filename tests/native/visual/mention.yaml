@@ -1,0 +1,16 @@
+appId: com.bubai.app.dev
+---
+- stopApp
+- runFlow: ../open-workspace.yaml
+- tapOn:
+    id: channel-row-native-discussion
+- tapOn:
+    id: message-input
+- eraseText
+- inputText: "@Local"
+- assertVisible: ".*@Local Fixture.*"
+- waitForAnimationToEnd
+- takeScreenshot: 05-mention
+- tapOn:
+    id: message-input
+- eraseText

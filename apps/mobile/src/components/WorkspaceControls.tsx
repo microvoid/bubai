@@ -1,3 +1,5 @@
+import Svg, { Defs, LinearGradient, Rect, Stop } from 'react-native-svg';
+import { FrostedSurface } from './FrostedSurface';
 import { VoiceShortcut } from './VoiceShortcut';
 import React, { useState } from 'react';
 import {
@@ -25,14 +27,12 @@ function Tool({
   onPress,
   id,
   badge,
-  initial,
 }: {
   icon: Icon;
   label: string;
   onPress: () => void;
   id?: string;
   badge?: number;
-  initial?: string;
 }) {
   const { colors } = useBuzzTheme();
   return (
@@ -43,26 +43,8 @@ function Tool({
       onPress={onPress}
       style={({ pressed }) => [styles.tool, { opacity: pressed ? 0.55 : 1 }]}
     >
-      {initial ? (
-        <View
-          style={{
-            width: 36,
-            height: 36,
-            borderRadius: 18,
-            backgroundColor: colors.surfaceContainerHigh,
-            alignItems: 'center',
-            justifyContent: 'center',
-          }}
-        >
-          <Text
-            style={{ color: colors.onSurface, fontSize: 17, fontWeight: '600' }}
-          >
-            {initial}
-          </Text>
-        </View>
-      ) : (
-        <Ionicons name={icon} size={23} color={colors.onSurface} />
-      )}
+      <NavigationGlass pointerEvents="none" style={[StyleSheet.absoluteFill, { borderRadius: 24, backgroundColor: colors.surfaceContainerLow }]} />
+      <Ionicons name={icon} size={23} color={colors.onSurface} />
       {!!badge && (
         <View style={[styles.badge, { backgroundColor: colors.error }]} />
       )}
@@ -72,7 +54,7 @@ function Tool({
 
 export function WorkspaceHeader() {
   const router = useRouter();
-  const { colors } = useBuzzTheme();
+  const { colors, mode } = useBuzzTheme();
   const { organizations, activeOrgId, switchOrganization, asks, authToken } =
     useBubai();
   const activity = useActivity();
@@ -87,6 +69,7 @@ export function WorkspaceHeader() {
     return (
       <Pressable
         key={id ?? label}
+        accessibilityLabel={label}
         testID={id}
         accessibilityRole="button"
         onPress={() => {
@@ -107,12 +90,20 @@ export function WorkspaceHeader() {
   }
   return (
     <View style={styles.header}>
+      <View pointerEvents="none" style={StyleSheet.absoluteFill}>
+        <Svg width="100%" height="100%">
+          <Defs><LinearGradient id="brand" x1="0" y1="0" x2="0" y2="1"><Stop offset="0" stopColor={mode === 'dark' ? '#4A4616' : '#E6E6B6'} /><Stop offset="1" stopColor={mode === 'dark' ? '#0A1423' : '#C4D0DA'} /></LinearGradient></Defs>
+          <Rect width="100%" height="100%" fill="url(#brand)" />
+        </Svg>
+      </View>
+      <FrostedSurface />
       <Pressable
         accessibilityRole="button"
         testID="community-menu"
         onPress={() => setMenu('community')}
         style={styles.community}
       >
+        <View style={[styles.communityAvatar, { backgroundColor: colors.primary }]}><Text style={{ color: colors.onPrimary, fontWeight: '600' }}>{Array.from(active?.name || '消息')[0]}</Text></View>
         <Text
           numberOfLines={1}
           style={{
@@ -139,7 +130,6 @@ export function WorkspaceHeader() {
       />
       <Tool
         id="workspace-more"
-        initial={active?.name && Array.from(active.name)[0]}
         icon="ellipsis-horizontal"
         label="更多"
         onPress={() => setMenu('more')}
@@ -185,6 +175,8 @@ export function WorkspaceHeader() {
                   org.id,
                 ),
               )}
+            {menu === 'more' && row('切换社区', 'swap-horizontal-outline', () => setMenu('community'))}
+            {menu === 'more' && row('外观', 'color-palette-outline', () => router.push('/settings?section=appearance'))}
             {menu === 'more' &&
               row('智能体', 'hardware-chip-outline', () =>
                 router.push('/agents'),
@@ -287,6 +279,7 @@ const styles = StyleSheet.create({
     gap: 8,
     minHeight: 48,
   },
+  communityAvatar: {width: 36, height: 36, borderRadius: 18, alignItems: 'center', justifyContent: 'center'},
   tool: {
     width: 48,
     height: 48,

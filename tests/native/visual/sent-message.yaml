@@ -1,5 +1,6 @@
 appId: com.bubai.app.dev
 ---
+- stopApp
 - runScript: find-discussion.js
 - runFlow: ../open-workspace.yaml
 - tapOn:
@@ -25,6 +26,18 @@ appId: com.bubai.app.dev
 - waitForAnimationToEnd
 - takeScreenshot: 04-sent
 - longPressOn: "Looks good on mobile.*"
+- tapOn:
+    id: message-action-edit
+- tapOn:
+    id: message-input
+- eraseText
+- inputText: "Reviewed on mobile."
+- tapOn:
+    id: send-message
+- assertVisible: "Reviewed on mobile.*"
+- waitForAnimationToEnd
+- takeScreenshot: 06-edited
+- longPressOn: "Reviewed on mobile.*"
 - tapOn:
     id: message-action-delete
 - tapOn: "删除"

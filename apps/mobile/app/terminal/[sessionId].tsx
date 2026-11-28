@@ -1,3 +1,4 @@
+import { displayLabel } from '@/services/displayLabels';
 import { buzzGrid, buzzRadii, buzzTypography } from '@buzz-botmux/design-tokens';
 import { Ionicons } from '@expo/vector-icons';
 import * as Haptics from 'expo-haptics';
@@ -417,7 +418,7 @@ export default function TerminalScreen() {
                       {s.sessionId}
                     </Text>
                   </View>
-                  <BuzzBadge label={st} tone={st !== 'closed' ? 'success' : 'neutral'} />
+                  <BuzzBadge label={displayLabel(st)} tone={st !== 'closed' ? 'success' : 'neutral'} />
                 </TouchableOpacity>
               );
             })}

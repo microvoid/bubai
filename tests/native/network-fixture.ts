@@ -16,9 +16,15 @@ export function networkFixture(upstream: string, channelId: string, rootId: stri
       if (url.pathname === '/test/session-mode' && request.method === 'POST') {
         const next = (await request.json()) as { mode: string };
         if (
-          !['normal', 'session-outage', 'list-outage', 'expired', 'observe', 'offline'].includes(next.mode)
+          !['normal', 'session-outage', 'list-outage', 'expired', 'observe', 'offline', 'hold-send'].includes(next.mode)
         ) {
           return new Response(null, { status: 400 });
+        }
+        if (mode === 'hold-send' && next.mode === 'normal') {
+          for (const ws of sockets) {
+            if (ws.data.upstream.readyState === WebSocket.OPEN)
+              for (const frame of ws.data.queued.splice(0)) ws.data.upstream.send(frame);
+          }
         }
         mode = next.mode;
         if (mode === 'offline') for (const socket of sockets) socket.close();
@@ -91,6 +97,10 @@ export function networkFixture(upstream: string, channelId: string, rootId: stri
       },
       message(ws, raw) {
         const frame = raw.toString();
+        if (mode === 'hold-send' && JSON.parse(frame).type === 'message.send') {
+          ws.data.queued.push(frame);
+          return;
+        }
         if (ws.data.upstream.readyState === WebSocket.OPEN) ws.data.upstream.send(frame);
         else ws.data.queued.push(frame);
       },

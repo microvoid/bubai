@@ -1,0 +1,33 @@
+appId: com.bubai.app.dev
+---
+- stopApp
+- runFlow:
+    file: ../open-workspace.yaml
+    env:
+      OPEN_SERVER: "${FAULT_SERVER}"
+- tapOn:
+    id: channel-row-native-discussion
+- tapOn: "(?s).*条回复.*"
+- tapOn:
+    id: message-input
+- eraseText
+- inputText: "Checking this reply."
+- runScript:
+    file: ../session-mode.js
+    env:
+      TARGET: "${FAULT_SERVER}"
+      MODE: hold-send
+- tapOn:
+    id: send-message
+- assertVisible: "正在发送…"
+- takeScreenshot: 07-pending
+- runScript:
+    file: ../session-mode.js
+    env:
+      TARGET: "${FAULT_SERVER}"
+      MODE: normal
+- assertVisible: "已发送.*"
+- longPressOn: "Checking this reply.*"
+- tapOn:
+    id: message-action-delete
+- tapOn: "删除"

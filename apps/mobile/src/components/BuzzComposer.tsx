@@ -1,3 +1,4 @@
+import { FrostedSurface } from './FrostedSurface';
 import { useBubai } from '../store/BubaiProvider';
 import { buildMentionCandidates, filterMentionCandidates, type Channel, type ChatMessage, type Participant } from '@buzz-botmux/chat-client';
 import { buzzGrid, buzzRadii, buzzTypography } from '@buzz-botmux/design-tokens';
@@ -172,6 +173,7 @@ export function BuzzComposer({
           },
         ]}
       >
+        <FrostedSurface />
         {onPickAttachment && !editingLabel && (
           <Pressable
             disabled={disabled || uploading}
@@ -266,6 +268,7 @@ const styles = StyleSheet.create({
     borderRadius: 12,
   },
   capsule: {
+    overflow: 'hidden',
     flexDirection: 'row',
     alignItems: 'flex-end',
     gap: 8,

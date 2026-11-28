@@ -1,5 +1,6 @@
 appId: com.bubai.app.dev
 ---
+- stopApp
 - runFlow: ../open-workspace.yaml
 - tapOn: "智能体语音"
 - tapOn: "Local Fixture"

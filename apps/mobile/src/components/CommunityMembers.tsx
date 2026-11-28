@@ -1,3 +1,4 @@
+import { displayLabel } from '@/services/displayLabels';
 import { BuzzButton, BuzzInput } from '@/components/BuzzComponents';
 import { useQuery } from '@tanstack/react-query';
 import React, { useState } from 'react';
@@ -49,7 +50,7 @@ export function CommunityMembers({initiallyExpanded=false}: {initiallyExpanded?:
           {roster.data?.members.map((m) => (
             <View key={m.id}>
               <Text style={{ color: colors.onSurface }}>
-                {m.user.name} · {m.role}
+                {m.user.name} · {displayLabel(m.role)}
               </Text>
               {canManage && currentUserId !== m.userId && m.role !== 'owner' && (
                 <>

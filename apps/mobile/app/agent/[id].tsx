@@ -1,3 +1,4 @@
+import { displayLabel } from '@/services/displayLabels';
 import type { AgentDetail, BotmuxSession } from '@buzz-botmux/chat-client';
 import { buzzGrid, buzzRadii, buzzTypography } from '@buzz-botmux/design-tokens';
 import { Ionicons } from '@expo/vector-icons';
@@ -416,8 +417,8 @@ export default function AgentDetailScreen() {
             {(
               [
                 { id: 'info', label: '信息' },
-                { id: 'channels', label: `Channels ${agent.channels.length}` },
-                { id: 'runtime', label: `Runtime ${sortedSessions.length}` },
+                { id: 'channels', label: `频道 ${agent.channels.length}` },
+                { id: 'runtime', label: `运行记录 ${sortedSessions.length}` },
               ] as const
             ).map((item) => {
               const selected = tab === item.id;
@@ -670,7 +671,7 @@ export default function AgentDetailScreen() {
                             {s.sessionId}
                           </Text>
                         </View>
-                        <BuzzBadge label={st} tone={isLive ? 'success' : 'neutral'} />
+                        <BuzzBadge label={displayLabel(st)} tone={isLive ? 'success' : 'neutral'} />
                       </View>
 
                       <View style={styles.sessionBtns}>

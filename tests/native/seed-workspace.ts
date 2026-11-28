@@ -20,7 +20,7 @@ export async function seedNativeWorkspace(baseUrl: string) {
   const { message: root } = await client.sendBotMessage({
     botId: agent.id,
     channelId: channel.id,
-    content: '# Native review\n\n@Owner please review the files.',
+    content: '# Native review\n\n@Owner please review the files.\n\n```ts\nawait review(files);\n```',
   });
   await client.sendBotMessage({
     botId: agent.id,

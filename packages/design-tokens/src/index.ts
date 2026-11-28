@@ -124,7 +124,7 @@ export interface BuzzAccentChoice {
 }
 
 export const buzzAccentChoices: readonly BuzzAccentChoice[] = [
-  { id: 'neutral', name: 'Gray', light: '#525252', dark: '#C7C7C7', onLight: '#FFFFFF', onDark: '#000000' },
+  { id: 'neutral', name: 'Gray', light: '#262626', dark: '#C7C7C7', onLight: '#FFFFFF', onDark: '#000000' },
   { id: '#d7d72e', name: 'Chartreuse', light: '#D7D72E', dark: '#D7D72E', onLight: '#000000', onDark: '#000000' },
   { id: '#f97316', name: 'Flame', light: '#D93A0C', dark: '#D93A0C', onLight: '#FFFFFF', onDark: '#FFFFFF' },
   { id: '#ec4899', name: 'Magenta', light: '#CC1F7A', dark: '#CC1F7A', onLight: '#FFFFFF', onDark: '#FFFFFF' },
@@ -162,7 +162,16 @@ export const buzzRadii = {
   pill: 999,
 } as const;
 
+export const buzzMessageLayout = {
+  avatar: 36, avatarGap: 12, insetX: 14, insetY: 10, widthFraction: 2 / 3,
+} as const;
+
 export const buzzTypography = {
+  message: { fontFamily: 'Inter', fontSize: 17, lineHeight: 23, letterSpacing: -0.45 },
+  author: { fontSize: 15, lineHeight: 17, fontWeight: '600' as const },
+  timestamp: { fontSize: 13.1, lineHeight: 17 },
+  channelTitle: { fontSize: 17, lineHeight: 22, letterSpacing: -0.45, fontWeight: '500' as const },
+  filter: { fontSize: 15, lineHeight: 20, fontWeight: '500' as const },
   largeTitle: { fontSize: 28, lineHeight: 34, fontWeight: '700' as const, letterSpacing: -0.4 },
   title: { fontSize: 20, lineHeight: 26, fontWeight: '600' as const, letterSpacing: -0.2 },
   titleSmall: { fontSize: 15, lineHeight: 20, fontWeight: '600' as const },
@@ -187,7 +196,7 @@ export function getBuzzColors(mode: ThemeMode): BuzzColorScheme {
 export function getBuzzAccent(accentId: string, mode: ThemeMode): { fill: string; foreground: string } {
   const match =
     buzzAccentChoices.find((c) => c.id === accentId || c.name.toLowerCase() === accentId.toLowerCase()) ??
-    buzzAccentChoices[1];
+    buzzAccentChoices[0];
   return mode === 'dark'
     ? { fill: match.dark, foreground: match.onDark }
     : { fill: match.light, foreground: match.onLight };

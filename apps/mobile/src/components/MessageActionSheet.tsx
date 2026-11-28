@@ -54,7 +54,7 @@ export function MessageActionSheet({
   if (!inThread && onReplyThread) {
     actions.push({
       key: 'thread',
-      label: 'Reply in thread',
+      label: '在话题中回复',
       icon: 'chatbubble-outline',
       onPress: () => {
         onClose();
@@ -66,7 +66,7 @@ export function MessageActionSheet({
   if (!inThread && onTogglePin) {
     actions.push({
       key: 'pin',
-      label: message.pinned ? 'Unpin message' : 'Pin message',
+      label: message.pinned ? '取消置顶' : '置顶消息',
       icon: message.pinned ? 'pin-outline' : 'pin',
       onPress: () => {
         onClose();
@@ -77,7 +77,7 @@ export function MessageActionSheet({
 
   actions.push({
     key: 'share',
-    label: 'Share / Copy text',
+    label: '分享或复制文本',
     icon: 'copy-outline',
     onPress: () => {
       onClose();
@@ -88,7 +88,7 @@ export function MessageActionSheet({
   if (isOwn && onEdit) {
     actions.push({
       key: 'edit',
-      label: 'Edit message',
+      label: '编辑消息',
       icon: 'pencil-outline',
       onPress: () => {
         onClose();
@@ -100,7 +100,7 @@ export function MessageActionSheet({
   if (isOwn && onDelete) {
     actions.push({
       key: 'delete',
-      label: 'Delete message',
+      label: '删除消息',
       icon: 'trash-outline',
       destructive: true,
       onPress: () => {

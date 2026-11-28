@@ -75,15 +75,15 @@ appId: com.bubai.app.dev
     centerElement: true
 - tapOn: "社区成员与邀请"
 - scrollUntilVisible:
-    element: "Roster guest · member"
+    element: "Roster guest · 成员"
 - scrollUntilVisible:
     element: "设为管理员"
     centerElement: true
 - tapOn: "设为管理员"
-- assertVisible: "Roster guest · admin"
+- assertVisible: "Roster guest · 管理员"
 - scrollUntilVisible:
     element: "移除成员"
     centerElement: true
 - tapOn: "移除成员"
 - tapOn: "移除"
-- assertNotVisible: "Roster guest · admin"
+- assertNotVisible: "Roster guest · 管理员"

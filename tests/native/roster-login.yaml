@@ -21,7 +21,8 @@ appId: com.bubai.app.dev
     visible:
       id: channel-row-general
     timeout: 30000
-- tapOn:
-    id: workspace-more
-- tapOn:
-    id: settings-tab
+- waitForAnimationToEnd
+- runFlow:
+    file: open-app-link.yaml
+    env:
+      LINK: "bubai://settings"

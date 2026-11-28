@@ -1,3 +1,4 @@
+import { displayLabel } from '@/services/displayLabels';
 import { useActivity } from '@/store/useActivity';
 import { buzzGrid, buzzRadii, buzzTypography } from '@buzz-botmux/design-tokens';
 import { Ionicons } from '@expo/vector-icons';
@@ -178,7 +179,7 @@ export default function ActivityScreen() {
                       {s.workingDir || s.sessionId}
                     </Text>
                   </View>
-                  <BuzzBadge label={state} tone={isLive ? 'success' : 'neutral'} />
+                  <BuzzBadge label={displayLabel(state)} tone={isLive ? 'success' : 'neutral'} />
                 </Pressable>
               );
             })

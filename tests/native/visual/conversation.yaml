@@ -1,10 +1,19 @@
 appId: com.bubai.app.dev
 ---
+- stopApp
 - runScript: find-discussion.js
 - runScript: read-thread.js
 - runFlow: ../open-workspace.yaml
 - waitForAnimationToEnd
 - takeScreenshot: 01-home
+- tapOn:
+    id: workspace-more
+- assertVisible: "切换社区"
+- assertVisible: "外观"
+- waitForAnimationToEnd
+- takeScreenshot: 04-more
+- tapOn:
+    point: "50%,20%"
 - tapOn:
     id: channel-row-native-discussion
 - assertVisible: ".*Native review.*"

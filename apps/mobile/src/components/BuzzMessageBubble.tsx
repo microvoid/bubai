@@ -4,11 +4,12 @@ import { SwipeReply } from './SwipeReply';
 import { attachmentSource, openAttachment } from '../services/attachments';
 import { useBubai } from '../store/BubaiProvider';
 import type { ChatMessage, MessageAttachment, Participant } from '@buzz-botmux/chat-client';
-import { buzzGrid, buzzRadii, buzzTypography } from '@buzz-botmux/design-tokens';
+import { buzzMessageLayout, buzzGrid, buzzRadii, buzzTypography } from '@buzz-botmux/design-tokens';
 import { Ionicons } from '@expo/vector-icons';
 import * as Haptics from 'expo-haptics';
 import React from 'react';
 import {
+  useWindowDimensions,
   Linking,
   Alert,
   Image,
@@ -50,15 +51,20 @@ function MessageContent({
   codeBg: string;
 }) {
   return <Markdown style={{
-    body: { color: textColor, fontFamily:'Inter', fontSize:17, lineHeight:23, letterSpacing:-0.45 },
-    paragraph: {marginTop:0,marginBottom:4},
-    heading1: {fontSize:22,lineHeight:28,fontWeight:'600'},
-    heading2: {fontSize:20,lineHeight:26,fontWeight:'600'},
-    heading3: {fontSize:18,lineHeight:24,fontWeight:'600'},
-    heading4: {fontSize:17,lineHeight:23,fontWeight:'600'},
-    heading5: {fontSize:17,lineHeight:23,fontWeight:'500'},
-    heading6: {fontSize:17,lineHeight:23,fontWeight:'500'}, code_inline: { backgroundColor: codeBg, color: textColor },
-    fence: { backgroundColor: codeBg, color: textColor },
+    body: { ...buzzTypography.message, color: textColor },
+    paragraph: { marginTop: 0, marginBottom: 0 },
+    heading1: { fontSize: 20, lineHeight: 25, fontWeight: '600' },
+    heading2: { fontSize: 18, lineHeight: 24, fontWeight: '600' },
+    heading3: { fontSize: 17, lineHeight: 23, fontWeight: '600' },
+    heading4: buzzTypography.author, heading5: buzzTypography.author, heading6: buzzTypography.author,
+    code_inline: { color: textColor, backgroundColor: codeBg, borderRadius: buzzRadii.xs, borderWidth: 0 },
+    fence: { color: textColor, backgroundColor: codeBg, padding: 8, borderRadius: buzzRadii.xs, borderWidth: 0 },
+    blockquote: { backgroundColor: codeBg, borderLeftColor: textColor, borderLeftWidth: 2, paddingHorizontal: 8 },
+    bullet_list: { marginVertical: 3 }, ordered_list: { marginVertical: 3 },
+    link: { color: textColor, textDecorationLine: 'underline' },
+    hr: { backgroundColor: textColor, height: StyleSheet.hairlineWidth, opacity: 0.4 },
+    table: { borderColor: textColor, borderRadius: buzzRadii.xs, borderWidth: StyleSheet.hairlineWidth },
+    tr: { borderColor: textColor, borderBottomWidth: StyleSheet.hairlineWidth },
   }} onLinkPress={url => {
     if (/^https?:\/\//i.test(url)) void Linking.openURL(url).catch(error => Alert.alert('打开失败', String(error)));
     return false;
@@ -99,8 +105,9 @@ export function BuzzMessageBubble({
   onOpenAgentProfile,
   onOpenTerminal,
 }: BuzzMessageBubbleProps) {
-  const { authToken } = useBubai();
+  const { authToken, participants } = useBubai();
   const { colors, accent } = useBuzzTheme();
+  const { width } = useWindowDimensions();
   const isAgent = message.senderRole === 'agent';
   const isOwn = !isAgent && message.senderId === currentUserId;
   const senderName = sender?.name || message.senderId;
@@ -148,7 +155,7 @@ export function BuzzMessageBubble({
                 <BuzzAvatar
                   name={senderName}
                   uri={sender?.avatarUrl}
-                  size={36}
+                  size={buzzMessageLayout.avatar}
                   isAgent={isAgent}
                   status={isAgent ? sender?.status : undefined}
                 />
@@ -157,7 +164,7 @@ export function BuzzMessageBubble({
           </View>
         )}
 
-        <View style={[styles.column, isOwn && styles.columnOwn]}>
+        <View style={[styles.column, { maxWidth: width * buzzMessageLayout.widthFraction }, isOwn && styles.columnOwn]}>
           {/* Byline */}
           {!stackPrevious && !isOwn && (
             <View style={styles.byline}>
@@ -169,7 +176,7 @@ export function BuzzMessageBubble({
                 {isAgent && (
                   <Ionicons name="hardware-chip-outline" size={12} color={colors.onSurfaceVariant} />
                 )}
-                <Text style={[{fontSize:15,lineHeight:17,fontWeight:"600"}, { color: colors.onSurfaceVariant }]}>
+                <Text style={[buzzTypography.author, { color: colors.onSurfaceVariant }]}>
                   {senderName}
                 </Text>
                 {isAgent && sender?.cliId && (
@@ -202,10 +209,7 @@ export function BuzzMessageBubble({
               styles.bubble,
               {
                 backgroundColor: bubbleBg,
-                borderTopLeftRadius: !isOwn && stackPrevious ? 6 : 18,
-                borderBottomLeftRadius: !isOwn && stackNext ? 6 : 18,
-                borderTopRightRadius: isOwn && stackPrevious ? 6 : 18,
-                borderBottomRightRadius: isOwn && stackNext ? 6 : 18,
+                borderRadius: buzzRadii.card,
                 opacity: pressed ? 0.88 : 1,
               },
             ]}
@@ -326,10 +330,13 @@ export function BuzzMessageBubble({
           {!inThread && (message.replyCount ?? 0) > 0 && onOpenThread && (
             <Pressable
               onPress={() => onOpenThread(message)}
-              style={[styles.threadPill, { borderLeftColor: colors.outline, borderLeftWidth: 2 }]}
+              style={[styles.threadPill, {alignSelf: isOwn ? 'flex-end' : 'flex-start'}]}
             >
-              <Ionicons name="chatbubble-outline" size={12} color={colors.tertiary} />
-              <Text style={[buzzTypography.micro, { color: colors.onSurfaceVariant }]}>
+              {Array.from(new Set(message.replyPreviews?.map(reply => reply.senderId))).slice(0, 3).map(id => {
+                const person = participants.find(p => p.id === id);
+                return <View key={id} accessible={false} importantForAccessibility="no-hide-descendants"><BuzzAvatar size={18} name={person?.name || id} uri={person?.avatarUrl} isAgent={person?.role === 'agent'} /></View>;
+              })}
+              <Text numberOfLines={2} style={[buzzTypography.caption, { flexShrink: 1, color: colors.onSurfaceVariant }]}>
                 {message.replyCount} 条回复
                 {message.unreadReplyCount ? ` · ${message.unreadReplyCount} 未读` : ''}
                 {message.replyPreviews?.map(reply => `\n${reply.content || reply.card?.title || '附件'}`).join('')}
@@ -360,7 +367,7 @@ const styles = StyleSheet.create({
   row: {
     flexDirection: 'row',
     alignItems: 'flex-end',
-    gap: 12,
+    gap: buzzMessageLayout.avatarGap,
   },
   rowOwn: {
     justifyContent: 'flex-end',
@@ -369,12 +376,11 @@ const styles = StyleSheet.create({
     justifyContent: 'flex-start',
   },
   avatarSlot: {
-    width: 36,
+    width: buzzMessageLayout.avatar,
     alignItems: 'center',
     justifyContent: 'flex-end',
   },
   column: {
-    maxWidth: '67%',
     gap: 4,
   },
   columnOwn: {
@@ -398,8 +404,8 @@ const styles = StyleSheet.create({
     paddingLeft: 4,
   },
   bubble: {
-    paddingHorizontal: 14,
-    paddingVertical: 10,
+    paddingHorizontal: buzzMessageLayout.insetX,
+    paddingVertical: buzzMessageLayout.insetY,
     gap: 6,
   },
   terminalChip: {
@@ -413,8 +419,7 @@ const styles = StyleSheet.create({
     marginTop: 4,
   },
   ownTime: {
-    fontSize: 13,
-    lineHeight: 17,
+    ...buzzTypography.timestamp,
     opacity: 0.65,
     alignSelf: 'flex-end',
   },
@@ -465,9 +470,7 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     gap: 5,
     alignSelf: 'flex-start',
-    paddingHorizontal: 10,
     paddingVertical: 5,
-    marginLeft: 10,
     marginTop: 4,
   },
 });

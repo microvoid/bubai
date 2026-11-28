@@ -1,3 +1,4 @@
+import { FrostedSurface } from '@/components/FrostedSurface';
 import { useTimeline,type LocalMessage } from '@/store/localTimeline';
 import { useMessageActions, useMessageScroll } from '@/store/useMessageActions';
 import type { ChatMessage, Participant } from '@buzz-botmux/chat-client';
@@ -118,6 +119,8 @@ export default function ThreadScreen() {
   }, [channelId, rootId, subscribeWsEvents, markThreadRead, router, setRoot, setReplies]);
 
 
+  const channel = channels.find(item => item.id === channelId);
+  const channelLabel = channel?.kind === 'dm' ? participantMap.get(channel.memberIds?.find(id => id !== currentUserId) || '')?.name || channel.topic || channel.name : channel && `#${channel.name}`;
   const scroll = useMessageScroll(allItems, messageId);
 
   return (
@@ -128,12 +131,13 @@ export default function ThreadScreen() {
       ]}
     >
       <View style={[styles.header, { borderBottomColor: colors.outline }]}>
+        <FrostedSurface />
         <Pressable onPress={() => router.back()} style={styles.iconBtn} hitSlop={8}>
           <Ionicons name="chevron-back" size={24} color={colors.onSurface} />
         </Pressable>
-        <Text style={[buzzTypography.titleSmall, { color: colors.onSurface, flex: 1 }]}>
-          话题
-        </Text>
+        <View style={{ flex: 1 }}><Text style={[buzzTypography.titleSmall, { color: colors.onSurface }]}>话题</Text>
+          {!!channelLabel && <Text numberOfLines={1} style={[buzzTypography.caption, { color: colors.onSurfaceVariant }]}>{channelLabel}</Text>}
+        </View>
       </View>
 
       <KeyboardAvoidingView

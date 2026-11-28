@@ -1,3 +1,4 @@
+import { Ionicons } from "@expo/vector-icons";
 import { buzzGrid, buzzRadii, buzzTypography } from '@buzz-botmux/design-tokens';
 import * as Haptics from 'expo-haptics';
 import React from 'react';
@@ -97,7 +98,7 @@ export function BuzzFilterPill({
     >
       <Text
         style={[
-          buzzTypography.label,
+          buzzTypography.filter,
           { color: selected ? colors.onPrimary : colors.onSurfaceVariant },
         ]}
       >
@@ -110,22 +111,27 @@ export function BuzzFilterPill({
 
 export function BuzzSectionGroup({
   title,
+  collapsible = false,
   children,
   style,
 }: {
   title?: string;
+  collapsible?: boolean;
   children: React.ReactNode;
   style?: ViewStyle;
 }) {
   const { colors } = useBuzzTheme();
+  const [expanded, setExpanded] = React.useState(true);
   return (
     <View style={[styles.sectionWrap, style]}>
-      {title && (
+      {title && (collapsible ? <Pressable accessibilityRole="button" accessibilityState={{expanded}} onPress={() => setExpanded(!expanded)} style={{flexDirection:'row', alignItems:'center', minHeight:36, gap:6}}>
+          <Text style={[buzzTypography.author,{color:colors.onSurfaceVariant}]}>{title}</Text><Ionicons name={expanded ? "chevron-down" : "chevron-forward"} size={14} color={colors.onSurfaceVariant} />
+        </Pressable> : (
         <Text style={[buzzTypography.caption, styles.sectionTitle, { color: colors.onSurfaceVariant }]}>
           {title}
         </Text>
-      )}
-      <View
+      ))}
+      {expanded && <View
         style={[
           styles.sectionCard,
           {
@@ -135,7 +141,7 @@ export function BuzzSectionGroup({
         ]}
       >
         {children}
-      </View>
+      </View>}
     </View>
   );
 }

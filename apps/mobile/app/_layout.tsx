@@ -1,3 +1,4 @@
+import { GestureHandlerRootView } from 'react-native-gesture-handler';
 import { useFonts } from 'expo-font';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import * as Notifications from 'expo-notifications';
@@ -99,7 +100,7 @@ export default function RootLayout() {
 
   if (!fontsReady && !fontError) return null;
   return (
-    <SafeAreaProvider>
+    <GestureHandlerRootView style={{ flex: 1 }}><SafeAreaProvider>
       <QueryClientProvider client={queryClient}>
         <BuzzThemeProvider>
           <BubaiProvider>
@@ -107,6 +108,6 @@ export default function RootLayout() {
           </BubaiProvider>
         </BuzzThemeProvider>
       </QueryClientProvider>
-    </SafeAreaProvider>
+    </SafeAreaProvider></GestureHandlerRootView>
   );
 }

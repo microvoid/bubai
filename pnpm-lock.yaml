@@ -61,6 +61,9 @@ importers:
       expo-audio:
         specifier: ~0.4.9
         version: 0.4.9(expo@53.0.27(@babel/core@7.29.13)(@expo/metro-runtime@5.0.4(react-native@0.79.2(@babel/core@7.29.13)(@types/react@19.3.0)(react@19.0.0)))(react-native-webview@13.13.5(react-native@0.79.2(@babel/core@7.29.13)(@types/react@19.3.0)(react@19.0.0))(react@19.0.0))(react-native@0.79.2(@babel/core@7.29.13)(@types/react@19.3.0)(react@19.0.0))(react@19.0.0))(react-native@0.79.2(@babel/core@7.29.13)(@types/react@19.3.0)(react@19.0.0))(react@19.0.0)
+      expo-blur:
+        specifier: ~14.1.5
+        version: 14.1.5(expo@53.0.27(@babel/core@7.29.13)(@expo/metro-runtime@5.0.4(react-native@0.79.2(@babel/core@7.29.13)(@types/react@19.3.0)(react@19.0.0)))(react-native-webview@13.13.5(react-native@0.79.2(@babel/core@7.29.13)(@types/react@19.3.0)(react@19.0.0))(react@19.0.0))(react-native@0.79.2(@babel/core@7.29.13)(@types/react@19.3.0)(react@19.0.0))(react@19.0.0))(react-native@0.79.2(@babel/core@7.29.13)(@types/react@19.3.0)(react@19.0.0))(react@19.0.0)
       expo-constants:
         specifier: ~17.1.6
         version: 17.1.8(expo@53.0.27(@babel/core@7.29.13)(@expo/metro-runtime@5.0.4(react-native@0.79.2(@babel/core@7.29.13)(@types/react@19.3.0)(react@19.0.0)))(react-native-webview@13.13.5(react-native@0.79.2(@babel/core@7.29.13)(@types/react@19.3.0)(react@19.0.0))(react@19.0.0))(react-native@0.79.2(@babel/core@7.29.13)(@types/react@19.3.0)(react@19.0.0))(react@19.0.0))(react-native@0.79.2(@babel/core@7.29.13)(@types/react@19.3.0)(react@19.0.0))
@@ -115,6 +118,9 @@ importers:
       react-native:
         specifier: 0.79.2
         version: 0.79.2(@babel/core@7.29.13)(@types/react@19.3.0)(react@19.0.0)
+      react-native-gesture-handler:
+        specifier: ~2.24.0
+        version: 2.24.0(react-native@0.79.2(@babel/core@7.29.13)(@types/react@19.3.0)(react@19.0.0))(react@19.0.0)
       react-native-markdown-display:
         specifier: 7.0.2
         version: 7.0.2(react-native@0.79.2(@babel/core@7.29.13)(@types/react@19.3.0)(react@19.0.0))(react@19.0.0)
@@ -1160,6 +1166,10 @@ packages:
 
   '@drizzle-team/brocli@0.10.2':
     resolution: {integrity: sha512-z33Il7l5dKjUgGULTqBsQBQwckHh5AbIuxhdsIxDDiZAzBOrZO6q9ogcWC65kU382AfynTfgNumVcNIjuIua6w==}
+
+  '@egjs/hammerjs@2.0.17':
+    resolution: {integrity: sha512-XQsZgjm2EcVUiZQf11UBJQfmZeEmOW8DpI1gsFeln6w0ae0ii4dMQEQ0kjl6DspdWX1aGY1/loyXnP0JS06e/A==}
+    engines: {node: '>=0.8.0'}
 
   '@electric-sql/pglite@0.5.8':
     resolution: {integrity: sha512-n9tsbUOhwx2epK1V0ZG9Ar4SHWUju04dhmzZXiSBXwBoleOvIfals33NAaWgagQVAL4Rbvx/Ptsu3P+pA09f6Q==}
@@ -2560,6 +2570,9 @@ packages:
   '@types/graceful-fs@4.1.9':
     resolution: {integrity: sha512-olP3sd1qOEe5dXTSaFvQG+02VdRXcdytWLAZsAq1PecU8uqQAhkrnbli7DagjtXKW/Bl7YJbUsa8MPcuc8LHEQ==}
 
+  '@types/hammerjs@2.0.46':
+    resolution: {integrity: sha512-ynRvcq6wvqexJ9brDMS4BnBLzmr0e14d6ZJTEShTBWKymQiHwlAyGu0ZPEFI2Fh1U53F7tN9ufClWM5KvqkKOw==}
+
   '@types/hast@3.0.5':
     resolution: {integrity: sha512-rp/ezSWaD1m44dPKICGhiskI13nVr7qTloFwDa/IYkhhf5nzwP+zIQcIJh3WIFSBOy/H1PzB40jPjMDksN4F+g==}
 
@@ -3589,6 +3602,13 @@ packages:
       react: '*'
       react-native: '*'
 
+  expo-blur@14.1.5:
+    resolution: {integrity: sha512-CCLJHxN4eoAl06ESKT3CbMasJ98WsjF9ZQEJnuxtDb9ffrYbZ+g9ru84fukjNUOTtc8A8yXE5z8NgY1l0OMrmQ==}
+    peerDependencies:
+      expo: '*'
+      react: '*'
+      react-native: '*'
+
   expo-constants@17.1.8:
     resolution: {integrity: sha512-sOCeMN/BWLA7hBP6lMwoEQzFNgTopk6YY03sBAmwT216IHyL54TjNseg8CRU1IQQ/+qinJ2fYWCl7blx2TiNcA==}
     peerDependencies:
@@ -3964,6 +3984,9 @@ packages:
 
   hermes-parser@0.29.1:
     resolution: {integrity: sha512-xBHWmUtRC5e/UL0tI7Ivt2riA/YBq9+SiYFU7C1oBa/j2jYGlIF9043oak1F47ihuDIxQ5nbsKueYJDRY02UgA==}
+
+  hoist-non-react-statics@3.3.2:
+    resolution: {integrity: sha512-/gGivxi8JPKWNm/W0jSmzcMPpfpPLc3dY/6GxhX2hQ9iGj3aDfklV4ET7NjKpSinLpJ5vafa9iiGIEZg10SfBw==}
 
   hono@4.13.21:
     resolution: {integrity: sha512-h9UsguqfVk4kjUwLvQpHOmOaJpW10jz9lp8bvKUUa04wJG/fabKFBqXZ06D6LFaeKQZtUZRVeg0gfkTTEsX7Mw==}
@@ -5185,6 +5208,12 @@ packages:
 
   react-native-fit-image@1.5.5:
     resolution: {integrity: sha512-Wl3Vq2DQzxgsWKuW4USfck9zS7YzhvLNPpkwUUCF90bL32e1a0zOVQ3WsJILJOwzmPdHfzZmWasiiAUNBkhNkg==}
+
+  react-native-gesture-handler@2.24.0:
+    resolution: {integrity: sha512-ZdWyOd1C8axKJHIfYxjJKCcxjWEpUtUWgTOVY2wynbiveSQDm8X/PDyAKXSer/GOtIpjudUbACOndZXCN3vHsw==}
+    peerDependencies:
+      react: '*'
+      react-native: '*'
 
   react-native-is-edge-to-edge@1.3.1:
     resolution: {integrity: sha512-NIXU/iT5+ORyCc7p0z2nnlkouYKX425vuU1OEm6bMMtWWR9yvb+Xg5AZmImTKoF9abxCPqrKC3rOZsKzUYgYZA==}
@@ -7012,6 +7041,10 @@ snapshots:
 
   '@drizzle-team/brocli@0.10.2': {}
 
+  '@egjs/hammerjs@2.0.17':
+    dependencies:
+      '@types/hammerjs': 2.0.46
+
   '@electric-sql/pglite@0.5.8': {}
 
   '@emoji-mart/data@1.2.1': {}
@@ -8426,6 +8459,8 @@ snapshots:
     dependencies:
       '@types/node': 22.20.5
 
+  '@types/hammerjs@2.0.46': {}
+
   '@types/hast@3.0.5':
     dependencies:
       '@types/unist': 3.0.3
@@ -9457,6 +9492,12 @@ snapshots:
       react: 19.0.0
       react-native: 0.79.2(@babel/core@7.29.13)(@types/react@19.3.0)(react@19.0.0)
 
+  expo-blur@14.1.5(expo@53.0.27(@babel/core@7.29.13)(@expo/metro-runtime@5.0.4(react-native@0.79.2(@babel/core@7.29.13)(@types/react@19.3.0)(react@19.0.0)))(react-native-webview@13.13.5(react-native@0.79.2(@babel/core@7.29.13)(@types/react@19.3.0)(react@19.0.0))(react@19.0.0))(react-native@0.79.2(@babel/core@7.29.13)(@types/react@19.3.0)(react@19.0.0))(react@19.0.0))(react-native@0.79.2(@babel/core@7.29.13)(@types/react@19.3.0)(react@19.0.0))(react@19.0.0):
+    dependencies:
+      expo: 53.0.27(@babel/core@7.29.13)(@expo/metro-runtime@5.0.4(react-native@0.79.2(@babel/core@7.29.13)(@types/react@19.3.0)(react@19.0.0)))(react-native-webview@13.13.5(react-native@0.79.2(@babel/core@7.29.13)(@types/react@19.3.0)(react@19.0.0))(react@19.0.0))(react-native@0.79.2(@babel/core@7.29.13)(@types/react@19.3.0)(react@19.0.0))(react@19.0.0)
+      react: 19.0.0
+      react-native: 0.79.2(@babel/core@7.29.13)(@types/react@19.3.0)(react@19.0.0)
+
   expo-constants@17.1.8(expo@53.0.27(@babel/core@7.29.13)(@expo/metro-runtime@5.0.4(react-native@0.79.2(@babel/core@7.29.13)(@types/react@19.3.0)(react@19.0.0)))(react-native-webview@13.13.5(react-native@0.79.2(@babel/core@7.29.13)(@types/react@19.3.0)(react@19.0.0))(react@19.0.0))(react-native@0.79.2(@babel/core@7.29.13)(@types/react@19.3.0)(react@19.0.0))(react@19.0.0))(react-native@0.79.2(@babel/core@7.29.13)(@types/react@19.3.0)(react@19.0.0)):
     dependencies:
       '@expo/config': 11.0.13
@@ -9986,6 +10027,10 @@ snapshots:
   hermes-parser@0.29.1:
     dependencies:
       hermes-estree: 0.29.1
+
+  hoist-non-react-statics@3.3.2:
+    dependencies:
+      react-is: 16.13.1
 
   hono@4.13.21: {}
 
@@ -11523,6 +11568,14 @@ snapshots:
   react-native-fit-image@1.5.5:
     dependencies:
       prop-types: 15.8.1
+
+  react-native-gesture-handler@2.24.0(react-native@0.79.2(@babel/core@7.29.13)(@types/react@19.3.0)(react@19.0.0))(react@19.0.0):
+    dependencies:
+      '@egjs/hammerjs': 2.0.17
+      hoist-non-react-statics: 3.3.2
+      invariant: 2.2.4
+      react: 19.0.0
+      react-native: 0.79.2(@babel/core@7.29.13)(@types/react@19.3.0)(react@19.0.0)
 
   react-native-is-edge-to-edge@1.3.1(react-native@0.79.2(@babel/core@7.29.13)(@types/react@19.3.0)(react@19.0.0))(react@19.0.0):
     dependencies:

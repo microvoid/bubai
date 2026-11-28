@@ -3,7 +3,7 @@ import { CommunityMembers } from '@/components/CommunityMembers';
 import { buzzAccentChoices, buzzGrid, buzzRadii, buzzTypography } from '@buzz-botmux/design-tokens';
 import { Ionicons } from '@expo/vector-icons';
 import * as Haptics from 'expo-haptics';
-import { useRouter } from 'expo-router';
+import { useLocalSearchParams, useRouter } from 'expo-router';
 import React, { useState } from 'react';
 import { Alert, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
@@ -14,12 +14,14 @@ import { useBubai } from '@/store/BubaiProvider';
 import { type ThemePreference, useBuzzTheme } from '@/theme/ThemeProvider';
 
 const MODE_OPTIONS: Array<{ id: ThemePreference; label: string }> = [
-  { id: 'system', label: 'System' },
-  { id: 'light', label: 'Light' },
-  { id: 'dark', label: 'Dark' },
+  { id: 'system', label: '跟随系统' },
+  { id: 'light', label: '浅色' },
+  { id: 'dark', label: '深色' },
 ];
 
 export default function SettingsScreen() {
+  const { section } = useLocalSearchParams<{section?: string}>();
+  const scroll = React.useRef<ScrollView>(null);
   const router = useRouter();
   const { colors, mode, preference, accentId, setPreference, setAccentId } = useBuzzTheme();
   const {
@@ -41,7 +43,7 @@ export default function SettingsScreen() {
         <Text style={[buzzTypography.largeTitle, { color: colors.onSurface }]}>设置</Text>
       </View>
 
-      <ScrollView contentContainerStyle={styles.content}>
+      <ScrollView ref={scroll} contentContainerStyle={styles.content}>
         <BuzzSectionGroup title="连接">
           <Pressable
             onPress={() => router.push('/connect')}
@@ -74,11 +76,12 @@ export default function SettingsScreen() {
               服务连接
             </Text>
             <Text style={[buzzTypography.caption, { color: colors.onSurfaceVariant }]}>
-              {wsState}
+              {({connecting:'连接中',open:'已连接',reconnecting:'重新连接中',closed:'已断开'})[wsState]}
             </Text>
           </View>
         </BuzzSectionGroup>
 
+        <View onLayout={event => { if (section === 'appearance') scroll.current?.scrollTo({ y: event.nativeEvent.layout.y, animated: false }); }} />
         <BuzzSectionGroup title="外观">
           <View style={styles.segmentWrap}>
             {MODE_OPTIONS.map((opt) => {

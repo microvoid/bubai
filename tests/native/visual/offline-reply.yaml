@@ -32,6 +32,7 @@ appId: com.bubai.app.dev
 - assertVisible: ".*Native review.*"
 - tapOn:
     id: message-input
+- eraseText
 - evalScript: ${output.offline = 'Queued offline ' + Date.now()}
 - inputText: "${output.offline}"
 - tapOn:
@@ -59,3 +60,4 @@ appId: com.bubai.app.dev
     timeout: 30000
 - assertVisible: "${output.offline}.*"
 - assertVisible: "已发送.*"
+- runScript: check-delivery.js

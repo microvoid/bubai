@@ -1,5 +1,7 @@
 appId: com.bubai.app.dev
 ---
+- runScript: find-discussion.js
+- runScript: read-thread.js
 - runFlow: ../open-workspace.yaml
 - waitForAnimationToEnd
 - takeScreenshot: 01-home

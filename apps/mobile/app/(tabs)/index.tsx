@@ -19,10 +19,9 @@ import {
   TouchableOpacity,
   View,
 } from 'react-native';
-import { SafeAreaView } from 'react-native-safe-area-context';
+import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
 import { BuzzAvatar } from '@/components/BuzzAvatar';
 import {
-  BuzzConnectionPill,
   BuzzCountBadge,
   BuzzFilterPill,
   BuzzSectionGroup,
@@ -33,6 +32,7 @@ import { useBuzzTheme } from '@/theme/ThemeProvider';
 type FilterMode = 'all' | 'unread' | 'channels' | 'dms';
 
 export default function MessagesScreen() {
+  const insets = useSafeAreaInsets();
   const router = useRouter();
   const { colors } = useBuzzTheme();
   const {
@@ -173,7 +173,7 @@ export default function MessagesScreen() {
           />
         }
       >
-        {error && (
+        {error && !channels.length && (
           <TouchableOpacity
             onPress={() => router.push('/connect')}
             style={[
@@ -305,6 +305,15 @@ export default function MessagesScreen() {
         )}
       </ScrollView>
 
+      {error && channels.length > 0 && (
+        <Pressable accessibilityRole="button" onPress={() => router.push('/connect')}
+          style={[styles.cachedStatus,{bottom:Math.max(12,insets.bottom)+72,backgroundColor:colors.surfaceContainerHigh}]}>
+          <Ionicons name="cloud-offline-outline" size={16} color={colors.onSurfaceVariant}/>
+          <Text style={[buzzTypography.caption,{color:colors.onSurfaceVariant}]}>
+            {wsState === 'open' ? '同步暂时不可用' : '离线 · 显示已缓存的内容'}
+          </Text>
+        </Pressable>
+      )}
       <WorkspaceDock onCreate={()=>setCreateOpen(true)} />
 
       {/* New Channel / Start Agent DM Modal */}
@@ -453,6 +462,10 @@ const styles = StyleSheet.create({
     paddingHorizontal: buzzGrid.gutter,
     paddingBottom: 110,
     gap: buzzGrid.inventorySectionTopInset,
+  },
+  cachedStatus: {
+    position: 'absolute', alignSelf: 'center', flexDirection: 'row', gap: 6, alignItems: 'center',
+    borderRadius: 20, paddingHorizontal: 12, paddingVertical: 6,
   },
   errorBanner: {
     flexDirection: 'row',

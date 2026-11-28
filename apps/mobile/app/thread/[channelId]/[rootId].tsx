@@ -137,7 +137,7 @@ export default function ThreadScreen() {
 
       <KeyboardAvoidingView
         style={{ flex: 1 }}
-        behavior={Platform.OS === 'ios' ? 'padding' : undefined}
+        behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
       >
         {loading && !allItems.length ? (
           <View style={styles.center}>

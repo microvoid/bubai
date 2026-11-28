@@ -67,16 +67,17 @@ export default function ThreadScreen() {
   const loaded = useRef(false);
   const loadThread = useCallback(async () => {
     if (!client || !channelId || !rootId) return;
+    const atRequest = snapshot();
     if (!loaded.current) setLoading(true);
     try {
       const data = await client.getThread(channelId, rootId);
       loaded.current = true;
-      reconcile([data.root,...(data.replies??[])]);
+      reconcile([data.root,...(data.replies??[])], atRequest);
       markThreadRead(channelId, rootId);
     } finally {
       setLoading(false);
     }
-  }, [channelId, client, rootId, markThreadRead, reconcile]);
+  }, [channelId, client, rootId, markThreadRead, reconcile, snapshot]);
 
   useEffect(() => {
     if (!loaded.current || wsState === 'open') void loadThread().catch(error => {

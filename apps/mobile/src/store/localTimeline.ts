@@ -1,3 +1,5 @@
+import { reconcileTimeline, type LocalMessage } from './reconcileTimeline';
+export type { LocalMessage } from './reconcileTimeline';
 import Storage from 'expo-sqlite/kv-store';
 import { useMemo, useSyncExternalStore } from 'react';
 import type { ChatMessage } from '@buzz-botmux/chat-client';
@@ -16,9 +18,6 @@ export function saveSnapshot(key: string, value: unknown) {
   Storage.setItemSync(key, JSON.stringify(value));
 }
 
-export type LocalMessage = ChatMessage & {
-  delivery?: 'sending' | 'queued' | 'failed';
-};
 type Settlement = (id: string, failed: boolean) => void;
 const mounted = new Map<string, Set<Settlement>>();
 export function settleQueued(key: string, id: string, failed: boolean) {
@@ -102,13 +101,8 @@ export function useTimeline(
         };
       },
       update,
-      reconcile: (canonical: ChatMessage[]) =>
-        update((prev) => [
-          ...canonical,
-          ...prev.filter(
-            (row) => row.delivery && !canonical.some((x) => x.id === row.id),
-          ),
-        ]),
+      reconcile: (canonical: ChatMessage[], atRequest: LocalMessage[]) =>
+        update(current => reconcileTimeline(canonical, atRequest, current)),
     };
   }, [key, root]);
   const rows = useSyncExternalStore(store.subscribe, store.snapshot);

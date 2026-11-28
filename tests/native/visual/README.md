@@ -1,6 +1,6 @@
 # Buzz 移动端视觉回归
 
-使用 `tests/native/fixtures.ts` 输出的 OPEN_SERVER、FAULT_SERVER 和已安装开发包的模拟器。测试数据会写入临时工作区。
+使用 `tests/native/fixtures.ts` 输出的 OPEN_SERVER、FAULT_SERVER 和已安装开发包的模拟器。视觉比对使用全新测试工作区。截图前会统一话题已读状态，避免未读数字改变回复预览的宽度。
 
 ```sh
 maestro test -e OPEN_SERVER="$OPEN_SERVER" --test-output-dir captures tests/native/visual/conversation.yaml

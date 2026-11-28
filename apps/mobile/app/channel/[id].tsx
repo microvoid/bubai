@@ -105,6 +105,7 @@ export default function ChannelScreen() {
   const loadInitial = useCallback(async () => {
     if (!client || !channelId) return;
     const version = ++loadVersion.current;
+    const atRequest = snapshot();
     if (!loaded.current) setLoading(true);
     try {
       const [msgRes, pinRes, memRes] = await Promise.all([
@@ -123,7 +124,7 @@ export default function ChannelScreen() {
       }
       if (!focused.current || version !== loadVersion.current) return;
       loaded.current = true;
-      reconcile(history);
+      reconcile(history, atRequest);
       setHasMore(Boolean(page.hasMore));
       setNextCursorId(page.nextCursorId);
       setNextCursor(page.nextCursor ?? null);
@@ -133,7 +134,7 @@ export default function ChannelScreen() {
     } finally {
       if (version === loadVersion.current) setLoading(false);
     }
-  }, [channelId, clearChannelUnread, client, currentUserId, messageId, reconcile]);
+  }, [channelId, clearChannelUnread, client, currentUserId, messageId, reconcile, snapshot]);
 
   useFocusEffect(useCallback(() => {
     focused.current = true;

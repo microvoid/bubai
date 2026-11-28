@@ -7,13 +7,17 @@ appId: com.bubai.app.dev
     commands:
       - tapOn: "以后|Not Now"
 - extendedWaitUntil:
-    visible: "Live|Sign in to Bubai|Connect to Bubai"
+    visible: "更多|登录 Bubai|连接 Bubai"
     timeout: 30000
 - runFlow:
     when:
-      visible: Live
+      visible:
+        id: workspace-more
     commands:
-      - tapOn: Live
+      - tapOn:
+          id: workspace-more
+      - tapOn:
+          id: change-connection
 - runFlow:
     when:
       visible:

@@ -1,0 +1,30 @@
+appId: com.bubai.app.dev
+---
+- runScript: find-discussion.js
+- runFlow: ../open-workspace.yaml
+- tapOn:
+    id: channel-row-native-discussion
+- tapOn: "(?s).*条回复.*"
+- tapOn:
+    id: message-input
+- inputText: "Looks good on mobile."
+- tapOn:
+    id: send-message
+- assertVisible: "已发送.*"
+- stopApp
+- launchApp
+- extendedWaitUntil:
+    visible:
+      id: workspace-more
+    timeout: 20000
+- runFlow:
+    file: ../open-app-link.yaml
+    env:
+      LINK: "bubai://thread/${output.discussion}/${output.root}"
+- assertVisible: ".*Looks good on mobile.*"
+- waitForAnimationToEnd
+- takeScreenshot: 04-sent
+- longPressOn: "Looks good on mobile.*"
+- tapOn:
+    id: message-action-delete
+- tapOn: "删除"

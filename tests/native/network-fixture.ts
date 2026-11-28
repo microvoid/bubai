@@ -16,14 +16,16 @@ export function networkFixture(upstream: string, channelId: string, rootId: stri
       if (url.pathname === '/test/session-mode' && request.method === 'POST') {
         const next = (await request.json()) as { mode: string };
         if (
-          !['normal', 'session-outage', 'list-outage', 'expired', 'observe'].includes(next.mode)
+          !['normal', 'session-outage', 'list-outage', 'expired', 'observe', 'offline'].includes(next.mode)
         ) {
           return new Response(null, { status: 400 });
         }
         mode = next.mode;
+        if (mode === 'offline') for (const socket of sockets) socket.close();
         if (mode === 'observe') receivedBearer = false;
         return Response.json({ ok: true });
       }
+      if (mode === 'offline') return new Response(null, { status: 503 });
       if (url.pathname === '/test/observations')
         return Response.json({ unexpectedCreates, receivedBearer });
       if (

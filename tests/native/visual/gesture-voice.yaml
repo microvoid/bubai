@@ -1,0 +1,17 @@
+appId: com.bubai.app.dev
+---
+- runFlow: ../open-workspace.yaml
+- tapOn: "智能体语音"
+- tapOn: "Local Fixture"
+- assertVisible: "开始录音"
+- tapOn: "取消"
+- tapOn:
+    id: channel-row-native-discussion
+- assertVisible: ".*Native review.*"
+- swipe:
+    from:
+      text: "(?s).*Native review.*"
+    direction: LEFT
+    duration: 350
+- assertVisible: "话题"
+- assertVisible: ".*Preview from a colleague.*"

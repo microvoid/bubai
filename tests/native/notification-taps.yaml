@@ -18,4 +18,4 @@ appId: com.bubai.app.dev
 - tapOn:
     point: 50%,10%
 - assertVisible: ".*Preview from a colleague.*"
-- assertVisible: "Thread.*"
+- assertVisible: "话题"

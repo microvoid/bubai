@@ -1,0 +1,61 @@
+appId: com.bubai.app.dev
+---
+- runScript:
+    file: ../session-mode.js
+    env:
+      TARGET: "${FAULT_SERVER}"
+      MODE: normal
+- runScript: find-discussion.js
+- runFlow:
+    file: ../open-workspace.yaml
+    env:
+      OPEN_SERVER: "${FAULT_SERVER}"
+- tapOn:
+    id: channel-row-native-discussion
+- assertVisible: ".*Native review.*"
+- runScript:
+    file: ../session-mode.js
+    env:
+      TARGET: "${FAULT_SERVER}"
+      MODE: offline
+- stopApp
+- launchApp
+- extendedWaitUntil:
+    visible:
+      id: channel-row-general
+    timeout: 20000
+- waitForAnimationToEnd
+- runFlow:
+    file: ../open-app-link.yaml
+    env:
+      LINK: "bubai://channel/${output.discussion}"
+- assertVisible: ".*Native review.*"
+- tapOn:
+    id: message-input
+- evalScript: ${output.offline = 'Queued offline ' + Date.now()}
+- inputText: "${output.offline}"
+- tapOn:
+    id: send-message
+- assertVisible: "等待网络 · 恢复后自动发送"
+- stopApp
+- launchApp
+- extendedWaitUntil:
+    visible:
+      id: channel-row-general
+    timeout: 20000
+- waitForAnimationToEnd
+- runFlow:
+    file: ../open-app-link.yaml
+    env:
+      LINK: "bubai://channel/${output.discussion}"
+- assertVisible: "等待网络 · 恢复后自动发送"
+- runScript:
+    file: ../session-mode.js
+    env:
+      TARGET: "${FAULT_SERVER}"
+      MODE: normal
+- extendedWaitUntil:
+    notVisible: "等待网络 · 恢复后自动发送"
+    timeout: 30000
+- assertVisible: "${output.offline}.*"
+- assertVisible: "已发送.*"

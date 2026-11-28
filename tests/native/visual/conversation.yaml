@@ -1,0 +1,16 @@
+appId: com.bubai.app.dev
+---
+- runFlow: ../open-workspace.yaml
+- waitForAnimationToEnd
+- takeScreenshot: 01-home
+- tapOn:
+    id: channel-row-native-discussion
+- assertVisible: ".*Native review.*"
+- waitForAnimationToEnd
+- takeScreenshot: 02-channel
+- tapOn: "(?s).*条回复.*Preview from a colleague.*"
+- assertVisible:
+    id: message-input
+- assertVisible: "话题"
+- waitForAnimationToEnd
+- takeScreenshot: 03-thread

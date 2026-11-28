@@ -22,4 +22,6 @@ appId: com.bubai.app.dev
       id: channel-row-general
     timeout: 30000
 - tapOn:
+    id: workspace-more
+- tapOn:
     id: settings-tab

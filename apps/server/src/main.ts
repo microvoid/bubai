@@ -2100,7 +2100,7 @@ app.get('/api/uploads/:filename', async (c) => {
       return c.json({ error: 'Forbidden' }, 403);
     }
   }
-  const res = await uploadStorage.get(filename);
+  const res = await uploadStorage.get(filename, c.req.header('Range'));
   if (!res) {
     return c.json({ error: 'File not found' }, 404);
   }

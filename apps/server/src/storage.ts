@@ -13,7 +13,33 @@ export interface UploadStorage {
   driver: 's3' | 'local';
   detail: string;
   put(storedName: string, bytes: ArrayBuffer, mimeType: string): Promise<{ url: string }>;
-  get(storedName: string): Promise<Response | null>;
+  get(storedName: string, range?: string): Promise<Response | null>;
+}
+
+function fileResponse(file: Blob, size: number, type: string, range: string | undefined, driver: UploadStorage['driver']): Response {
+  const headers = new Headers({
+    'Content-Type': type || 'application/octet-stream',
+    'Cache-Control': 'public, max-age=31536000, immutable',
+    'Accept-Ranges': 'bytes',
+  });
+  // Safari probes media with bytes=0-1 before requesting the playback range.
+  // Unrecognized or multipart ranges can use the full representation.
+  const match = range?.trim().match(/^bytes=(\d*)-(\d*)$/i);
+  if (match && (match[1] || match[2])) {
+    const start = match[1] ? Number(match[1]) : Math.max(0, size - Number(match[2]));
+    const end = match[1] && match[2] ? Math.min(Number(match[2]), size - 1) : size - 1;
+    if (start > end || start >= size) {
+      headers.set('Content-Range', `bytes */${size}`);
+      headers.set('Cache-Control', 'no-store');
+      return new Response(null, { status: 416, headers });
+    }
+    headers.set('Content-Range', `bytes ${start}-${end}/${size}`);
+    headers.set('Content-Length', String(end - start + 1));
+    const part = file.slice(start, end + 1);
+    return new Response(driver === 's3' ? part.stream() : part, { status: 206, headers });
+  }
+  headers.set('Content-Length', String(size));
+  return new Response(driver === 's3' ? file.stream() : file, { headers });
 }
 
 export function createUploadStorage(): UploadStorage {
@@ -47,18 +73,12 @@ export function createUploadStorage(): UploadStorage {
           : `/api/uploads/${encodeURIComponent(storedName)}`;
         return { url };
       },
-      async get(storedName) {
+      async get(storedName, range) {
         const key = keyFor(storedName);
         const s3File = client.file(key);
         if (!(await s3File.exists())) return null;
-        const stat = await s3File.stat().catch(() => null);
-        // Stream the object so the response serves its bytes with our headers.
-        return new Response(s3File.stream(), {
-          headers: {
-            'Content-Type': stat?.type || s3File.type || 'application/octet-stream',
-            'Cache-Control': 'public, max-age=31536000, immutable',
-          },
-        });
+        const stat = await s3File.stat();
+        return fileResponse(s3File, stat.size, stat.type || s3File.type, range, 's3');
       },
     };
   }
@@ -74,16 +94,11 @@ export function createUploadStorage(): UploadStorage {
       await Bun.write(fullPath, bytes);
       return { url: `/api/uploads/${encodeURIComponent(storedName)}` };
     },
-    async get(storedName) {
+    async get(storedName, range) {
       const fullPath = path.join(uploadsDir, storedName);
       const bunFile = Bun.file(fullPath);
       if (!(await bunFile.exists())) return null;
-      return new Response(bunFile, {
-        headers: {
-          'Content-Type': bunFile.type || 'application/octet-stream',
-          'Cache-Control': 'public, max-age=31536000, immutable',
-        },
-      });
+      return fileResponse(bunFile, bunFile.size, bunFile.type, range, 'local');
     },
   };
 }

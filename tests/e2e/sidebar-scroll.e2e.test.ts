@@ -33,15 +33,27 @@ function startFixtureApi() {
     role: 'agent',
     status: 'online',
   }));
+  const channels = ['general', 'design'].map((id) => ({
+    id, name: id, kind: 'channel', topic: '', unreadCount: 0, createdAt: 1,
+  }));
+  const history = (channelId: string) => ({
+    messages: Array.from({ length: 50 }, (_, index) => ({
+      id: channelId + '-' + index, channelId, senderId: agents[0]!.id, senderRole: 'agent',
+      content: 'Reply ' + index + ' in ' + channelId, createdAt: Date.now() - (50 - index) * 60000,
+    })),
+    hasMore: false,
+  });
   const responses = new Map<string, unknown>([
     ['/api/instance', { name: 'Bubai', authRequired: false }],
     ['/api/auth/get-session', { user, session: { activeOrganizationId: organization.id } }],
     ['/api/auth/organization/list', [organization]],
-    ['/api/channels/general/messages', { messages: [], hasMore: false }],
+    ['/api/channels/general/messages', history('general')],
+    ['/api/channels/design/messages', history('design')],
+    ['/api/channels/design/members', { members: [] }],
     ['/api/channels/general/members', { members: [] }],
     ['/api/activity', { items: [] }],
     ['/api/bootstrap', {
-      channels: [{ id: "general", name: "general", kind: "channel", topic: "", unreadCount: 0, createdAt: 1 }],
+      channels,
       participants: [...agents, { id: 'archived-agent', name: 'Old Sidebar Agent', role: 'agent', archived: true }],
       sessions: [],
       asks: [],
@@ -226,8 +238,18 @@ test('workspace sidebar scrolls above the account footer and keeps archived agen
     assert.equal(await page.evaluate<number>("document.getElementById('workspace-navigation').clientWidth"), 0);
     await page.evaluate(`document.querySelector('${toggle}').click()`);
     await waitFor(() => page.evaluate<boolean>(`document.getElementById('workspace-navigation').clientWidth >= ${width} - 24`), 'full-width channel list');
-    await page.evaluate(`document.querySelector('[data-channel-id="general"] button').click()`);
+    const channel = width === 320 ? 'design' : 'general';
+    assert.ok(await page.evaluate<boolean>("document.querySelector('[data-message-scroller]').clientHeight > 0"));
+    await waitFor(() => page.evaluate<boolean>(`!!document.querySelector('[data-channel-id="${channel}"] button')`), 'channel list loaded');
+    await page.evaluate(`document.querySelector('[data-channel-id="${channel}"] button').click()`);
     await waitFor(() => page.evaluate<boolean>(`document.querySelector('${toggle}').getAttribute('aria-expanded') === 'false'`), 'channel selection to return to chat');
+    await waitFor(() => page.evaluate<boolean>(`(() => {
+      const row = document.querySelector('[data-message-id="${channel}-49"]');
+      const viewport = document.querySelector('[data-message-scroller]').getBoundingClientRect();
+      if (!row || getComputedStyle(row).visibility !== 'visible') return false;
+      const rect = row.getBoundingClientRect();
+      return rect.height > 0 && rect.bottom <= viewport.bottom + 1 && rect.top >= viewport.top;
+    })()`), 'latest message visible without a scroll gesture');
     await page.evaluate(`document.querySelector('[data-activity-nav]').click()`);
     await waitFor(() => page.evaluate<boolean>(`document.querySelector('[data-pane="activity"]')?.clientWidth >= ${width} - 24`), 'full-width Activity');
     await page.evaluate(`document.querySelector('[data-activity-nav]').click()`);

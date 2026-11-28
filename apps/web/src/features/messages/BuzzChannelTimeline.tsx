@@ -127,10 +127,15 @@ export interface BuzzChannelTimelineProps {
   emptyState: ReactNode;
 }
 
+const EMPTY_MESSAGES: readonly ChatMessage[] = [];
+
 /** Keyed by channelId (matching Buzz's ChannelTimeline) so switching channels
  * cleanly persists the outgoing position and restores the incoming channel's. */
 export function BuzzChannelTimeline(props: BuzzChannelTimelineProps) {
-  return <Timeline key={props.channelId || '__empty__'} {...props} />;
+  // History changes asynchronously after channel selection. Only position the
+  // new timeline once its own rows arrive.
+  const messages = props.messages[0]?.channelId === props.channelId ? props.messages : EMPTY_MESSAGES;
+  return <Timeline key={props.channelId || '__empty__'} {...props} messages={messages} />;
 }
 
 function Timeline({
@@ -176,6 +181,7 @@ function Timeline({
   const jumpingToLatest = useRef(false);
   const jumpTimer = useRef<number | undefined>(undefined);
   const lastScrollTop = useRef(0);
+  const touchStartY = useRef<number | undefined>(undefined);
   const pendingPrependAnchor = useRef<ReadingAnchor | null>(null);
   const placedFocus = useRef<number | undefined>(undefined);
   const focusPending = !!messageFocus && messageFocus.sequence !== placedFocus.current;
@@ -478,8 +484,16 @@ function Timeline({
           }
         }
       }}
-      onTouchStart={() => {
+      onTouchStart={(event) => {
         jumpingToLatest.current = false;
+        touchStartY.current = event.currentTarget.scrollTop > 0 ? event.touches[0]?.clientY : undefined;
+      }}
+      onTouchMove={(event) => {
+        const y = event.touches[0]?.clientY;
+        if (touchStartY.current !== undefined && y !== undefined && y > touchStartY.current + 2) {
+          userScrolled.current = true;
+          follow.current = false;
+        }
       }}
       onKeyDown={(event) => {
         if (event.key === 'ArrowUp' || event.key === 'PageUp' || event.key === 'Home') {
@@ -508,7 +522,8 @@ function Timeline({
           userScrolled.current = true;
         }
         const pos = positionAt(element);
-        if (pos.bottom) {
+        const distance = element.scrollHeight - element.clientHeight - element.scrollTop;
+        if (pos.bottom && (!userScrolled.current || distance <= 1)) {
           follow.current = true;
           userScrolled.current = false;
           savedPosition.current = { bottom: true };
@@ -520,7 +535,7 @@ function Timeline({
         } else {
           follow.current = false;
           savedPosition.current = pos;
-          setJumpVisible(true);
+          setJumpVisible(!pos.bottom);
         }
         lastScrollTop.current = element.scrollTop;
       }}

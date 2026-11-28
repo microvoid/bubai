@@ -124,20 +124,18 @@
     min-height: 44px;
   }
 
+  /* Keep the scroll viewport measurable while the channel picker is open. */
   .columns[data-mobile-nav-open="true"] > .conversationLayout {
-    display: none;
+    visibility: hidden;
   }
 
   .details {
     width: 100%;
   }
-  .columns {
-    container: workspace-conversation / inline-size;
-  }
 
   .conversationLayout {
-    display: contents;
-    container: none;
+    position: absolute;
+    inset: 0;
   }
 }
 

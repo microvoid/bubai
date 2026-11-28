@@ -455,9 +455,11 @@ export function BuzzInlineThreadSheet({
             <section
               ref={scrollerRef}
               data-message-scroller=""
+              data-base-ui-swipe-ignore=""
               className={styles.threadHistory}
               aria-label="Thread messages"
               tabIndex={0}
+              onTouchMove={() => { userScrolledRef.current = true; }}
               onWheel={(event) => {
                 if (event.deltaY < 0) userScrolledRef.current = true;
               }}
@@ -532,7 +534,7 @@ export function BuzzInlineThreadSheet({
               draftScope={JSON.stringify([currentUserId, root?.id, replyTarget?.id])}
               serverHttp={serverHttp}
               onUploadFile={onUploadFile}
-              autoFocus
+              autoFocus={window.matchMedia('(hover: hover) and (pointer: fine)').matches}
               replyContext={
                 replyTarget
                   ? {
